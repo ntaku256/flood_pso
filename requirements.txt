@@ -1,0 +1,7 @@
+numpy
+scipy
+matplotlib
+lxml
+Pillow
+opencv-python
+pyswarms
