@@ -167,7 +167,8 @@ def downsample(dem_info: dict, factor: int) -> dict:
 
 if __name__ == "__main__":
     import sys
-    dem_dir = sys.argv[1] if len(sys.argv) > 1 else r"C:\Users\moriken\Documents\ntaku\特別実験\資料\地形データ\FG-GML-503561-DEM5A-20250620"
+    default_dir = Path(__file__).resolve().parent.parent.parent / "kennkyuu20260114" / "地形データ" / "FG-GML-503561-DEM5A-20250620"
+    dem_dir = sys.argv[1] if len(sys.argv) > 1 else str(default_dir)
     info = mosaic_tiles(dem_dir)
     dem = info["dem"]
     valid = dem[~np.isnan(dem)]

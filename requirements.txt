@@ -5,3 +5,4 @@ lxml
 Pillow
 opencv-python
 pyswarms
+nbtlib

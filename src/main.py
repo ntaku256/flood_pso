@@ -28,10 +28,15 @@ from visualize import plot_dem, plot_flood_overlay, plot_pso_history, plot_inund
 
 # ─────────────────────────────────────────────
 # パス設定
+# 環境変数 FLOOD_PSO_DEM_DIR があればそれを使う。
+# なければ ../kennkyuu20260114/地形データ/FG-GML-503561-DEM5A-20250620 を既定とする。
 # ─────────────────────────────────────────────
-DATA_ROOT = Path(r"C:\Users\moriken\Documents\ntaku\特別実験\資料\地形データ")
-DEM_DIR   = DATA_ROOT / "FG-GML-503561-DEM5A-20250620"
-OUT_DIR   = Path(__file__).parent.parent / "results"
+import os
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DEM_DIR = REPO_ROOT.parent / "kennkyuu20260114" / "地形データ" / "FG-GML-503561-DEM5A-20250620"
+DEM_DIR  = Path(os.environ.get("FLOOD_PSO_DEM_DIR", str(DEFAULT_DEM_DIR)))
+OUT_DIR  = REPO_ROOT / "results"
 OUT_DIR.mkdir(exist_ok=True)
 
 # ─────────────────────────────────────────────

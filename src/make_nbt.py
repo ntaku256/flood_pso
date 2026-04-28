@@ -10,6 +10,7 @@ make_nbt.py
     python make_nbt.py --width 3000 --h_res 5 --v_exag 3
 """
 
+import os
 import sys
 import argparse
 from pathlib import Path
@@ -25,8 +26,10 @@ from nbt_export import estimate_size, export_to_nbt
 # ─────────────────────────────────────────────────────────────
 # 設定
 # ─────────────────────────────────────────────────────────────
-DEM_DIR = r"C:\Users\moriken\Documents\ntaku\特別実験\資料\地形データ\FG-GML-503561-DEM5A-20250620"
-OUT_DIR = Path(__file__).parent.parent / "results" / "nbt"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DEM_DIR = REPO_ROOT.parent / "kennkyuu20260114" / "地形データ" / "FG-GML-503561-DEM5A-20250620"
+DEM_DIR = os.environ.get("FLOOD_PSO_DEM_DIR", str(DEFAULT_DEM_DIR))
+OUT_DIR = REPO_ROOT / "results" / "nbt"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # 御坊市中心 (日高川河口付近)
@@ -49,6 +52,8 @@ PRESETS = [
     ("sm_5m",        2500,  2500,    5,    1,    3),   # 5m/block 2.5km四方
     ("md_5m",        5000,  5000,    5,    1,    2),   # 5m/block 5km四方
     ("lg_10m",      10000, 10000,   10,    1,    2),   # 10m/block 10km四方
+    ("xl_5m",       10000, 10000,    5,    1,    2),   # 5m/block 10km四方（メモリ16GB+想定）
+    ("huge_5m",     15000, 15000,    5,    1,    2),   # 5m/block 15km四方（メモリ32GB+想定）
 ]
 
 
@@ -120,15 +125,28 @@ def main():
                     args.width or 3000, args.depth or 3000,
                     args.h_res, args.v_res, args.v_exag)]
 
+    meta = {
+        "method": "baseline_2d_pso",
+        "description": "Baseline 2-variable PSO calibration (water_level + sigma)",
+        "water_level_m": float(WATER_LEVEL),
+        "sigma_cells":   float(SIGMA),
+        "river_bbox":    [RIVER_BBOX["lat_min"], RIVER_BBOX["lat_max"],
+                          RIVER_BBOX["lon_min"], RIVER_BBOX["lon_max"]],
+        "dem_source":    "FG-GML-503561-DEM5A-20250620 (国土地理院 5m DEM)",
+        "study_area":    "Gobo city / Hidaka river, Wakayama, Japan",
+    }
+
     for name, w, d, hr, vr, ve in targets:
         print(f"\n--- 変換中: {name} ({w}m×{d}m, {hr}m/block, v×{ve}) ---")
         out = str(OUT_DIR / f"gobo_{name}.nbt")
+        meta_run = dict(meta)
+        meta_run["preset"] = name
         size, n_blocks = export_to_nbt(
             dem_info, inundation,
             lat_center=LAT_CENTER, lon_center=LON_CENTER,
             width_m=w, depth_m=d,
             h_res=hr, v_res=vr, v_exag=ve,
-            out_path=out,
+            out_path=out, meta=meta_run,
         )
         print(f"  完了: {out}")
 

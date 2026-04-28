@@ -19,7 +19,7 @@ flood_sim.py
 """
 
 import numpy as np
-from scipy.ndimage import label as nd_label, gaussian_filter
+from scipy.ndimage import label as nd_label, gaussian_filter, zoom as nd_zoom
 
 
 # ─────────────────────────────────────────────────────────────
@@ -109,6 +109,71 @@ def simulate_flood(dem: np.ndarray, source_mask: np.ndarray,
 
 
 # ─────────────────────────────────────────────────────────────
+# 高次元版：ブロック単位の水位補正マップ Δh(x,y) をサポート
+# ─────────────────────────────────────────────────────────────
+
+def upsample_dh(dh_map: np.ndarray, target_shape: tuple) -> np.ndarray:
+    """
+    K×K の補正マップをバイリニア補間で target_shape (H, W) にアップサンプル。
+    """
+    K_y, K_x = dh_map.shape
+    H, W = target_shape
+    zoom_y = H / K_y
+    zoom_x = W / K_x
+    return nd_zoom(dh_map.astype(np.float64), zoom=(zoom_y, zoom_x), order=1, mode="nearest")
+
+
+def simulate_flood_hd(dem: np.ndarray, source_mask: np.ndarray,
+                      water_level_global: float,
+                      dh_map: np.ndarray,
+                      sigma: float = 0.0,
+                      connectivity: int = 2) -> np.ndarray:
+    """
+    高次元版バスタブ+連結成分洪水シミュレーション。
+    水位は water_level_global + Δh(x,y) として空間分布する。
+
+    Parameters
+    ----------
+    dem                : 標高配列 [m]
+    source_mask        : 水源セル
+    water_level_global : 大局水位 [m]
+    dh_map             : K×K のブロック単位水位補正 [m]
+    sigma              : DEM 平滑化（既存と同じ）
+    """
+    land = np.where(np.isnan(dem), 9999.0, dem).astype(np.float64)
+    if sigma > 0:
+        land_smooth = gaussian_filter(land, sigma=sigma)
+    else:
+        land_smooth = land
+
+    dh_full = upsample_dh(dh_map, dem.shape)
+    # アップサンプル誤差で形状ズレが生じうるのでクロップ
+    dh_full = dh_full[:dem.shape[0], :dem.shape[1]]
+    if dh_full.shape != dem.shape:
+        # 不足分はゼロパディング
+        pad_y = dem.shape[0] - dh_full.shape[0]
+        pad_x = dem.shape[1] - dh_full.shape[1]
+        dh_full = np.pad(dh_full, ((0, max(0, pad_y)), (0, max(0, pad_x))), mode="edge")
+
+    water_field = water_level_global + dh_full
+    candidate = land_smooth < water_field
+
+    struct = np.ones((3, 3), dtype=int) if connectivity == 2 else None
+    labeled, _ = nd_label(candidate, structure=struct)
+
+    source_valid = source_mask & candidate
+    if not np.any(source_valid):
+        return np.zeros_like(dem, dtype=np.float32)
+
+    flood_labels = set(labeled[source_valid].tolist())
+    flood_labels.discard(0)
+
+    flood_mask = np.isin(labeled, list(flood_labels))
+    inundation = np.where(flood_mask, water_field - land, 0.0)
+    return np.maximum(inundation, 0.0).astype(np.float32)
+
+
+# ─────────────────────────────────────────────────────────────
 # 参照マスク・評価指標
 # ─────────────────────────────────────────────────────────────
 
@@ -131,6 +196,23 @@ def iou_loss(sim_inundation: np.ndarray, ref_mask: np.ndarray,
     if union == 0:
         return 1.0
     return 1.0 - intersection / union
+
+
+def depth_loss(sim_inundation: np.ndarray, gt_inundation: np.ndarray,
+               sim_threshold: float = 0.05) -> float:
+    """
+    浸水深ベースの損失。マスク IoU と異なり、各ブロックの局所水位差にも感度を持つ。
+    sim_mask ∪ gt_mask 上での平均絶対誤差 (MAE) を返す。
+    両方とも非浸水のセルは集計しない（全領域0で割られるのを避けるため）。
+    """
+    sim_mask = sim_inundation > sim_threshold
+    gt_mask  = gt_inundation > sim_threshold
+    union = sim_mask | gt_mask
+    n = int(np.sum(union))
+    if n == 0:
+        return 0.0
+    diff = np.abs(sim_inundation - gt_inundation)
+    return float(np.sum(diff[union]) / n)
 
 
 # ─────────────────────────────────────────────────────────────

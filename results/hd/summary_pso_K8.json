@@ -1,0 +1,12 @@
+{
+  "K": 8,
+  "D": 65,
+  "method": "standard_pso",
+  "n_particles": 30,
+  "n_iter": 100,
+  "water_true": 5.0,
+  "best_water": 5.188037148043747,
+  "best_iou": 0.9902534113060428,
+  "dh_rmse": 0.9387864902648839,
+  "elapsed_s": 8.954878091812134
+}

@@ -23,6 +23,8 @@ DEM + 洪水シミュレーション結果 → Minecraft Structure NBT (.nbt) �
 
 import gzip
 import struct
+import datetime as _dt
+import subprocess as _sp
 import numpy as np
 from pathlib import Path
 import nbtlib
@@ -218,30 +220,92 @@ def dem_to_blocks(dem_patch: np.ndarray,
 # NBT Structure ファイル書き出し
 # ─────────────────────────────────────────────────────────────
 
-def write_nbt_structure(blocks: list, size: list, out_path: str):
+def _git_revision() -> str:
+    try:
+        out = _sp.run(
+            ["git", "-C", str(Path(__file__).resolve().parent.parent),
+             "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, check=False, timeout=2,
+        )
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def build_meta_compound(meta: dict) -> nbtlib.Compound:
+    """
+    Python dict → nbtlib.Compound 変換（flood_pso_meta 用）。
+    対応型: str, int, float, bool, list (numeric/str), dict (再帰), np.ndarray (Float List 化)。
+    """
+    out = {}
+    for k, v in meta.items():
+        if v is None:
+            continue
+        if isinstance(v, dict):
+            out[k] = build_meta_compound(v)
+        elif isinstance(v, np.ndarray):
+            arr = v.astype(np.float64).flatten().tolist()
+            out[k] = nbtlib.List[nbtlib.Float]([nbtlib.Float(x) for x in arr])
+            out[k + "_shape"] = nbtlib.List[nbtlib.Int]([nbtlib.Int(s) for s in v.shape])
+        elif isinstance(v, bool):
+            out[k] = nbtlib.Byte(1 if v else 0)
+        elif isinstance(v, int):
+            out[k] = nbtlib.Int(v)
+        elif isinstance(v, float):
+            out[k] = nbtlib.Double(v)
+        elif isinstance(v, str):
+            out[k] = nbtlib.String(v)
+        elif isinstance(v, (list, tuple)):
+            if len(v) == 0:
+                out[k] = nbtlib.List[nbtlib.String]([])
+            elif all(isinstance(x, str) for x in v):
+                out[k] = nbtlib.List[nbtlib.String]([nbtlib.String(x) for x in v])
+            elif all(isinstance(x, (int, np.integer)) for x in v):
+                out[k] = nbtlib.List[nbtlib.Int]([nbtlib.Int(int(x)) for x in v])
+            else:
+                out[k] = nbtlib.List[nbtlib.Double]([nbtlib.Double(float(x)) for x in v])
+        else:
+            out[k] = nbtlib.String(str(v))
+    return nbtlib.Compound(out)
+
+
+def write_nbt_structure(blocks: list, size: list, out_path: str,
+                        meta: dict | None = None):
     """
     Minecraft Structure NBT 形式でファイルを書き出す。
     Minecraft 1.17+ の Structure Block 形式。
+
+    meta が与えられたら ``flood_pso_meta`` キーとして埋め込む（任意のkey-value辞書）。
     """
     palette_list = nbtlib.List[nbtlib.Compound]([PALETTE[k] for k in PALETTE_LIST_KEYS])
     blocks_list  = nbtlib.List[nbtlib.Compound](blocks)
     size_list    = nbtlib.List[nbtlib.Int]([nbtlib.Int(s) for s in size])
 
-    structure = nbtlib.Compound({
+    root = {
         "DataVersion": nbtlib.Int(4671),   # Minecraft 1.21.4相当
         "author":      nbtlib.String("flood_pso"),
         "size":        size_list,
         "palette":     palette_list,
         "blocks":      blocks_list,
         "entities":    nbtlib.List[nbtlib.Compound]([]),
-    })
+    }
 
-    nbt_file = nbtlib.File(structure)
+    if meta is not None:
+        full_meta = dict(meta)
+        full_meta.setdefault("schema_version", 1)
+        full_meta.setdefault("generator", "flood_pso/nbt_export.py")
+        full_meta.setdefault("timestamp_utc",
+                             _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z")
+        full_meta.setdefault("git_revision", _git_revision())
+        root["flood_pso_meta"] = build_meta_compound(full_meta)
+
+    nbt_file = nbtlib.File(nbtlib.Compound(root))
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     nbt_file.save(str(out_path), gzipped=True)
     size_mb = out_path.stat().st_size / 1e6
-    print(f"Saved: {out_path} ({size_mb:.1f} MB, {len(blocks):,} blocks)")
+    print(f"Saved: {out_path} ({size_mb:.1f} MB, {len(blocks):,} blocks)"
+          + (" [+meta]" if meta is not None else ""))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -253,7 +317,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   width_m: float = 5000.0, depth_m: float = 5000.0,
                   h_res: float = 5.0,
                   v_res: float = 1.0, v_exag: float = 2.0,
-                  out_path: str = "output.nbt"):
+                  out_path: str = "output.nbt",
+                  meta: dict | None = None):
     """
     DEMと浸水マップの指定範囲をMinecraft NBT Structureに変換する。
 
@@ -268,6 +333,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
     v_res      : 1ブロックの垂直サイズ [m]
     v_exag     : 垂直誇張倍率
     out_path   : 出力 .nbt ファイルパス
+    meta       : NBT に埋め込むメタデータ辞書（任意）。
+                 method, K, D, water_level, sigma, dh_map(np.ndarray), loss, iou, seed,
+                 dem_source, bbox, n_evals, elapsed_s 等を入れる想定。
     """
     dem = dem_info["dem"]
     lat_max = dem_info["lat_max"]
@@ -302,5 +370,19 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                                   v_res=v_res, v_exag=v_exag)
     print(f"Structure size: {size[0]} x {size[1]} x {size[2]} blocks ({len(blocks):,} block entries)")
 
-    write_nbt_structure(blocks, size, out_path)
+    # メタデータに描画範囲・解像度情報を補足
+    full_meta = None
+    if meta is not None:
+        full_meta = dict(meta)
+        full_meta.setdefault("center_lat", float(lat_center))
+        full_meta.setdefault("center_lon", float(lon_center))
+        full_meta.setdefault("width_m", float(width_m))
+        full_meta.setdefault("depth_m", float(depth_m))
+        full_meta.setdefault("h_res_m_per_block", float(h_res))
+        full_meta.setdefault("v_res_m_per_block", float(v_res))
+        full_meta.setdefault("v_exag", float(v_exag))
+        full_meta.setdefault("structure_size_xyz", [int(size[0]), int(size[1]), int(size[2])])
+        full_meta.setdefault("n_block_entries", int(len(blocks)))
+
+    write_nbt_structure(blocks, size, out_path, meta=full_meta)
     return size, len(blocks)
