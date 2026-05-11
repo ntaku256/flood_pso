@@ -127,6 +127,7 @@ def simulate_flood_hd(dem: np.ndarray, source_mask: np.ndarray,
                       water_level_global: float,
                       dh_map: np.ndarray,
                       sigma: float = 0.0,
+                      sigma_map: np.ndarray = None,
                       connectivity: int = 2) -> np.ndarray:
     """
     高次元版バスタブ+連結成分洪水シミュレーション。
@@ -138,10 +139,30 @@ def simulate_flood_hd(dem: np.ndarray, source_mask: np.ndarray,
     source_mask        : 水源セル
     water_level_global : 大局水位 [m]
     dh_map             : K×K のブロック単位水位補正 [m]
-    sigma              : DEM 平滑化（既存と同じ）
+    sigma              : DEM 平滑化（既存と同じ）。sigma_map が None のときのみ参照。
+    sigma_map          : K_s×K_s の局所平滑化 sigma マップ（None なら既存挙動）。
+                         非 None の場合、5 段階 sigma の合成で場所別平滑化を近似する
+                         （sigma_levels = [0, 0.5, 1.0, 2.0, 4.0]、各ピクセルで最近傍を採用）。
     """
     land = np.where(np.isnan(dem), 9999.0, dem).astype(np.float64)
-    if sigma > 0:
+    if sigma_map is not None:
+        # K_s × K_s をフル解像度にアップサンプル
+        sigma_full = upsample_dh(sigma_map, dem.shape)
+        sigma_full = sigma_full[:dem.shape[0], :dem.shape[1]]
+        if sigma_full.shape != dem.shape:
+            pad_y = dem.shape[0] - sigma_full.shape[0]
+            pad_x = dem.shape[1] - sigma_full.shape[1]
+            sigma_full = np.pad(sigma_full, ((0, max(0, pad_y)), (0, max(0, pad_x))), mode="edge")
+        # 5 段階 sigma で gaussian_filter、各ピクセルで最近傍 lvl を選択
+        sigma_levels = np.array([0.0, 0.5, 1.0, 2.0, 4.0], dtype=np.float64)
+        stack = np.stack([
+            land.copy() if s == 0.0 else gaussian_filter(land, sigma=float(s))
+            for s in sigma_levels
+        ], axis=0)  # shape: (n_levels, H, W)
+        idx = np.argmin(np.abs(sigma_full[None, :, :] - sigma_levels[:, None, None]), axis=0)
+        H, W = land.shape
+        land_smooth = stack[idx, np.arange(H)[:, None], np.arange(W)[None, :]]
+    elif sigma > 0:
         land_smooth = gaussian_filter(land, sigma=sigma)
     else:
         land_smooth = land

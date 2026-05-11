@@ -7,6 +7,11 @@ benchmark.py
   - 評価回数バジェットを揃えて両手法を実行
   - best_cost の収束履歴を「評価回数」軸でプロット
   - Δh RMSE / IoU / 計算時間 を表に出力
+
+環境変数:
+  FLOOD_PSO_LOSS=iou|depth          損失関数の選択（default: depth）
+  FLOOD_PSO_SIGMA_MAP_KS=<int>      0=既存 (scalar sigma)、>0 で sigma_map (K_s × K_s)
+                                     を最適化対象に追加し、D = 1 + K² + K_s²
 """
 
 import sys
@@ -35,6 +40,9 @@ from pyswarms.single import GlobalBestPSO
 # ─────────────────────────────────────────────────────────────
 LOSS_KIND = os.environ.get("FLOOD_PSO_LOSS", "depth")  # "depth" or "iou"
 
+# sigma_map モード（>0 で sigma_map K_s×K_s を最適化対象に追加）
+SIGMA_MAP_KS = int(os.environ.get("FLOOD_PSO_SIGMA_MAP_KS", "0"))
+
 
 def _make_loss_fn(gt_inundation, gt_mask):
     if LOSS_KIND == "iou":
@@ -61,9 +69,7 @@ SIGMA = 0.5
 # ─────────────────────────────────────────────────────────────
 # 各 K のグループサイズと粒子数を選定
 # ─────────────────────────────────────────────────────────────
-# D = 1 + K*K
-# s は D の約数を選ぶ（あるいは D を s で割り切れるよう微調整）
-# ここでは D を s で割り切れるように s を選択
+# D = 1 + K*K + (K_s*K_s if SIGMA_MAP_KS > 0)
 def choose_group_size(D: int) -> int:
     """D に応じてグループサイズを選択（CCPSO2 推奨値の精神に沿った発見的選択）。
     s が小さいほど分割統治の粒度が細かくなる。素数Dでも可（最終グループが小さくなるだけ）。"""
@@ -85,11 +91,12 @@ class EvalCountedObjective:
     """
     pyswarms 用ラッパ。各イテレーション後の評価累計と best_cost を記録する。
     損失は LOSS_KIND（depth or iou）に応じて切替。
+    ks > 0 のとき、x[1+K²:1+K²+ks²] を sigma_map (K_s × K_s) として渡す。
     """
-    def __init__(self, dem, source, gt_inundation, gt_mask, K, sigma):
+    def __init__(self, dem, source, gt_inundation, gt_mask, K, sigma, ks=0):
         self.dem = dem; self.source = source
         self.gt_inundation = gt_inundation; self.gt_mask = gt_mask
-        self.K = K; self.sigma = sigma
+        self.K = K; self.sigma = sigma; self.ks = ks
         self._loss = _make_loss_fn(gt_inundation, gt_mask)
         self.n_evals = 0
         self.eval_log: list[tuple[int, float]] = []
@@ -102,9 +109,15 @@ class EvalCountedObjective:
             x = X[i]
             water = float(x[0])
             dh = x[1:1 + self.K * self.K].reshape(self.K, self.K)
-            sim = simulate_flood_hd(self.dem, self.source,
-                                    water_level_global=water,
-                                    dh_map=dh, sigma=self.sigma)
+            if self.ks > 0:
+                sm = x[1 + self.K * self.K : 1 + self.K * self.K + self.ks * self.ks].reshape(self.ks, self.ks)
+                sim = simulate_flood_hd(self.dem, self.source,
+                                        water_level_global=water,
+                                        dh_map=dh, sigma_map=sm)
+            else:
+                sim = simulate_flood_hd(self.dem, self.source,
+                                        water_level_global=water,
+                                        dh_map=dh, sigma=self.sigma)
             losses[i] = self._loss(sim)
         self.n_evals += n
         m = float(np.min(losses))
@@ -120,10 +133,10 @@ class EvalCountedObjective:
 
 class CCPSO2EvalLogger:
     """CCPSO2 の objective_full をラップして評価ログを取る。"""
-    def __init__(self, dem, source, gt_inundation, gt_mask, K, sigma):
+    def __init__(self, dem, source, gt_inundation, gt_mask, K, sigma, ks=0):
         self.dem = dem; self.source = source
         self.gt_inundation = gt_inundation; self.gt_mask = gt_mask
-        self.K = K; self.sigma = sigma
+        self.K = K; self.sigma = sigma; self.ks = ks
         self._loss = _make_loss_fn(gt_inundation, gt_mask)
         self.n_evals = 0
         self.eval_log: list[tuple[int, float]] = []
@@ -132,9 +145,15 @@ class CCPSO2EvalLogger:
     def __call__(self, x: np.ndarray) -> float:
         water = float(x[0])
         dh = x[1:1 + self.K * self.K].reshape(self.K, self.K)
-        sim = simulate_flood_hd(self.dem, self.source,
-                                water_level_global=water,
-                                dh_map=dh, sigma=self.sigma)
+        if self.ks > 0:
+            sm = x[1 + self.K * self.K : 1 + self.K * self.K + self.ks * self.ks].reshape(self.ks, self.ks)
+            sim = simulate_flood_hd(self.dem, self.source,
+                                    water_level_global=water,
+                                    dh_map=dh, sigma_map=sm)
+        else:
+            sim = simulate_flood_hd(self.dem, self.source,
+                                    water_level_global=water,
+                                    dh_map=dh, sigma=self.sigma)
         c = self._loss(sim)
         self.n_evals += 1
         if c < self._best:
@@ -147,9 +166,10 @@ class CCPSO2EvalLogger:
 # 1 ケース (K, seed) を両手法で実行
 # ─────────────────────────────────────────────────────────────
 
-def run_one_case(dem, source, K: int, budget: int, seed: int) -> dict:
-    print(f"\n--- K={K}  D={1+K*K}  budget={budget}  seed={seed} ---")
-    D = 1 + K * K
+def run_one_case(dem, source, K: int, budget: int, seed: int, ks: int = 0) -> dict:
+    D = 1 + K * K + ks * ks
+    extra = f"  ks={ks}  D_sigma={ks*ks}" if ks > 0 else ""
+    print(f"\n--- K={K}  D={D}  budget={budget}  seed={seed}{extra} ---")
 
     # 合成 ground truth（K だけに依存し、全手法・全シードで共通）
     gt = make_synthetic_ground_truth(
@@ -161,12 +181,16 @@ def run_one_case(dem, source, K: int, budget: int, seed: int) -> dict:
     # 探索範囲
     lb = np.empty(D); ub = np.empty(D)
     lb[0] = 3.0; ub[0] = 8.0
-    lb[1:] = -2.0; ub[1:] = 2.0
+    lb[1:1 + K * K] = -2.0; ub[1:1 + K * K] = 2.0
+    if ks > 0:
+        # sigma_map の範囲（flood_sim の sigma_levels = [0, 0.5, 1, 2, 4] に整合）
+        lb[1 + K * K:] = 0.0
+        ub[1 + K * K:] = 3.0
 
     # ── 1) 標準 PSO ───────────────────────────────────────
     n_p_pso = 30
     n_iter_pso = max(1, budget // n_p_pso)
-    obj_pso = EvalCountedObjective(dem, source, gt["gt_inundation"], gt["gt_mask"], K, SIGMA)
+    obj_pso = EvalCountedObjective(dem, source, gt["gt_inundation"], gt["gt_mask"], K, SIGMA, ks=ks)
 
     np.random.seed(seed)
     optimizer = GlobalBestPSO(
@@ -187,8 +211,12 @@ def run_one_case(dem, source, K: int, budget: int, seed: int) -> dict:
     pso_dh = best_pos_pso[1:1 + K*K].reshape(K, K)
     pso_w  = float(best_pos_pso[0])
     pso_dh_rmse = float(np.linalg.norm(pso_dh - gt["dh_true"]) / np.sqrt(K * K))
-    # 補助指標としてマスク IoU も計算
-    sim_pso = simulate_flood_hd(dem, source, pso_w, pso_dh, sigma=SIGMA)
+    if ks > 0:
+        pso_sm = best_pos_pso[1 + K*K : 1 + K*K + ks*ks].reshape(ks, ks)
+        sim_pso = simulate_flood_hd(dem, source, pso_w, pso_dh, sigma_map=pso_sm)
+    else:
+        pso_sm = None
+        sim_pso = simulate_flood_hd(dem, source, pso_w, pso_dh, sigma=SIGMA)
     pso_iou = 1.0 - iou_loss(sim_pso, gt["gt_mask"])
     print(f"  PSO    : loss={best_cost_pso:.4f}  IoU={pso_iou:.4f}  Δh_RMSE={pso_dh_rmse:.3f}  "
           f"evals={obj_pso.n_evals}  t={elapsed_pso:.1f}s")
@@ -197,7 +225,7 @@ def run_one_case(dem, source, K: int, budget: int, seed: int) -> dict:
     s = choose_group_size(D)
     N_cc = 20
     cycles = max(1, budget // (N_cc * (D // s)))
-    obj_cc = CCPSO2EvalLogger(dem, source, gt["gt_inundation"], gt["gt_mask"], K, SIGMA)
+    obj_cc = CCPSO2EvalLogger(dem, source, gt["gt_inundation"], gt["gt_mask"], K, SIGMA, ks=ks)
 
     cc = CCPSO2(obj_cc, dim=D, n_particles=N_cc, group_size=s,
                 bounds=(lb, ub), p_cauchy=0.5, seed=seed, verbose=False)
@@ -209,13 +237,18 @@ def run_one_case(dem, source, K: int, budget: int, seed: int) -> dict:
     cc_dh = res_cc["best_x"][1:1 + K*K].reshape(K, K)
     cc_w  = float(res_cc["best_x"][0])
     cc_dh_rmse = float(np.linalg.norm(cc_dh - gt["dh_true"]) / np.sqrt(K * K))
-    sim_cc = simulate_flood_hd(dem, source, cc_w, cc_dh, sigma=SIGMA)
+    if ks > 0:
+        cc_sm = res_cc["best_x"][1 + K*K : 1 + K*K + ks*ks].reshape(ks, ks)
+        sim_cc = simulate_flood_hd(dem, source, cc_w, cc_dh, sigma_map=cc_sm)
+    else:
+        cc_sm = None
+        sim_cc = simulate_flood_hd(dem, source, cc_w, cc_dh, sigma=SIGMA)
     cc_iou = 1.0 - iou_loss(sim_cc, gt["gt_mask"])
     print(f"  CCPSO2 : loss={res_cc['best_cost']:.4f}  IoU={cc_iou:.4f}  Δh_RMSE={cc_dh_rmse:.3f}  "
           f"evals={obj_cc.n_evals}  t={res_cc['elapsed_s']:.1f}s  s={s}  cycles={cycles}")
 
-    return {
-        "K": K, "D": D, "seed": seed, "budget": budget,
+    out = {
+        "K": K, "D": D, "ks": ks, "seed": seed, "budget": budget,
         "loss_kind": LOSS_KIND,
         "pso": {
             "n_p": n_p_pso, "n_iter": n_iter_pso,
@@ -224,6 +257,7 @@ def run_one_case(dem, source, K: int, budget: int, seed: int) -> dict:
             "n_evals": obj_pso.n_evals, "elapsed_s": elapsed_pso,
             "cum_evals": pso_cum_evals, "best_curve": list(map(float, pso_best_curve)),
             "best_dh": pso_dh.tolist(),
+            "best_sigma_map": pso_sm.tolist() if pso_sm is not None else None,
         },
         "ccpso2": {
             "s": s, "N": N_cc, "cycles": cycles,
@@ -232,12 +266,14 @@ def run_one_case(dem, source, K: int, budget: int, seed: int) -> dict:
             "n_evals": obj_cc.n_evals, "elapsed_s": res_cc["elapsed_s"],
             "cum_evals": cc_cum_evals, "best_curve": list(map(float, cc_best_curve)),
             "best_dh": cc_dh.tolist(),
+            "best_sigma_map": cc_sm.tolist() if cc_sm is not None else None,
         },
         "gt": {
             "water_true": WATER_TRUE,
             "dh_true": gt["dh_true"].tolist(),
         },
     }
+    return out
 
 
 # ─────────────────────────────────────────────────────────────
@@ -246,6 +282,7 @@ def run_one_case(dem, source, K: int, budget: int, seed: int) -> dict:
 
 def plot_convergence(case: dict, save_path: Path):
     K = case["K"]; D = case["D"]
+    ks = case.get("ks", 0)
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.plot(case["pso"]["cum_evals"], case["pso"]["best_curve"],
             "-", lw=1.4, label=f"Standard PSO (n_p={case['pso']['n_p']})", color="C0")
@@ -253,7 +290,10 @@ def plot_convergence(case: dict, save_path: Path):
             "-", lw=1.4, label=f"CCPSO2 (s={case['ccpso2']['s']}, N={case['ccpso2']['N']})", color="C1")
     ax.set_xlabel("function evaluations")
     ax.set_ylabel(f"best cost ({case['loss_kind']})")
-    ax.set_title(f"K={K}, D={D}  seed={case['seed']}  budget={case['budget']}  loss={case['loss_kind']}")
+    title = f"K={K}, D={D}  seed={case['seed']}  budget={case['budget']}  loss={case['loss_kind']}"
+    if ks > 0:
+        title += f"  ks={ks}"
+    ax.set_title(title)
     ax.grid(True, alpha=0.3)
     ax.legend()
     plt.tight_layout()
@@ -279,6 +319,26 @@ def plot_dh_compare(case: dict, save_path: Path):
     plt.close()
 
 
+def plot_sigma_map_compare(case: dict, save_path: Path):
+    """sigma_map モード時のみ、PSO/CCPSO2 が見つけた sigma_map を比較プロット。"""
+    if case.get("ks", 0) == 0:
+        return
+    pso_sm = case["pso"].get("best_sigma_map")
+    cc_sm  = case["ccpso2"].get("best_sigma_map")
+    if pso_sm is None or cc_sm is None:
+        return
+    pso_sm = np.array(pso_sm); cc_sm = np.array(cc_sm)
+    vmax = max(pso_sm.max(), cc_sm.max(), 3.0)
+    fig, axes = plt.subplots(1, 2, figsize=(8, 3.6))
+    axes[0].imshow(pso_sm, cmap="viridis", vmin=0, vmax=vmax)
+    axes[0].set_title(f"PSO sigma_map (mean={pso_sm.mean():.2f})")
+    im = axes[1].imshow(cc_sm, cmap="viridis", vmin=0, vmax=vmax)
+    axes[1].set_title(f"CCPSO2 sigma_map (mean={cc_sm.mean():.2f})")
+    plt.colorbar(im, ax=axes, fraction=0.04)
+    plt.savefig(save_path, dpi=120)
+    plt.close()
+
+
 # ─────────────────────────────────────────────────────────────
 # main
 # ─────────────────────────────────────────────────────────────
@@ -286,6 +346,8 @@ def plot_dh_compare(case: dict, save_path: Path):
 def main():
     print("=" * 66)
     print("Standard PSO vs CCPSO2  on flood-PSO HD calibration")
+    if SIGMA_MAP_KS > 0:
+        print(f"  [sigma_map mode]  K_s = {SIGMA_MAP_KS}  (+{SIGMA_MAP_KS*SIGMA_MAP_KS} dims)")
     print("=" * 66)
 
     print("\n[setup] Loading DEM...")
@@ -302,18 +364,22 @@ def main():
     K_VALUES = [4, 8, 16]
     BUDGET   = 5000
     SEEDS    = [0, 1, 2]
+    KS       = SIGMA_MAP_KS
 
     rows_per_K: dict = {K: [] for K in K_VALUES}
+    suffix = f"_ks{KS}" if KS > 0 else ""
     for K in K_VALUES:
         cases_for_K = []
         for sd in SEEDS:
-            case = run_one_case(dem, source, K=K, budget=BUDGET, seed=sd)
+            case = run_one_case(dem, source, K=K, budget=BUDGET, seed=sd, ks=KS)
             cases_for_K.append(case)
             rows_per_K[K].append(case)
-            (OUT_DIR / f"case_K{K}_seed{sd}.json").write_text(json.dumps(case, indent=2, ensure_ascii=False))
+            (OUT_DIR / f"case_K{K}{suffix}_seed{sd}.json").write_text(json.dumps(case, indent=2, ensure_ascii=False))
         # 代表 (seed=0) のグラフ
-        plot_convergence(cases_for_K[0], OUT_DIR / f"conv_K{K}.png")
-        plot_dh_compare(cases_for_K[0],  OUT_DIR / f"dh_K{K}.png")
+        plot_convergence(cases_for_K[0], OUT_DIR / f"conv_K{K}{suffix}.png")
+        plot_dh_compare(cases_for_K[0],  OUT_DIR / f"dh_K{K}{suffix}.png")
+        if KS > 0:
+            plot_sigma_map_compare(cases_for_K[0], OUT_DIR / f"sigma_K{K}{suffix}.png")
 
     # 集計
     rows = []
@@ -332,7 +398,7 @@ def main():
         pso_t_m,    _ = stat("pso", "elapsed_s")
         cc_t_m,     _ = stat("ccpso2", "elapsed_s")
         rows.append({
-            "K": K, "D": D, "n_seeds": len(SEEDS),
+            "K": K, "D": D, "ks": KS, "n_seeds": len(SEEDS),
             "PSO_loss_mean": pso_loss_m, "PSO_loss_std": pso_loss_s,
             "PSO_iou_mean": pso_iou_m, "PSO_dhRMSE_mean": pso_rmse_m,
             "PSO_t_mean": pso_t_m,
@@ -344,7 +410,10 @@ def main():
 
     # サマリー表
     print("\n" + "=" * 84)
-    print(f"Summary  loss_kind={LOSS_KIND}  n_seeds={len(SEEDS)}  budget={BUDGET}")
+    title = f"Summary  loss_kind={LOSS_KIND}  n_seeds={len(SEEDS)}  budget={BUDGET}"
+    if KS > 0:
+        title += f"  ks={KS}"
+    print(title)
     print("=" * 84)
     print(f"{'K':>3} {'D':>4} | {'PSO_loss(±)':>16} {'PSO_IoU':>8} {'PSO_RMSE':>9} | "
           f"{'CC_loss(±)':>16} {'CC_IoU':>8} {'CC_RMSE':>9} {'CC_s':>4}")
@@ -353,7 +422,7 @@ def main():
               f"{r['PSO_loss_mean']:>7.4f}±{r['PSO_loss_std']:<6.4f} {r['PSO_iou_mean']:>8.4f} {r['PSO_dhRMSE_mean']:>9.3f} | "
               f"{r['CC_loss_mean']:>7.4f}±{r['CC_loss_std']:<6.4f} {r['CC_iou_mean']:>8.4f} {r['CC_dhRMSE_mean']:>9.3f} {r['CC_s']:>4d}")
 
-    (OUT_DIR / "summary.json").write_text(json.dumps(rows, indent=2, ensure_ascii=False))
+    (OUT_DIR / f"summary{suffix}.json").write_text(json.dumps(rows, indent=2, ensure_ascii=False))
 
     # サマリープロット: loss vs D
     Ds = [r["D"] for r in rows]
@@ -364,14 +433,18 @@ def main():
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.errorbar(Ds, pso_m, yerr=pso_s, fmt="-o", capsize=4, label="Standard PSO", color="C0")
     ax.errorbar(Ds, cc_m,  yerr=cc_s,  fmt="-s", capsize=4, label="CCPSO2",       color="C1")
-    ax.set_xlabel("dimension D = 1 + K^2")
+    ax.set_xlabel("dimension D = 1 + K^2" + (f" + {KS}^2" if KS > 0 else ""))
     ax.set_ylabel(f"final loss ({LOSS_KIND}, mean ± std)")
     ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_title(f"Standard PSO vs CCPSO2  (n_seeds={len(SEEDS)}, budget={BUDGET})")
+    plot_title = f"Standard PSO vs CCPSO2  (n_seeds={len(SEEDS)}, budget={BUDGET}"
+    if KS > 0:
+        plot_title += f", ks={KS}"
+    plot_title += ")"
+    ax.set_title(plot_title)
     ax.grid(True, which="both", alpha=0.3)
     ax.legend()
     plt.tight_layout()
-    plt.savefig(OUT_DIR / "summary_loss_vs_D.png", dpi=120)
+    plt.savefig(OUT_DIR / f"summary_loss_vs_D{suffix}.png", dpi=120)
     plt.close()
 
     print(f"\nResults saved to {OUT_DIR}")
