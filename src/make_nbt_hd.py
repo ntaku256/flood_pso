@@ -2,13 +2,16 @@
 make_nbt_hd.py
 高次元シミュレーション結果（標準PSO / CCPSO2 / Ground Truth）を NBT 化する。
 
-入力: results/benchmark/case_K{K}_seed{seed}.json （benchmark.py の出力）
-出力: results/nbt/hd/gobo_hd_K{K}_{method}.nbt （flood_pso_meta コンパウンド付き）
+入力: results/benchmark/case_K{K}[_ks{ks}]_seed{seed}.json （benchmark.py の出力）
+出力: results/nbt/hd/gobo_hd_K{K}[_ks{ks}]_seed{seed}_{preset}_{method}.nbt
+       （flood_pso_meta コンパウンド付き）
 
 実行例:
     python make_nbt_hd.py --K 16 --seed 0
     python make_nbt_hd.py --K 16 --seed 0 --preset md_5m
     python make_nbt_hd.py --K 16 --seed 0 --preset huge_5m
+    # Phase1 EX2: sigma_map 付き（benchmark を FLOOD_PSO_SIGMA_MAP_KS=8 で回した結果）
+    python make_nbt_hd.py --K 8 --ks 8 --seed 0 --preset md_5m
 """
 
 import os
@@ -49,6 +52,10 @@ PRESETS = {
     "md_5m":        (5000, 5000,  5, 1, 2),
     "lg_10m":      (10000,10000, 10, 1, 2),
     "xl_5m":       (10000,10000,  5, 1, 2),
+    "amada_200m":   (200,   200,  1, 1, 1.5),  # 天田橋周辺の局所詳細
+    "amada_300m_5m": (300,   300,  5, 1, 1.5),  # 天田橋周辺 300m × 300m を 5m/block で（建物・道路含む）
+    "amada_500m_5m": (500,   500,  5, 1, 1.5),  # 同 500m × 500m
+    "amada_500m_1m": (500,   500,  1, 1, 1.5),  # 同 500m × 500m × 1m/block（建物・道路を高精細に）
     "huge_5m":     (15000,15000,  5, 1, 2),
 }
 
@@ -56,18 +63,61 @@ PRESETS = {
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--K", type=int, default=16)
+    ap.add_argument("--ks", type=int, default=0,
+                    help="K_s (sigma_map size); 0 = scalar sigma (既存)。"
+                         "  >0 で benchmark_ks{ks}.json を読み sigma_map も埋め込む")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--preset", default="md_5m", choices=list(PRESETS.keys()))
     ap.add_argument("--methods", default="pso,ccpso2,gt",
                     help="comma-separated subset of {pso,ccpso2,gt}")
+    ap.add_argument("--quality", default="enhanced", choices=["enhanced", "legacy"],
+                    help="terrain rendering quality: enhanced (Tellus 風改善, default) または legacy")
+    ap.add_argument("--sea-level", type=float, default=0.0,
+                    help="海面標高 [m]（enhanced のみ、御坊海岸は 0.0）")
+    ap.add_argument("--terrain-source", default="gsi", choices=["gsi", "mapzen"],
+                    help="表示用 DEM のソース。gsi=国土地理院 5m DEM (default、校正と同じ)、"
+                         "mapzen=Tellus が使う AWS Mapzen Joerd 全球 DEM "
+                         "（inundation を bilinear 再投影して上書き）")
+    ap.add_argument("--mapzen-zoom", type=int, default=15,
+                    help="Mapzen タイル zoom (14≈9.5m, 15≈4.8m, 16≈2.4m)")
+    ap.add_argument("--use-esa", action="store_true",
+                    help="ESA WorldCover 2021 の土地被覆別ブロック割当を有効化（rasterio 必須）")
+    ap.add_argument("--use-osm", action="store_true",
+                    help="OpenStreetMap の建物 polygon と道路 polyline を Overpass API から取得して "
+                         "地表に重ねる（建物=stone 立体、道路=gravel 上書き）")
+    ap.add_argument("--building-height", type=float, default=6.0,
+                    help="OSM 建物の高さ [m]（既定 6m ≒ 2 階建て）")
+    ap.add_argument("--v-exag", type=float, default=None,
+                    help="陸の垂直誇張倍率を上書き（プリセットの v_exag を override）")
+    ap.add_argument("--smooth-sigma", type=float, default=1.0,
+                    help="cliff-aware smoothing の sigma [cells]（既定 1.0）")
+    ap.add_argument("--cliff-threshold", type=float, default=0.4,
+                    help="急斜面とみなす slope 閾値 [m/m]（既定 0.4 ≒ 22°）")
+    ap.add_argument("--center-lat", type=float, default=None,
+                    help="出力エリア中心の緯度（デフォルト 33.875 = 御坊市中心）")
+    ap.add_argument("--center-lon", type=float, default=None,
+                    help="出力エリア中心の経度（デフォルト 135.168）")
+    ap.add_argument("--width", type=float, default=None,
+                    help="東西幅 [m] を上書き（プリセット値を override）")
+    ap.add_argument("--depth", type=float, default=None,
+                    help="南北幅 [m] を上書き")
+    ap.add_argument("--h-res", type=float, default=None,
+                    help="水平解像度 [m/block] を上書き（小さいほど詳細・重い）")
+    ap.add_argument("--tag-suffix", type=str, default="",
+                    help="出力ファイル名の追加サフィックス（例: --tag-suffix amada）")
     args = ap.parse_args()
 
-    case_path = BENCH_DIR / f"case_K{args.K}_seed{args.seed}.json"
+    suffix = f"_ks{args.ks}" if args.ks > 0 else ""
+    case_path = BENCH_DIR / f"case_K{args.K}{suffix}_seed{args.seed}.json"
     if not case_path.exists():
         sys.exit(f"benchmark JSON not found: {case_path}\n"
-                 f"  → run `.venv/bin/python src/benchmark.py` first")
+                 f"  → run `.venv/bin/python src/benchmark.py` first"
+                 + (f"  (with FLOOD_PSO_SIGMA_MAP_KS={args.ks})" if args.ks > 0 else ""))
     case = json.loads(case_path.read_text(encoding="utf-8"))
     K = case["K"]
+    ks = int(case.get("ks", 0) or 0)
+    if ks != args.ks:
+        print(f"  warning: case file ks={ks} does not match --ks={args.ks}")
 
     # DEM 読み込み（NBT 化はフル解像度 5m DEM を使う）
     print("Loading DEM (5m, full resolution)...")
@@ -82,19 +132,32 @@ def main():
     print(f"  DEM={dem.shape}  src cells={int(np.sum(source))}")
 
     width_m, depth_m, h_res, v_res, v_exag = PRESETS[args.preset]
-    est = estimate_size(dem_info, LAT_CENTER, LON_CENTER,
+    if args.width  is not None: width_m = args.width
+    if args.depth  is not None: depth_m = args.depth
+    if args.h_res  is not None: h_res   = args.h_res
+    lat_c = args.center_lat if args.center_lat is not None else LAT_CENTER
+    lon_c = args.center_lon if args.center_lon is not None else LON_CENTER
+    est = estimate_size(dem_info, lat_c, lon_c,
                         width_m, depth_m, h_res=h_res, v_res=v_res, v_exag=v_exag)
-    print(f"  preset={args.preset}  ~{est['estimated_nbt_MB']} MB/file  "
+    print(f"  preset={args.preset}  center=({lat_c:.6f},{lon_c:.6f})  "
+          f"{width_m}×{depth_m}m  h_res={h_res}m  ~{est['estimated_nbt_MB']} MB/file  "
           f"({est['nx (East-West blocks)']}×{est['nz (North-South blocks)']} blocks)")
 
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
 
-    # 各手法の (water, dh_map) を抽出（ground truth は case["gt"] から）
+    # 各手法の (water, dh_map[, sigma_map]) を抽出（ground truth は case["gt"] から）
+    def _sigma_map_from(method_block):
+        sm = method_block.get("best_sigma_map")
+        if ks > 0 and sm is not None:
+            return np.array(sm, dtype=np.float64)
+        return None
+
     runs = {}
     if "pso" in methods:
         runs["pso"] = {
             "water": float(case["pso"]["best_w"]),
             "dh":    np.array(case["pso"]["best_dh"], dtype=np.float64),
+            "sigma_map": _sigma_map_from(case["pso"]),
             "loss":  float(case["pso"]["loss"]),
             "iou":   float(case["pso"]["iou"]),
             "dh_rmse": float(case["pso"]["dh_rmse"]),
@@ -106,6 +169,7 @@ def main():
         runs["ccpso2"] = {
             "water": float(case["ccpso2"]["best_w"]),
             "dh":    np.array(case["ccpso2"]["best_dh"], dtype=np.float64),
+            "sigma_map": _sigma_map_from(case["ccpso2"]),
             "loss":  float(case["ccpso2"]["loss"]),
             "iou":   float(case["ccpso2"]["iou"]),
             "dh_rmse": float(case["ccpso2"]["dh_rmse"]),
@@ -114,9 +178,12 @@ def main():
             "method_long": f"CCPSO2 (s={case['ccpso2']['s']}, custom impl)",
         }
     if "gt" in methods:
+        # 合成 GT は scalar SIGMA で生成されているため sigma_map_true は持たない。
+        # ks>0 でも GT は scalar SIGMA で simulate（docs/12 §10.6 の ill-posed 注記参照）。
         runs["gt"] = {
             "water": float(case["gt"]["water_true"]),
             "dh":    np.array(case["gt"]["dh_true"], dtype=np.float64),
+            "sigma_map": None,
             "loss":  0.0,
             "iou":   1.0,
             "dh_rmse": 0.0,
@@ -126,18 +193,33 @@ def main():
         }
 
     for tag, r in runs.items():
-        print(f"\n--- Generating NBT: {tag} (water={r['water']:.3f}, IoU={r['iou']:.3f}) ---")
+        sm_note = f", sigma_map K_s={ks}" if r["sigma_map"] is not None else ""
+        print(f"\n--- Generating NBT: {tag} "
+              f"(water={r['water']:.3f}, IoU={r['iou']:.3f}{sm_note}) ---")
         # 5m フル解像度 DEM 上でシミュレーションを再実行
-        inundation = simulate_flood_hd(
-            dem, source,
-            water_level_global=r["water"],
-            dh_map=r["dh"],
-            sigma=SIGMA,
-        )
+        if r["sigma_map"] is not None:
+            inundation = simulate_flood_hd(
+                dem, source,
+                water_level_global=r["water"],
+                dh_map=r["dh"],
+                sigma_map=r["sigma_map"],
+            )
+        else:
+            inundation = simulate_flood_hd(
+                dem, source,
+                water_level_global=r["water"],
+                dh_map=r["dh"],
+                sigma=SIGMA,
+            )
         flooded = int(np.sum(inundation > 0.05))
         print(f"  full-res flooded cells: {flooded:,}")
 
-        out = OUT_DIR / f"gobo_hd_K{K}_seed{args.seed}_{args.preset}_{tag}.nbt"
+        qsuffix = "" if args.quality == "enhanced" else f"_{args.quality}"
+        tsuffix = "" if args.terrain_source == "gsi" else f"_{args.terrain_source}"
+        if args.use_esa: tsuffix += "_esa"
+        if args.use_osm: tsuffix += "_osm"
+        usuffix = f"_{args.tag_suffix}" if args.tag_suffix else ""
+        out = OUT_DIR / f"gobo_hd_K{K}{suffix}_seed{args.seed}_{args.preset}_{tag}{tsuffix}{qsuffix}{usuffix}.nbt"
         meta = {
             "experiment": "flood_pso_HD_benchmark",
             "method": tag,
@@ -163,12 +245,28 @@ def main():
             "preset": args.preset,
             "ref_doc": "flood_pso/docs/05_ベンチマーク結果.md",
         }
+        if ks > 0:
+            meta["K_s"] = ks
+            meta["sigma_bounds_m"] = [0.0, 3.0]
+            meta["sigma_levels_m"] = [0.0, 0.5, 1.0, 2.0, 4.0]  # flood_sim と整合
+            if r["sigma_map"] is not None:
+                meta["sigma_map"] = r["sigma_map"]   # ndarray → Float List + _shape
+        eff_v_exag = args.v_exag if args.v_exag is not None else v_exag
         export_to_nbt(
             dem_info, inundation,
-            lat_center=LAT_CENTER, lon_center=LON_CENTER,
+            lat_center=lat_c, lon_center=lon_c,
             width_m=width_m, depth_m=depth_m,
-            h_res=h_res, v_res=v_res, v_exag=v_exag,
+            h_res=h_res, v_res=v_res, v_exag=eff_v_exag,
             out_path=str(out), meta=meta,
+            terrain_quality=args.quality,
+            sea_level_m=args.sea_level,
+            smooth_sigma_cells=args.smooth_sigma,
+            cliff_threshold_m_per_m=args.cliff_threshold,
+            terrain_source=args.terrain_source,
+            mapzen_zoom=args.mapzen_zoom,
+            use_esa=args.use_esa,
+            use_osm=args.use_osm,
+            building_height_m=args.building_height,
         )
 
     print(f"\nAll done. Output dir: {OUT_DIR}")

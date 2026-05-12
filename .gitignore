@@ -20,3 +20,9 @@ Thumbs.db
 
 # Research large outputs (rasterized PDFs, intermediate)
 results/pdf_raster/
+
+# Tellus / Fabric runtime workspace (server jar, mods, world files)
+.tellus_runtime/
+
+# tellus_data.py が DL する Mapzen terrain tiles / ESA WorldCover / OSM JSON キャッシュ
+data_cache/

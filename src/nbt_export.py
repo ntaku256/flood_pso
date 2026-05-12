@@ -318,7 +318,19 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   h_res: float = 5.0,
                   v_res: float = 1.0, v_exag: float = 2.0,
                   out_path: str = "output.nbt",
-                  meta: dict | None = None):
+                  meta: dict | None = None,
+                  terrain_quality: str = "enhanced",
+                  sea_level_m: float = 0.0,
+                  ocean_max_depth_m: float = 8.0,
+                  smooth_sigma_cells: float = 1.0,
+                  cliff_threshold_m_per_m: float = 0.4,
+                  v_exag_sea: float | None = None,
+                  deep_ground: int = 8,
+                  terrain_source: str = "gsi",
+                  mapzen_zoom: int = 15,
+                  use_esa: bool = False,
+                  use_osm: bool = False,
+                  building_height_m: float = 6.0):
     """
     DEMと浸水マップの指定範囲をMinecraft NBT Structureに変換する。
 
@@ -331,25 +343,80 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
     depth_m    : 南北幅 [m]
     h_res      : 1ブロックの水平サイズ [m] (DEMの整数倍推奨)
     v_res      : 1ブロックの垂直サイズ [m]
-    v_exag     : 垂直誇張倍率
+    v_exag     : 垂直誇張倍率（terrain_quality="enhanced" では陸用、海は v_exag_sea）
     out_path   : 出力 .nbt ファイルパス
-    meta       : NBT に埋め込むメタデータ辞書（任意）。
-                 method, K, D, water_level, sigma, dh_map(np.ndarray), loss, iou, seed,
-                 dem_source, bbox, n_evals, elapsed_s 等を入れる想定。
+    meta       : NBT に埋め込むメタデータ辞書（任意）
+
+    terrain_quality : "enhanced" (default, Tellus 風の改善) | "legacy" (旧 dem_to_blocks)
+    sea_level_m     : 海面標高 [m]（enhanced のみ）
+    ocean_max_depth_m : 沖合の最大水深 [m]（enhanced のみ、200m 沖でこの値に到達）
+    smooth_sigma_cells: cliff-aware smoothing の sigma [cells]（enhanced のみ）
+    cliff_threshold_m_per_m: 急斜面判定の slope 閾値 [m/m]（enhanced のみ）
+    v_exag_sea      : 海中の垂直誇張倍率。None なら v_exag * 0.33（enhanced のみ）
+    deep_ground     : 陸の地盤柱の深さ [block]（enhanced のみ、既定 8）
+
+    terrain_source  : "gsi" (default, 国土地理院 5m DEM をそのまま使う)
+                      "mapzen" (Tellus が使う AWS Mapzen Joerd 全球 DEM を取得して
+                                 表示用地形を差し替え。inundation は bilinear で再投影)
+    mapzen_zoom     : Mapzen タイルの zoom（14 ≈ 9.5m, 15 ≈ 4.8m, 16 ≈ 2.4m）
+    use_esa         : ESA WorldCover 2021 v200 を取得して土地被覆別ブロック割当を有効化
+                      （rasterio 必須、Tellus.MountainSurfaceRules ロジック相当）
     """
-    dem = dem_info["dem"]
-    lat_max = dem_info["lat_max"]
-    lon_min = dem_info["lon_min"]
-    res_lat = dem_info["res_lat"]
-    res_lon = dem_info["res_lon"]
+    lat_per_m = 1.0 / 111320.0
+    lon_per_m = 1.0 / (111320.0 * np.cos(np.radians(lat_center)))
+
+    # ─── terrain_source 分岐：表示用 dem を Mapzen で差し替えるなら inundation を再投影 ───
+    cover_patch = None
+    if terrain_source == "mapzen":
+        from tellus_data import fetch_mapzen_dem, reproject_to_grid
+        # 描画 BBOX（やや広めに取って端の補間を安定化）
+        half_lat = (depth_m / 2) * lat_per_m
+        half_lon = (width_m / 2) * lon_per_m
+        margin = max(half_lat, half_lon) * 0.05
+        mapzen_info = fetch_mapzen_dem(
+            lat_min=lat_center - half_lat - margin,
+            lat_max=lat_center + half_lat + margin,
+            lon_min=lon_center - half_lon - margin,
+            lon_max=lon_center + half_lon + margin,
+            zoom=mapzen_zoom,
+        )
+        # inundation を Mapzen grid に bilinear 再投影
+        inundation_render = reproject_to_grid(
+            inundation, src_meta=dem_info, dst_meta=mapzen_info, fill_value=0.0,
+        )
+        dem_info_render = mapzen_info
+        if use_esa:
+            from tellus_data import fetch_esa_worldcover
+            esa = fetch_esa_worldcover(
+                lat_min=lat_center - half_lat - margin,
+                lat_max=lat_center + half_lat + margin,
+                lon_min=lon_center - half_lon - margin,
+                lon_max=lon_center + half_lon + margin,
+            )
+            # ESA を Mapzen grid に最近傍で reproject（class 値はカテゴリなので nearest）
+            cover_patch_full = reproject_to_grid(esa["cover"].astype(np.float32),
+                                                   src_meta=esa,
+                                                   dst_meta=mapzen_info,
+                                                   fill_value=0.0).astype(np.uint8)
+        print(f"[mapzen] dem grid {dem_info_render['dem'].shape}  "
+              f"reprojected inundation max={float(inundation_render.max()):.2f}m")
+    elif terrain_source == "gsi":
+        dem_info_render = dem_info
+        inundation_render = inundation
+    else:
+        raise ValueError(f"unknown terrain_source: {terrain_source} (use 'gsi' or 'mapzen')")
+
+    dem = dem_info_render["dem"]
+    lat_max = dem_info_render["lat_max"]
+    lon_min = dem_info_render["lon_min"]
+    res_lat = dem_info_render["res_lat"]
+    res_lon = dem_info_render["res_lon"]
 
     # 中心ピクセル
     row_c = round((lat_max - lat_center) / res_lat)
     col_c = round((lon_center - lon_min) / res_lon)
 
     # エリアを DEMセル数で計算
-    lat_per_m = 1.0 / 111320.0
-    lon_per_m = 1.0 / (111320.0 * np.cos(np.radians(lat_center)))
     half_rows = int((depth_m / 2) * lat_per_m / res_lat)
     half_cols = int((width_m / 2) * lon_per_m / res_lon)
 
@@ -359,15 +426,88 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
     c1 = min(dem.shape[1], col_c + half_cols)
 
     dem_patch = dem[r0:r1, c0:c1]
-    idn_patch = inundation[r0:r1, c0:c1]
+    idn_patch = inundation_render[r0:r1, c0:c1]
+    if terrain_source == "mapzen" and use_esa:
+        cover_patch = cover_patch_full[r0:r1, c0:c1]
 
-    print(f"DEM patch: {dem_patch.shape} cells = {dem_patch.shape[1]*res_lon/lon_per_m:.0f}m W x {dem_patch.shape[0]*res_lat/lat_per_m:.0f}m N")
+    # patch の経緯度 bbox（OSM 取得 + grid 変換に使用）
+    patch_bbox_latlon = (
+        lat_max - r1 * res_lat,   # lat_min（南端）
+        lat_max - r0 * res_lat,   # lat_max（北端）
+        lon_min + c0 * res_lon,   # lon_min
+        lon_min + c1 * res_lon,   # lon_max
+    )
+
+    print(f"DEM patch: {dem_patch.shape} cells = {dem_patch.shape[1]*res_lon/lon_per_m:.0f}m W x {dem_patch.shape[0]*res_lat/lat_per_m:.0f}m N "
+          f"[source={terrain_source}]")
 
     h_res_dem = res_lat / lat_per_m   # DEMセル = 何m か
 
-    print(f"Converting to blocks (h_res={h_res}m/block, v_res={v_res}m/block, v_exag×{v_exag})...")
-    blocks, size = dem_to_blocks(dem_patch, idn_patch, h_res_dem, h_res,
-                                  v_res=v_res, v_exag=v_exag)
+    # ブロック解像度が DEM 解像度より細かい場合、bilinear で upsample
+    # （例: 200m 局所詳細で h_res=1m, GSI 5m DEM → 5x upsample）
+    if h_res > 0 and h_res < h_res_dem * 0.95:
+        from scipy.ndimage import zoom as nd_zoom
+        up_factor = h_res_dem / h_res
+        dem_patch = nd_zoom(dem_patch, up_factor, order=1, mode="nearest")
+        idn_patch = nd_zoom(idn_patch, up_factor, order=1, mode="nearest")
+        if cover_patch is not None:
+            cover_patch = nd_zoom(cover_patch, up_factor, order=0, mode="nearest")
+        print(f"  [upsample] {up_factor:.2f}× source DEM → patch shape {dem_patch.shape}")
+        h_res_dem = h_res
+
+    if terrain_quality == "enhanced":
+        from terrain_render import dem_to_blocks_enhanced, build_osm_masks
+        v_es = v_exag_sea if v_exag_sea is not None else v_exag * 0.33
+
+        # OSM 取得 + ブロック grid 上の建物・道路 mask を事前生成
+        building_mask = road_mask = None
+        if use_osm:
+            from tellus_data import fetch_osm_buildings_roads
+            osm = fetch_osm_buildings_roads(
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+            )
+            # ダウンサンプル後の grid サイズ（dem_to_blocks_enhanced と同じ計算式）
+            factor = max(1, round(h_res / h_res_dem))
+            nz_g = dem_patch.shape[0] // factor
+            nx_g = dem_patch.shape[1] // factor
+            building_mask, road_mask = build_osm_masks(
+                osm, patch_bbox_latlon,
+                grid_h=nz_g, grid_w=nx_g, h_res_block_m=h_res,
+            )
+            print(f"  [osm] buildings={osm['n_buildings']}  roads={osm['n_roads']}  "
+                  f"→ mask cells: building={int(building_mask.sum())}  road={int(road_mask.sum())}")
+
+        print(f"Converting to blocks [enhanced] "
+              f"(h_res={h_res}m/block, v_res={v_res}m/block, "
+              f"v_exag_land={v_exag}, v_exag_sea={v_es:.2f}, "
+              f"sea_level={sea_level_m}m, smooth_sigma={smooth_sigma_cells}, "
+              f"cliff_thr={cliff_threshold_m_per_m}"
+              + (f", esa_cover ✓" if cover_patch is not None else "")
+              + (f", osm ✓" if use_osm else "")
+              + ")...")
+        blocks, size = dem_to_blocks_enhanced(
+            dem_patch, idn_patch, h_res_dem, h_res,
+            v_res_land=v_res,
+            v_exag_land=v_exag,
+            v_exag_sea=v_es,
+            sea_level_m=sea_level_m,
+            ocean_max_depth_m=ocean_max_depth_m,
+            smooth_sigma_cells=smooth_sigma_cells,
+            cliff_threshold_m_per_m=cliff_threshold_m_per_m,
+            deep_ground=deep_ground,
+            cover_patch=cover_patch,
+            building_mask=building_mask,
+            road_mask=road_mask,
+            building_height_m=building_height_m,
+        )
+    elif terrain_quality == "legacy":
+        print(f"Converting to blocks [legacy] "
+              f"(h_res={h_res}m/block, v_res={v_res}m/block, v_exag×{v_exag})...")
+        blocks, size = dem_to_blocks(dem_patch, idn_patch, h_res_dem, h_res,
+                                      v_res=v_res, v_exag=v_exag)
+    else:
+        raise ValueError(f"unknown terrain_quality: {terrain_quality} (use 'enhanced' or 'legacy')")
     print(f"Structure size: {size[0]} x {size[1]} x {size[2]} blocks ({len(blocks):,} block entries)")
 
     # メタデータに描画範囲・解像度情報を補足
@@ -383,6 +523,22 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         full_meta.setdefault("v_exag", float(v_exag))
         full_meta.setdefault("structure_size_xyz", [int(size[0]), int(size[1]), int(size[2])])
         full_meta.setdefault("n_block_entries", int(len(blocks)))
+        full_meta.setdefault("terrain_quality", str(terrain_quality))
+        full_meta.setdefault("terrain_source", str(terrain_source))
+        if terrain_source == "mapzen":
+            full_meta.setdefault("mapzen_zoom", int(mapzen_zoom))
+            full_meta.setdefault("use_esa_worldcover", bool(use_esa))
+        if use_osm:
+            full_meta.setdefault("use_osm", True)
+            full_meta.setdefault("building_height_m", float(building_height_m))
+        if terrain_quality == "enhanced":
+            full_meta.setdefault("sea_level_m", float(sea_level_m))
+            full_meta.setdefault("ocean_max_depth_m", float(ocean_max_depth_m))
+            full_meta.setdefault("smooth_sigma_cells", float(smooth_sigma_cells))
+            full_meta.setdefault("cliff_threshold_m_per_m", float(cliff_threshold_m_per_m))
+            full_meta.setdefault("v_exag_sea",
+                                  float(v_exag_sea if v_exag_sea is not None else v_exag * 0.33))
+            full_meta.setdefault("deep_ground", int(deep_ground))
 
     write_nbt_structure(blocks, size, out_path, meta=full_meta)
     return size, len(blocks)

@@ -104,6 +104,10 @@ def main():
                         help="1ブロックの垂直サイズ [m]")
     parser.add_argument("--v_exag", type=float, default=2.0,
                         help="垂直誇張倍率")
+    parser.add_argument("--quality", default="enhanced", choices=["enhanced", "legacy"],
+                        help="terrain rendering quality (enhanced=Tellus 風改善, default)")
+    parser.add_argument("--sea-level", type=float, default=0.0,
+                        help="海面標高 [m]（enhanced のみ）")
     args = parser.parse_args()
 
     dem_info, inundation = load_dem_and_flood()
@@ -136,9 +140,10 @@ def main():
         "study_area":    "Gobo city / Hidaka river, Wakayama, Japan",
     }
 
+    qsuffix = "" if args.quality == "enhanced" else f"_{args.quality}"
     for name, w, d, hr, vr, ve in targets:
-        print(f"\n--- 変換中: {name} ({w}m×{d}m, {hr}m/block, v×{ve}) ---")
-        out = str(OUT_DIR / f"gobo_{name}.nbt")
+        print(f"\n--- 変換中: {name} ({w}m×{d}m, {hr}m/block, v×{ve}, quality={args.quality}) ---")
+        out = str(OUT_DIR / f"gobo_{name}{qsuffix}.nbt")
         meta_run = dict(meta)
         meta_run["preset"] = name
         size, n_blocks = export_to_nbt(
@@ -147,6 +152,8 @@ def main():
             width_m=w, depth_m=d,
             h_res=hr, v_res=vr, v_exag=ve,
             out_path=out, meta=meta_run,
+            terrain_quality=args.quality,
+            sea_level_m=args.sea_level,
         )
         print(f"  完了: {out}")
 
