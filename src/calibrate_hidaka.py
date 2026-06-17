@@ -45,7 +45,8 @@ K = int(os.environ.get("FLOOD_PSO_K", "16"))
 BUDGET = int(os.environ.get("FLOOD_PSO_BUDGET", "3000"))
 SEED = int(os.environ.get("FLOOD_PSO_SEED", "0"))
 LOSS = os.environ.get("FLOOD_PSO_LOSS", "iou")          # iou | depth
-ZOOM = int(os.environ.get("FLOOD_PSO_HAZARD_ZOOM", "15"))
+DS = int(os.environ.get("FLOOD_PSO_DS", "5"))           # DEM ダウンサンプル係数（1=ネイティブ5m, 2=10m, 5=25m）
+ZOOM = int(os.environ.get("FLOOD_PSO_HAZARD_ZOOM", "16" if DS <= 2 else "15"))
 SIGMA = 0.5
 HIDAKA_RIVER_BBOX = {"lat_min": 33.855, "lat_max": 33.905,
                      "lon_min": 135.145, "lon_max": 135.215}
@@ -151,8 +152,8 @@ def save_viz(dem, gt_depth, gt_mask, sim_pso, sim_cc, obj_pso, obj_cc,
 
 def main():
     t_all = time.time()
-    print("[setup] DEM 読み込み (25m)...")
-    info = downsample(mosaic_tiles(DEM_DIR), 5)
+    print(f"[setup] DEM 読み込み (DS={DS}, ~{5*DS}m grid)...")
+    info = downsample(mosaic_tiles(DEM_DIR), DS)
     dem = info["dem"]
     src = make_river_source(dem, lat_max=info["lat_max"], res_lat=info["res_lat"],
                             lon_min=info["lon_min"], res_lon=info["res_lon"],
@@ -160,7 +161,7 @@ def main():
     print("[setup] GT 実ハザード (GSIタイル)...")
     gt_depth, gt_mask = load_hazard_gt(info, zoom=ZOOM)
     D = 1 + K * K
-    print(f"\nK={K}  D={D}  budget={BUDGET}  loss={LOSS}  seed={SEED}")
+    print(f"\nK={K}  D={D}  budget={BUDGET}  loss={LOSS}  seed={SEED}  DS={DS}(~{5*DS}m)  zoom={ZOOM}")
     print(f"DEM={dem.shape}  src={int(src.sum())}cells  GT浸水={int(gt_mask.sum())}cells "
           f"({100*gt_mask.mean():.1f}%)\n")
 
@@ -198,9 +199,10 @@ def main():
     winner = "CCPSO2" if cc_loss < pso_loss else "PSO"
     print(f"\n→ winner: {winner}  (Δloss={abs(cc_loss-pso_loss):.4f})")
 
-    tag = f"K{K}_{LOSS}_seed{SEED}"
+    tag = f"K{K}_{LOSS}_ds{DS}_seed{SEED}"
     out_json = {
         "K": K, "D": D, "budget": BUDGET, "seed": SEED, "loss_kind": LOSS, "zoom": ZOOM,
+        "ds_factor": DS, "grid_m": 5 * DS, "dem_shape": list(dem.shape),
         "gt_inundation_cells": int(gt_mask.sum()),
         "pso": {"loss": float(pso_loss), "iou": float(pso_iou), "best_w": float(pp[0]),
                 "evals": obj_pso.n, "t_s": pso_t, "log": obj_pso.log},

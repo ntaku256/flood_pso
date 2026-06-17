@@ -238,9 +238,14 @@ def render_topdown(path, verbose=True):
 
     wmask = wat_h >= 0
     if wmask.any():
-        wcol = np.array([WATER_COLOR.get(names[s], (40, 95, 225)) if 0 <= s < len(names)
-                         else (40, 95, 225) for s in wat_st.ravel()], float).reshape(sz, sx, 3)
-        a = 0.6
+        # 浸水深 = 水面 y - 地表 y（地表が無ければ水面 y）。浅い=明るい青 / 深い=濃い青。
+        depth = np.where(top_h >= 0, wat_h - top_h, wat_h).astype(float)
+        depth = np.clip(depth, 0, None)
+        t = np.clip(depth / 12.0, 0, 1)[:, :, None]
+        light = np.array([150, 205, 238], float)   # 浅
+        dark = np.array([12, 45, 150], float)       # 深
+        wcol = light * (1 - t) + dark * t
+        a = 0.72
         blended = (1 - a) * img.astype(float) + a * wcol
         img[wmask] = np.clip(blended[wmask], 0, 255).astype(np.uint8)
 
