@@ -374,6 +374,7 @@ def dem_to_blocks_enhanced(
     building_mask: np.ndarray | None = None,
     road_mask: np.ndarray | None = None,
     building_height_m: float = 6.0,
+    surface_grid_override: np.ndarray | None = None,
 ) -> tuple[list, list[int]]:
     """
     `nbt_export.dem_to_blocks` の置き換え。Tellus 風の改善 5 点を適用：
@@ -451,8 +452,22 @@ def dem_to_blocks_enhanced(
                            ((elev_land + idn_ds) * scale_land).astype(int),
                            y_surf_land)
 
-    # ─── 5) 地表ブロック決定（ESA WorldCover があれば優先） ───
-    if cover_ds is not None:
+    # ─── 5) 地表ブロック決定 ───
+    # 優先順位: surface_grid_override (Tellus 直接) > ESA cover > slope/convex/海岸距離
+    if surface_grid_override is not None:
+        if surface_grid_override.shape == dem_ds.shape:
+            surf_block = surface_grid_override.copy()
+        elif surface_grid_override.shape == dem_patch.shape:
+            # フル解像度を渡されたら nearest でダウンサンプル
+            sg = surface_grid_override[:nz*factor, :nx*factor].reshape(nz, factor, nx, factor)
+            # オブジェクト dtype の最頻値は遅いので中央位置サンプリング
+            surf_block = sg[:, factor // 2, :, factor // 2].copy()
+        else:
+            raise ValueError(
+                f"surface_grid_override shape {surface_grid_override.shape} != "
+                f"dem_ds {dem_ds.shape} nor dem_patch {dem_patch.shape}"
+            )
+    elif cover_ds is not None:
         surf_block = classify_surface_block_grid_esa(
             dem_ds, slope_ds, convex_ds, dist_shore, cover_ds, sea_level_m=sea_level_m,
         )

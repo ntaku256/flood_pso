@@ -330,7 +330,10 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   mapzen_zoom: int = 15,
                   use_esa: bool = False,
                   use_osm: bool = False,
-                  building_height_m: float = 6.0):
+                  building_height_m: float = 6.0,
+                  tellus_world_dir: str | None = None,
+                  tellus_world_scale: float = 1.0,
+                  tellus_sea_level_y: int = 0):
     """
     DEMと浸水マップの指定範囲をMinecraft NBT Structureに変換する。
 
@@ -358,16 +361,106 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
     terrain_source  : "gsi" (default, 国土地理院 5m DEM をそのまま使う)
                       "mapzen" (Tellus が使う AWS Mapzen Joerd 全球 DEM を取得して
                                  表示用地形を差し替え。inundation は bilinear で再投影)
+                      "tellus_world" (Tellus mod が生成済の Anvil world フォルダを読み、
+                                       高さも地表ブロックも Tellus と同一にする。
+                                       --tellus-world-dir 必須)
     mapzen_zoom     : Mapzen タイルの zoom（14 ≈ 9.5m, 15 ≈ 4.8m, 16 ≈ 2.4m）
     use_esa         : ESA WorldCover 2021 v200 を取得して土地被覆別ブロック割当を有効化
                       （rasterio 必須、Tellus.MountainSurfaceRules ロジック相当）
+
+    tellus_world_dir   : terrain_source="tellus_world" のとき必須。level.dat のあるパス
+    tellus_world_scale : Tellus 世界生成時の world_scale（既定 1 = real-Earth scale）
+    tellus_sea_level_y : Tellus 世界の海面 y。dem (m) = block_y - tellus_sea_level_y
     """
     lat_per_m = 1.0 / 111320.0
     lon_per_m = 1.0 / (111320.0 * np.cos(np.radians(lat_center)))
 
-    # ─── terrain_source 分岐：表示用 dem を Mapzen で差し替えるなら inundation を再投影 ───
+    # ─── terrain_source 分岐：表示用 dem を Mapzen / Tellus world で差し替え ───
     cover_patch = None
-    if terrain_source == "mapzen":
+    tellus_surface_grid = None      # tellus_world のときのみセット (object dtype, palette key)
+    tellus_inundation_grid = None   # tellus_world のときに使う再投影済 inundation
+    if terrain_source == "tellus_world":
+        if tellus_world_dir is None:
+            raise ValueError("terrain_source='tellus_world' requires tellus_world_dir")
+        from anvil_loader import (
+            TellusWorld, lon_to_blockX, lat_to_blockZ, blockX_to_lon, blockZ_to_lat,
+        )
+        tw = TellusWorld(tellus_world_dir, world_scale=tellus_world_scale)
+
+        # 中心 (lat,lon) を Tellus 投影 block 座標に
+        bx_c = lon_to_blockX(lon_center, tellus_world_scale)
+        bz_c = lat_to_blockZ(lat_center, tellus_world_scale)
+        # h_res に整列した block 範囲（h_res>1 でも block 単位で取得して後段の reshape に任せる）
+        half_w = (width_m / 2.0) / tellus_world_scale
+        half_d = (depth_m / 2.0) / tellus_world_scale
+        bx_min = int(np.floor(bx_c - half_w))
+        bx_max = bx_min + int(np.ceil(2 * half_w)) - 1
+        bz_min = int(np.floor(bz_c - half_d))
+        bz_max = bz_min + int(np.ceil(2 * half_d)) - 1
+
+        print(f"[tellus_world] center (lat,lon)=({lat_center:.6f},{lon_center:.6f}) "
+              f"→ block (X,Z)=({bx_c:.1f},{bz_c:.1f})  "
+              f"region ({int(bx_c)>>9},{int(bz_c)>>9})")
+        dem_blocks_y, surf_grid, stats = tw.fetch_grid(bx_min, bx_max, bz_min, bz_max)
+        print(f"[tellus_world] grid shape={stats['shape']}  "
+              f"loaded {stats['n_loaded_cells']}/{stats['n_cells']} cells  "
+              f"chunks {stats['n_chunks_loaded']}/{stats['n_chunks_total']}")
+        if stats['n_loaded_cells'] == 0:
+            raise RuntimeError(
+                f"[tellus_world] no chunks generated within bbox "
+                f"(bx={bx_min}..{bx_max}, bz={bz_min}..{bz_max}). "
+                f"Tellus 側で先にこの座標を訪れて chunk を生成して下さい。"
+            )
+
+        # block_y → 標高 m に変換（world_scale=1 で 1 block = 1 m）
+        dem_render = (dem_blocks_y - tellus_sea_level_y) * tellus_world_scale
+        # NaN は np.nan のまま（dem_blocks_y 側で NaN）
+
+        # inundation を Tellus grid に bilinear 再投影
+        # Tellus grid 各セルの (lat, lon) を計算 → src GSI grid の (row,col) に変換
+        H, W = dem_render.shape
+        bx_grid = bx_min + np.arange(W)             # (W,)
+        bz_grid = bz_min + np.arange(H)             # (H,)
+        lon_grid = bx_grid * tellus_world_scale / 111319.49166666667
+        # lat は Mercator 逆投影
+        mY = -bz_grid * tellus_world_scale          # (H,)
+        lat_grid = np.degrees(np.arctan(np.sinh(mY / 6378137.0)))   # (H,)
+        # GSI dem_info の (row,col) インデックスへ
+        src_lat_max = dem_info['lat_max']
+        src_lon_min = dem_info['lon_min']
+        src_res_lat = dem_info['res_lat']
+        src_res_lon = dem_info['res_lon']
+        idn_src = inundation
+        src_rows = (src_lat_max - lat_grid) / src_res_lat   # (H,)
+        src_cols = (lon_grid - src_lon_min) / src_res_lon   # (W,)
+        # メッシュ → map_coordinates
+        from scipy.ndimage import map_coordinates
+        rr, cc = np.meshgrid(src_rows, src_cols, indexing='ij')   # (H,W)
+        tellus_inundation_grid = map_coordinates(
+            np.nan_to_num(idn_src, nan=0.0), [rr, cc], order=1, mode='constant', cval=0.0,
+        ).astype(np.float32)
+        # 範囲外（src の dem 範囲外）はゼロのまま
+
+        # dem_info を Tellus grid に書き換える（後段の patch 抽出ロジックを通すため疑似的に）
+        # ここで「render 側の patch を生成する」段は既に終わっているので、
+        # 代わりに dem_info_render を作り、エリア抽出をスキップさせるフラグ的に使う。
+        dem_info_render = {
+            'dem': dem_render,
+            'lat_max': float(lat_grid[0]),
+            'lat_min': float(lat_grid[-1]),
+            'lon_min': float(lon_grid[0]),
+            'lon_max': float(lon_grid[-1]),
+            'res_lat': float((lat_grid[0] - lat_grid[-1]) / max(1, H - 1)),
+            'res_lon': float((lon_grid[-1] - lon_grid[0]) / max(1, W - 1)),
+        }
+        inundation_render = tellus_inundation_grid
+        tellus_surface_grid = surf_grid
+        print(f"[tellus_world] elevation range (m): "
+              f"min={float(np.nanmin(dem_render)):.1f} median={float(np.nanmedian(dem_render)):.1f} "
+              f"max={float(np.nanmax(dem_render)):.1f}  "
+              f"flood max in patch={float(tellus_inundation_grid.max()):.2f}m")
+
+    elif terrain_source == "mapzen":
         from tellus_data import fetch_mapzen_dem, reproject_to_grid
         # 描画 BBOX（やや広めに取って端の補間を安定化）
         half_lat = (depth_m / 2) * lat_per_m
@@ -412,31 +505,43 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
     res_lat = dem_info_render["res_lat"]
     res_lon = dem_info_render["res_lon"]
 
-    # 中心ピクセル
-    row_c = round((lat_max - lat_center) / res_lat)
-    col_c = round((lon_center - lon_min) / res_lon)
+    if terrain_source == "tellus_world":
+        # tellus_world では fetch_grid 段階で既に target bbox を切り出してあるので
+        # 全部使う（h_res は world_scale=1 で 1 m/block 固定）。
+        dem_patch = dem
+        idn_patch = inundation_render
+        patch_bbox_latlon = (
+            float(dem_info_render["lat_min"]),
+            float(dem_info_render["lat_max"]),
+            float(dem_info_render["lon_min"]),
+            float(dem_info_render["lon_max"]),
+        )
+    else:
+        # 中心ピクセル
+        row_c = round((lat_max - lat_center) / res_lat)
+        col_c = round((lon_center - lon_min) / res_lon)
 
-    # エリアを DEMセル数で計算
-    half_rows = int((depth_m / 2) * lat_per_m / res_lat)
-    half_cols = int((width_m / 2) * lon_per_m / res_lon)
+        # エリアを DEMセル数で計算
+        half_rows = int((depth_m / 2) * lat_per_m / res_lat)
+        half_cols = int((width_m / 2) * lon_per_m / res_lon)
 
-    r0 = max(0, row_c - half_rows)
-    r1 = min(dem.shape[0], row_c + half_rows)
-    c0 = max(0, col_c - half_cols)
-    c1 = min(dem.shape[1], col_c + half_cols)
+        r0 = max(0, row_c - half_rows)
+        r1 = min(dem.shape[0], row_c + half_rows)
+        c0 = max(0, col_c - half_cols)
+        c1 = min(dem.shape[1], col_c + half_cols)
 
-    dem_patch = dem[r0:r1, c0:c1]
-    idn_patch = inundation_render[r0:r1, c0:c1]
-    if terrain_source == "mapzen" and use_esa:
-        cover_patch = cover_patch_full[r0:r1, c0:c1]
+        dem_patch = dem[r0:r1, c0:c1]
+        idn_patch = inundation_render[r0:r1, c0:c1]
+        if terrain_source == "mapzen" and use_esa:
+            cover_patch = cover_patch_full[r0:r1, c0:c1]
 
-    # patch の経緯度 bbox（OSM 取得 + grid 変換に使用）
-    patch_bbox_latlon = (
-        lat_max - r1 * res_lat,   # lat_min（南端）
-        lat_max - r0 * res_lat,   # lat_max（北端）
-        lon_min + c0 * res_lon,   # lon_min
-        lon_min + c1 * res_lon,   # lon_max
-    )
+        # patch の経緯度 bbox（OSM 取得 + grid 変換に使用）
+        patch_bbox_latlon = (
+            lat_max - r1 * res_lat,   # lat_min（南端）
+            lat_max - r0 * res_lat,   # lat_max（北端）
+            lon_min + c0 * res_lon,   # lon_min
+            lon_min + c1 * res_lon,   # lon_max
+        )
 
     print(f"DEM patch: {dem_patch.shape} cells = {dem_patch.shape[1]*res_lon/lon_per_m:.0f}m W x {dem_patch.shape[0]*res_lat/lat_per_m:.0f}m N "
           f"[source={terrain_source}]")
@@ -500,6 +605,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_mask=building_mask,
             road_mask=road_mask,
             building_height_m=building_height_m,
+            surface_grid_override=tellus_surface_grid,
         )
     elif terrain_quality == "legacy":
         print(f"Converting to blocks [legacy] "
@@ -528,6 +634,10 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         if terrain_source == "mapzen":
             full_meta.setdefault("mapzen_zoom", int(mapzen_zoom))
             full_meta.setdefault("use_esa_worldcover", bool(use_esa))
+        if terrain_source == "tellus_world":
+            full_meta.setdefault("tellus_world_dir", str(tellus_world_dir))
+            full_meta.setdefault("tellus_world_scale", float(tellus_world_scale))
+            full_meta.setdefault("tellus_sea_level_y", int(tellus_sea_level_y))
         if use_osm:
             full_meta.setdefault("use_osm", True)
             full_meta.setdefault("building_height_m", float(building_height_m))

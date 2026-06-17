@@ -74,10 +74,18 @@ def main():
                     help="terrain rendering quality: enhanced (Tellus 風改善, default) または legacy")
     ap.add_argument("--sea-level", type=float, default=0.0,
                     help="海面標高 [m]（enhanced のみ、御坊海岸は 0.0）")
-    ap.add_argument("--terrain-source", default="gsi", choices=["gsi", "mapzen"],
+    ap.add_argument("--terrain-source", default="gsi", choices=["gsi", "mapzen", "tellus_world"],
                     help="表示用 DEM のソース。gsi=国土地理院 5m DEM (default、校正と同じ)、"
                          "mapzen=Tellus が使う AWS Mapzen Joerd 全球 DEM "
-                         "（inundation を bilinear 再投影して上書き）")
+                         "（inundation を bilinear 再投影して上書き）、"
+                         "tellus_world=Tellus mod が生成した Anvil world 全部 "
+                         "（地形・地表ブロック共に Tellus そのまま、inundation だけ overlay）")
+    ap.add_argument("--tellus-world-dir", default=None,
+                    help="terrain_source=tellus_world のとき必須。level.dat のあるディレクトリ。")
+    ap.add_argument("--tellus-world-scale", type=float, default=1.0,
+                    help="Tellus 世界生成時の world_scale（既定 1 = 1 block/m, real-Earth scale）")
+    ap.add_argument("--tellus-sea-level-y", type=int, default=0,
+                    help="Tellus 世界の海面 y。dem (m) = block_y - sea_level_y（既定 0）")
     ap.add_argument("--mapzen-zoom", type=int, default=15,
                     help="Mapzen タイル zoom (14≈9.5m, 15≈4.8m, 16≈2.4m)")
     ap.add_argument("--use-esa", action="store_true",
@@ -267,6 +275,9 @@ def main():
             use_esa=args.use_esa,
             use_osm=args.use_osm,
             building_height_m=args.building_height,
+            tellus_world_dir=args.tellus_world_dir,
+            tellus_world_scale=args.tellus_world_scale,
+            tellus_sea_level_y=args.tellus_sea_level_y,
         )
 
     print(f"\nAll done. Output dir: {OUT_DIR}")
