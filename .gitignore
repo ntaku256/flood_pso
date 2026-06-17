@@ -26,3 +26,6 @@ results/pdf_raster/
 
 # tellus_data.py が DL する Mapzen terrain tiles / ESA WorldCover / OSM JSON キャッシュ
 data_cache/
+
+# nbt_preview.py のパース結果キャッシュ（npz, 再生成可能）
+results/nbt_preview/.cache/
