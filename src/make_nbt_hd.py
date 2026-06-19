@@ -110,6 +110,9 @@ def main():
     ap.add_argument("--wakayama-grd", default=None,
                     help="和歌山県 LiDAR グラウンド点群テキスト（_grd.txt）を真の1m DEM として使う。"
                          "指定時は GSI 5m DEM の代わりにこれを読む（系VI→緯度経度・1mグリッド化）")
+    ap.add_argument("--wakayama-org", default=None,
+                    help="和歌山県 LiDAR オリジナル点群（_org.txt, DSM）の明示パス。建物実高さに使う。"
+                         "未指定なら --wakayama-grd の _grd.txt を _org.txt に置換して探す")
     ap.add_argument("--use-fgd", action="store_true",
                     help="国土地理院 FG-GML の建物(BldA)・道路(RdEdg)をローカルから取得して "
                          "地表に重ねる（建物=stone 立体、道路=gravel 上書き、API不要・高精度）")
@@ -182,8 +185,9 @@ def main():
     # 建物高さグリッド（DSM 由来）：和歌山 LiDAR の _org（DSM）があれば DSM-DEM を建物実高に使う。
     building_height_grid = None
     if args.wakayama_grd and not args.no_building_heights:
-        org_path = Path(str(args.wakayama_grd).replace("_grd.txt", "_org.txt"))
-        if "_grd.txt" in str(args.wakayama_grd) and org_path.exists():
+        org_path = Path(args.wakayama_org) if args.wakayama_org \
+            else Path(str(args.wakayama_grd).replace("_grd.txt", "_org.txt"))
+        if org_path.exists():
             from wakayama_pcd import load_wakayama_dem
             from tellus_data import reproject_to_grid
             print(f"Loading Wakayama LiDAR DSM (building heights): {org_path.name}")

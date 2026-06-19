@@ -28,25 +28,26 @@ _ANCHOR_KEYS = np.array(MATCH_KEYS, dtype=object)
 _ANCHOR_RGB = np.array([_key_rgb(k) for k in MATCH_KEYS], dtype=np.float32)  # (M,3)
 
 
-def enhance_rgb(rgb: np.ndarray, *, saturation: float = 1.5,
-                low_pct: float = 2.0, high_pct: float = 98.0) -> np.ndarray:
+def enhance_rgb(rgb: np.ndarray, *, saturation: float = 1.6,
+                white_balance: float = 1.0, contrast: float = 1.08) -> np.ndarray:
     """
-    オルソの青み・霞かぶりと低彩度を補正（白黒っぽさ対策）。
-      1) チャンネル別パーセンタイル・ストレッチ（自動レベル）でかぶり除去＋コントラスト確保。
-         各チャンネルを独立に伸ばすので青みかぶりが中和され、影が青くなりにくい。
-      2) 穏やかな彩度ブースト。
-      saturation: 彩度倍率（1=ストレッチのみ, 1.5前後が自然）
+    オルソの青み・霞かぶりと低彩度を補正（白黒っぽさ対策）。タイル間でロバストにするため、
+    per-channel ストレッチ（赤の弱い海沿いタイルで赤を過増幅しピンク化した）ではなく
+    **gray-world ホワイトバランス（比例的・過増幅しない）＋彩度＋緩いコントラスト**を使う。
+      white_balance: gray-world 補正の強さ 0..1（1=チャンネル平均を完全中和）
+      saturation   : 彩度倍率（>1 で鮮やか）
+      contrast     : 128 中心のコントラスト
     """
     arr = rgb.astype(np.float32)
-    for c in range(3):
-        ch = arr[..., c]
-        lo = float(np.percentile(ch, low_pct))
-        hi = float(np.percentile(ch, high_pct))
-        if hi > lo + 1e-3:
-            arr[..., c] = np.clip((ch - lo) / (hi - lo) * 255.0, 0, 255)
+    if white_balance > 0:
+        means = arr.reshape(-1, 3).mean(0)
+        gray = float(means.mean())
+        scale = 1.0 + white_balance * (gray / np.maximum(means, 1e-3) - 1.0)
+        arr *= scale
     if saturation != 1.0:
         luma = arr @ np.array([0.299, 0.587, 0.114], np.float32)
         arr = luma[..., None] + (arr - luma[..., None]) * saturation
+    arr = (arr - 128.0) * contrast + 128.0
     return np.clip(arr, 0, 255).astype(np.uint8)
 
 
