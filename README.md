@@ -85,7 +85,10 @@ cd /home/moriken/web-app/flood_pso
 .venv/bin/python src/make_nbt_hd.py --K 16 --seed 0 --preset gobo_walk_1km --methods gt \
     --use-fgd --wakayama-grd data_cache/wakayama_lidar/06RC802_grd.txt --tag-suffix lidar
 # --wakayama-grd : 系VI(JGD2011)点群を 1m 緯度経度グリッド DEM 化（src/wakayama_pcd.py、要 pyproj/pandas）
-#                  GSI DEM1A は御坊未整備のため和歌山県オープンデータを利用。タイル被覆中心へ自動設定。
+#                  GSI DEM1A は御坊未整備のため和歌山県オープンデータを利用。
+#                  size/center 未指定ならタイル全域(2km×1.5km等)を出力。--wakayama-org で DSM(建物高さ)。
+# --scale 1.3    : 1ブロックを細かく（1block≈0.77m）して全体を1.3倍に拡大（ブロック数~1.69倍、重い）。
+#                  LiDAR もその解像度で再グリッド。h/v 両方を細かくする。
 
 # 5c. 地表色を GSI 空中写真から（写真駆動の地表）
 .venv/bin/python src/make_nbt_hd.py --K 16 --seed 0 --preset gobo_walk_1km --methods gt \

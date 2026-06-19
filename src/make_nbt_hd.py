@@ -149,6 +149,9 @@ def main():
                     help="南北幅 [m] を上書き")
     ap.add_argument("--h-res", type=float, default=None,
                     help="水平解像度 [m/block] を上書き（小さいほど詳細・重い）")
+    ap.add_argument("--scale", type=float, default=1.0,
+                    help="1ブロックを細かくして全体を拡大する倍率。1.3 で 1block≈0.77m、"
+                         "ブロック数は約1.69倍。LiDAR もこの解像度で再グリッドする")
     ap.add_argument("--tag-suffix", type=str, default="",
                     help="出力ファイル名の追加サフィックス（例: --tag-suffix amada）")
     args = ap.parse_args()
@@ -165,11 +168,14 @@ def main():
     if ks != args.ks:
         print(f"  warning: case file ks={ks} does not match --ks={args.ks}")
 
+    # --scale 1.3 → LiDAR/ブロックを 1/1.3≈0.77m 解像度に（細かく＝拡大）
+    lidar_res = 1.0 / args.scale if args.scale and args.scale > 0 else 1.0
+
     # DEM 読み込み。--wakayama-grd 指定時は真の1m LiDAR、未指定は GSI 5m DEM。
     if args.wakayama_grd:
         from wakayama_pcd import load_wakayama_dem
-        print(f"Loading Wakayama LiDAR DEM (true 1m): {args.wakayama_grd}")
-        dem_info = load_wakayama_dem(args.wakayama_grd)
+        print(f"Loading Wakayama LiDAR DEM (res={lidar_res:.3f}m): {args.wakayama_grd}")
+        dem_info = load_wakayama_dem(args.wakayama_grd, res_m=lidar_res)
     else:
         print("Loading DEM (5m, full resolution)...")
         dem_info = mosaic_tiles(DEM_DIR)
@@ -191,7 +197,7 @@ def main():
             from wakayama_pcd import load_wakayama_dem
             from tellus_data import reproject_to_grid
             print(f"Loading Wakayama LiDAR DSM (building heights): {org_path.name}")
-            dsm_info = load_wakayama_dem(str(org_path))
+            dsm_info = load_wakayama_dem(str(org_path), res_m=lidar_res)
             dsm_on_dem = reproject_to_grid(dsm_info["dem"], dsm_info, dem_info, fill_value=np.nan)
             building_height_grid = np.clip(dsm_on_dem - dem, 0, None).astype(np.float32)
             print(f"  obj-height: median={np.nanmedian(building_height_grid):.2f}m "
@@ -201,6 +207,10 @@ def main():
     if args.width  is not None: width_m = args.width
     if args.depth  is not None: depth_m = args.depth
     if args.h_res  is not None: h_res   = args.h_res
+    if args.scale and args.scale != 1.0:
+        # 1ブロックを細かく（h/v 両方）＝全体を args.scale 倍に拡大
+        h_res = h_res / args.scale
+        v_res = v_res / args.scale
     _def_lat, _def_lon = PRESET_CENTERS.get(args.preset, (LAT_CENTER, LON_CENTER))
     if args.wakayama_grd:
         # LiDAR タイルの被覆中心を既定中心にする（タイルは市街地の一部のみ）

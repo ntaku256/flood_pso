@@ -28,26 +28,36 @@ _ANCHOR_KEYS = np.array(MATCH_KEYS, dtype=object)
 _ANCHOR_RGB = np.array([_key_rgb(k) for k in MATCH_KEYS], dtype=np.float32)  # (M,3)
 
 
-def enhance_rgb(rgb: np.ndarray, *, saturation: float = 1.6,
-                white_balance: float = 1.0, contrast: float = 1.08) -> np.ndarray:
+def enhance_rgb(rgb: np.ndarray, *, saturation: float = 1.35,
+                low_pct: float = 2.0, high_pct: float = 98.0,
+                scale_cap: float = 1.5) -> np.ndarray:
     """
-    オルソの青み・霞かぶりと低彩度を補正（白黒っぽさ対策）。タイル間でロバストにするため、
-    per-channel ストレッチ（赤の弱い海沿いタイルで赤を過増幅しピンク化した）ではなく
-    **gray-world ホワイトバランス（比例的・過増幅しない）＋彩度＋緩いコントラスト**を使う。
-      white_balance: gray-world 補正の強さ 0..1（1=チャンネル平均を完全中和）
-      saturation   : 彩度倍率（>1 で鮮やか）
-      contrast     : 128 中心のコントラスト
+    オルソの青み・霞かぶりと低彩度を補正（白黒っぽさ対策）。vivid かつタイル間でロバスト。
+
+    **チャンネル別パーセンタイル・ストレッチ**（青みかぶり除去＋コントラスト＝発色）を使う。
+    これは陸の多いタイル(御坊中心)で鮮やかになる一方、赤の弱い海沿いタイル(06SC002)では
+    赤chを過増幅してピンク化する弱点があった。→ **各chの倍率を中央値比 scale_cap でクランプ**
+    することで、弱いchだけ抑えてピンク化を防ぎ（均等なタイルは無クランプ＝フル vivid）。
+    最後に控えめな彩度。
+      scale_cap: 1ch の伸長倍率を「中央値×scale_cap」までに制限
     """
     arr = rgb.astype(np.float32)
-    if white_balance > 0:
-        means = arr.reshape(-1, 3).mean(0)
-        gray = float(means.mean())
-        scale = 1.0 + white_balance * (gray / np.maximum(means, 1e-3) - 1.0)
-        arr *= scale
+    los = []
+    scales = []
+    for c in range(3):
+        lo = float(np.percentile(arr[..., c], low_pct))
+        hi = float(np.percentile(arr[..., c], high_pct))
+        los.append(lo)
+        scales.append(255.0 / max(hi - lo, 1e-3))
+    med = float(np.median(scales))
+    out = np.empty_like(arr)
+    for c in range(3):
+        s = min(scales[c], med * scale_cap)
+        out[..., c] = (arr[..., c] - los[c]) * s
+    arr = out
     if saturation != 1.0:
         luma = arr @ np.array([0.299, 0.587, 0.114], np.float32)
         arr = luma[..., None] + (arr - luma[..., None]) * saturation
-    arr = (arr - 128.0) * contrast + 128.0
     return np.clip(arr, 0, 255).astype(np.uint8)
 
 
