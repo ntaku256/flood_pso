@@ -374,6 +374,11 @@ def dem_to_blocks_enhanced(
     building_mask: np.ndarray | None = None,
     road_mask: np.ndarray | None = None,
     building_height_m: float = 6.0,
+    building_height_patch: np.ndarray | None = None,
+    color_building_roofs: bool = False,
+    wall_block: str = "white_concrete",
+    window_block: str = "gray_concrete",
+    floor_height: int = 3,
     surface_grid_override: np.ndarray | None = None,
 ) -> tuple[list, list[int]]:
     """
@@ -412,6 +417,14 @@ def dem_to_blocks_enhanced(
     if cover_patch is not None:
         cp = cover_patch[:nz*factor, :nx*factor].reshape(nz, factor, nx, factor)
         cover_ds = np.median(cp, axis=(1, 3)).astype(np.uint8)
+
+    # 建物高さ[m]（DSM 由来）をダウンサンプル。建物セルで実測高さ/屋根形状を使う。
+    bh_ds = None
+    if building_height_patch is not None:
+        bp = building_height_patch[:nz*factor, :nx*factor].reshape(nz, factor, nx, factor)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            bh_ds = np.nanmean(bp, axis=(1, 3))
 
     # ─── 3) 海/陸マスク + 地形特徴量（ダウンサンプル後の解像度で計算） ───
     sea_mask  = make_sea_mask(dem_ds, sea_level_m)
@@ -544,21 +557,36 @@ def dem_to_blocks_enhanced(
                 "state": block_id("water"),
             }))
 
-    # --- OSM 建物（陸セルのみ、地表柱の上に stone を building_height_m 分積む） ---
+    # --- 建物（陸セルのみ）。高さは DSM 由来 building_height_patch があれば実測、無ければ一律。
+    #     壁=wall_block + 階ごとの窓 window_block、屋根トップ=オルソ色（color_building_roofs）。 ---
     if building_mask is not None and building_mask.shape == dem_ds.shape:
-        bh_blocks = max(2, int(round(building_height_m * scale_land)))
+        default_bh = max(2, int(round(building_height_m * scale_land)))
+        fh = max(2, int(floor_height))
         b_idx = np.argwhere(building_mask & land_mask)
         b_max_y = 0
         for j, i_ in b_idx.tolist():
             bx_v = int(BX[j, i_]); bz_v = int(BZ[j, i_])
             y_top = int(y_surf_land[j, i_])
+            # DSM 物体高 → ブロック数（2..60 にクランプ）。無ければ既定高さ。
+            if bh_ds is not None and np.isfinite(bh_ds[j, i_]):
+                bh_blocks = int(round(float(bh_ds[j, i_]) * scale_land))
+                bh_blocks = max(2, min(bh_blocks, 60))
+            else:
+                bh_blocks = default_bh
             top_y = y_top + bh_blocks
             if top_y > b_max_y:
                 b_max_y = top_y
+            roof_kind = surf_block[j, i_] if color_building_roofs else "stone"
             for fy in range(y_top + 1, top_y + 1):
+                if fy == top_y:
+                    kind = roof_kind                              # 屋根
+                elif (fy - y_top) % fh == 0 and fy < top_y - 1:
+                    kind = window_block                          # 階ごとの窓帯
+                else:
+                    kind = wall_block                            # 壁
                 blocks.append(nbtlib.Compound({
                     "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(fy), nbtlib.Int(bz_v)]),
-                    "state": block_id("stone"),
+                    "state": block_id(kind),
                 }))
         max_y = max(max_y, b_max_y + 2)
 

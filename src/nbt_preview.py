@@ -28,16 +28,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-# 材質名 -> RGB（flood_pso_viewer 準拠）
-MAT_COLOR = {
-    "minecraft:stone": (130, 130, 130),
-    "minecraft:grass_block": (95, 150, 70),
-    "minecraft:sand": (222, 210, 160),
-    "minecraft:gravel": (128, 118, 108),
-    "minecraft:dirt": (134, 96, 67),
-    "minecraft:coarse_dirt": (120, 86, 60),
-    "minecraft:bedrock": (25, 25, 25),
-}
+# 材質名 -> RGB（block_palette.py = 単一真実源 から）
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from block_palette import name_to_rgb as _name_to_rgb
+MAT_COLOR = dict(_name_to_rgb())
 # 水・氷系（旧形式の生 water/ice と stained_glass 版の両対応）
 WATER_NAMES = {"minecraft:blue_stained_glass", "minecraft:cyan_stained_glass",
                "minecraft:water", "minecraft:blue_ice", "minecraft:ice", "minecraft:packed_ice"}

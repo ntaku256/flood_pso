@@ -117,8 +117,19 @@ def main():
                     help="--use-fgd の建物 BldA GML パス")
     ap.add_argument("--fgd-rdedg", default=DEFAULT_RDEDG_XML,
                     help="--use-fgd の道路 RdEdg GML パス")
+    ap.add_argument("--surface-ortho", action="store_true",
+                    help="GSI シームレス空中写真から地表色を決める（viewer 既知のバニラブロックへ"
+                         "色マッチ：草/砂/砂利/石/水/岩盤）。傾斜分類より写真寄りの見た目に")
+    ap.add_argument("--ortho-zoom", type=int, default=18,
+                    help="空中写真タイル zoom（18≈0.6m/px, 17≈1.2m/px）")
+    ap.add_argument("--ortho-saturation", type=float, default=1.4,
+                    help="空中写真の彩度ブースト（自動レベル後。1=彩度補正なし, 1.4既定, 2+で過飽和）")
+    ap.add_argument("--no-litematic", action="store_true",
+                    help="既定で併せて出力する .litematic を抑止（.nbt のみ）")
     ap.add_argument("--building-height", type=float, default=6.0,
-                    help="建物の高さ [m]（既定 6m ≒ 2 階建て）")
+                    help="建物の高さ [m]（DSM が無いとき/--no-building-heights 時の一律値）")
+    ap.add_argument("--no-building-heights", action="store_true",
+                    help="和歌山 LiDAR DSM(_org) からの建物実高さ推定を使わず一律高さにする")
     ap.add_argument("--v-exag", type=float, default=None,
                     help="陸の垂直誇張倍率を上書き（プリセットの v_exag を override）")
     ap.add_argument("--smooth-sigma", type=float, default=1.0,
@@ -167,6 +178,20 @@ def main():
         river_bbox=RIVER_BBOX, elev_max=RIVER_ELEV_MAX,
     )
     print(f"  DEM={dem.shape}  src cells={int(np.sum(source))}")
+
+    # 建物高さグリッド（DSM 由来）：和歌山 LiDAR の _org（DSM）があれば DSM-DEM を建物実高に使う。
+    building_height_grid = None
+    if args.wakayama_grd and not args.no_building_heights:
+        org_path = Path(str(args.wakayama_grd).replace("_grd.txt", "_org.txt"))
+        if "_grd.txt" in str(args.wakayama_grd) and org_path.exists():
+            from wakayama_pcd import load_wakayama_dem
+            from tellus_data import reproject_to_grid
+            print(f"Loading Wakayama LiDAR DSM (building heights): {org_path.name}")
+            dsm_info = load_wakayama_dem(str(org_path))
+            dsm_on_dem = reproject_to_grid(dsm_info["dem"], dsm_info, dem_info, fill_value=np.nan)
+            building_height_grid = np.clip(dsm_on_dem - dem, 0, None).astype(np.float32)
+            print(f"  obj-height: median={np.nanmedian(building_height_grid):.2f}m "
+                  f"99%={np.nanpercentile(building_height_grid,99):.1f}m")
 
     width_m, depth_m, h_res, v_res, v_exag = PRESETS[args.preset]
     if args.width  is not None: width_m = args.width
@@ -261,6 +286,7 @@ def main():
         if args.use_esa: tsuffix += "_esa"
         if args.use_osm: tsuffix += "_osm"
         if args.use_fgd: tsuffix += "_fgd"
+        if args.surface_ortho: tsuffix += "_ortho"
         usuffix = f"_{args.tag_suffix}" if args.tag_suffix else ""
         out = OUT_DIR / f"gobo_hd_K{K}{suffix}_seed{args.seed}_{args.preset}_{tag}{tsuffix}{qsuffix}{usuffix}.nbt"
         meta = {
@@ -312,11 +338,20 @@ def main():
             use_fgd=args.use_fgd,
             fgd_bld_xml=args.fgd_bld,
             fgd_rdedg_xml=args.fgd_rdedg,
+            surface_ortho=args.surface_ortho,
+            ortho_zoom=args.ortho_zoom,
+            ortho_saturation=args.ortho_saturation,
             building_height_m=args.building_height,
+            building_height_grid=building_height_grid,
             tellus_world_dir=args.tellus_world_dir,
             tellus_world_scale=args.tellus_world_scale,
             tellus_sea_level_y=args.tellus_sea_level_y,
         )
+
+        # 既定で Litematica (.litematic) も併せて出力（redtact / Litematica mod 用）
+        if not args.no_litematic:
+            from nbt_to_litematic import structure_nbt_to_litematic
+            structure_nbt_to_litematic(str(out))
 
     print(f"\nAll done. Output dir: {OUT_DIR}")
 

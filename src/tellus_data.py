@@ -41,6 +41,7 @@ from PIL import Image
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CACHE_DIR = REPO_ROOT / "data_cache"
 MAPZEN_BASE_URL = "https://elevation-tiles-prod.s3.amazonaws.com/terrarium"
+GSI_ORTHO_BASE_URL = "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto"  # 全国シームレス空中写真(JPG)
 ESA_BASE_URL    = "https://esa-worldcover.s3.amazonaws.com/v200/2021/map"
 OVERPASS_URL    = "https://overpass-api.de/api/interpreter"
 
@@ -191,6 +192,78 @@ def fetch_mapzen_dem(
         "lon_min": nw_lon, "lon_max": se_lon,
         "res_lat": res_lat, "res_lon": res_lon,
         "source": "mapzen_terrarium",
+        "zoom":   zoom,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# GSI シームレス空中写真（オルソ RGB）取得
+# ─────────────────────────────────────────────────────────────
+
+def fetch_gsi_ortho_tile(z: int, x: int, y: int,
+                          cache_dir: Path = DEFAULT_CACHE_DIR) -> np.ndarray:
+    """1 タイル（256×256 RGB）を取得。キャッシュあれば使う。"""
+    tile_dir = cache_dir / "gsi_ortho" / str(z) / str(x)
+    tile_path = tile_dir / f"{y}.jpg"
+    if not tile_path.exists():
+        url = f"{GSI_ORTHO_BASE_URL}/{z}/{x}/{y}.jpg"
+        data = _http_get_with_retry(url)
+        tile_dir.mkdir(parents=True, exist_ok=True)
+        tile_path.write_bytes(data)
+    img = Image.open(tile_path).convert("RGB")
+    return np.asarray(img, dtype=np.uint8)  # (256, 256, 3)
+
+
+def fetch_gsi_ortho(
+    lat_min: float, lat_max: float,
+    lon_min: float, lon_max: float,
+    zoom: int = 18,
+    cache_dir: Path = DEFAULT_CACHE_DIR,
+    verbose: bool = True,
+) -> dict:
+    """
+    BBOX をカバーする GSI 空中写真タイルをモザイク化して RGB grid を返す。
+
+    Returns dict:
+      'rgb'    : np.ndarray (H, W, 3) uint8
+      'lat_min','lat_max','lon_min','lon_max','res_lat','res_lon'  (mosaic 全体)
+      'source' : "gsi_seamlessphoto", 'zoom'
+    （fetch_mapzen_dem と同じ bbox/res 規約。reproject_to_grid にそのまま渡せる）
+    """
+    tiles = tiles_for_bbox(lon_min, lat_min, lon_max, lat_max, zoom)
+    if not tiles:
+        raise ValueError(f"empty bbox: lat[{lat_min},{lat_max}] lon[{lon_min},{lon_max}]")
+    xs = sorted({x for x, _ in tiles})
+    ys = sorted({y for _, y in tiles})
+    nw_lon, nw_lat = tile_to_lonlat(xs[0],     ys[0],     zoom)
+    se_lon, se_lat = tile_to_lonlat(xs[-1] + 1, ys[-1] + 1, zoom)
+
+    ts = 256
+    H = (ys[-1] - ys[0] + 1) * ts
+    W = (xs[-1] - xs[0] + 1) * ts
+    mosaic = np.zeros((H, W, 3), dtype=np.uint8)
+    if verbose:
+        print(f"[gsi_ortho] zoom={zoom}  tiles={len(tiles)}  → mosaic {H}×{W}")
+    for i, (x, y) in enumerate(tiles, 1):
+        try:
+            tile = fetch_gsi_ortho_tile(zoom, x, y, cache_dir=cache_dir)
+        except Exception as e:
+            if verbose:
+                print(f"  [warn] ortho tile ({x},{y}) failed: {e}")
+            continue
+        r0 = (y - ys[0]) * ts
+        c0 = (x - xs[0]) * ts
+        mosaic[r0:r0 + ts, c0:c0 + ts] = tile
+        if verbose and (i % 16 == 0 or i == len(tiles)):
+            print(f"  [{i}/{len(tiles)}] ortho tiles fetched")
+
+    return {
+        "rgb": mosaic,
+        "lat_min": se_lat, "lat_max": nw_lat,
+        "lon_min": nw_lon, "lon_max": se_lon,
+        "res_lat": (nw_lat - se_lat) / H,
+        "res_lon": (se_lon - nw_lon) / W,
+        "source": "gsi_seamlessphoto",
         "zoom":   zoom,
     }
 

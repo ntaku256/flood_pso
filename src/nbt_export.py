@@ -34,19 +34,20 @@ import nbtlib
 # ブロックパレット定義
 # ─────────────────────────────────────────────────────────────
 
-PALETTE = {
-    "air":         nbtlib.Compound({"Name": nbtlib.String("minecraft:air")}),
-    "stone":       nbtlib.Compound({"Name": nbtlib.String("minecraft:stone")}),
-    "grass":       nbtlib.Compound({"Name": nbtlib.String("minecraft:grass_block"),
-                                    "Properties": nbtlib.Compound({"snowy": nbtlib.String("false")})}),
-    "sand":        nbtlib.Compound({"Name": nbtlib.String("minecraft:sand")}),
-    "gravel":      nbtlib.Compound({"Name": nbtlib.String("minecraft:gravel")}),
-    # water/blue_ice はアニメーションテクスチャでブラウザ描画エラーになるため
-    # blue_stained_glass / cyan_stained_glass で代替
-    "water":       nbtlib.Compound({"Name": nbtlib.String("minecraft:blue_stained_glass")}),
-    "blue_ice":    nbtlib.Compound({"Name": nbtlib.String("minecraft:cyan_stained_glass")}),
-    "bedrock":     nbtlib.Compound({"Name": nbtlib.String("minecraft:bedrock")}),
-}
+# パレットは block_palette.py（単一真実源, ~80 バニラブロック）から生成。
+# water/blue_ice はアニメーションテクスチャ回避のため stained_glass で代替（block_palette 内で定義）。
+from block_palette import BLOCKS as _BLOCKS, PALETTE_KEYS as _PALETTE_KEYS
+
+
+def _palette_compound(key: str) -> nbtlib.Compound:
+    name = _BLOCKS[key][0]
+    if name == "minecraft:grass_block":
+        return nbtlib.Compound({"Name": nbtlib.String(name),
+                                "Properties": nbtlib.Compound({"snowy": nbtlib.String("false")})})
+    return nbtlib.Compound({"Name": nbtlib.String(name)})
+
+
+PALETTE = {k: _palette_compound(k) for k in _PALETTE_KEYS}
 
 PALETTE_LIST_KEYS = list(PALETTE.keys())
 PALETTE_INDEX = {k: i for i, k in enumerate(PALETTE_LIST_KEYS)}
@@ -333,7 +334,11 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   use_fgd: bool = False,
                   fgd_bld_xml: str | None = None,
                   fgd_rdedg_xml: str | None = None,
+                  surface_ortho: bool = False,
+                  ortho_zoom: int = 18,
+                  ortho_saturation: float = 1.4,
                   building_height_m: float = 6.0,
+                  building_height_grid: np.ndarray | None = None,
                   tellus_world_dir: str | None = None,
                   tellus_world_scale: float = 1.0,
                   tellus_sea_level_y: int = 0):
@@ -507,6 +512,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
     lon_min = dem_info_render["lon_min"]
     res_lat = dem_info_render["res_lat"]
     res_lon = dem_info_render["res_lon"]
+    bh_patch = None   # 建物高さ[m] パッチ（DSM 由来, 任意）
 
     if terrain_source == "tellus_world":
         # tellus_world では fetch_grid 段階で既に target bbox を切り出してあるので
@@ -535,6 +541,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
 
         dem_patch = dem[r0:r1, c0:c1]
         idn_patch = inundation_render[r0:r1, c0:c1]
+        if building_height_grid is not None and building_height_grid.shape == dem.shape:
+            bh_patch = building_height_grid[r0:r1, c0:c1]
         if terrain_source == "mapzen" and use_esa:
             cover_patch = cover_patch_full[r0:r1, c0:c1]
 
@@ -560,6 +568,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         idn_patch = nd_zoom(idn_patch, up_factor, order=1, mode="nearest")
         if cover_patch is not None:
             cover_patch = nd_zoom(cover_patch, up_factor, order=0, mode="nearest")
+        if bh_patch is not None:
+            bh_patch = nd_zoom(bh_patch, up_factor, order=1, mode="nearest")
         print(f"  [upsample] {up_factor:.2f}× source DEM → patch shape {dem_patch.shape}")
         h_res_dem = h_res
 
@@ -606,6 +616,21 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             print(f"  [fgd] buildings={fgd['n_buildings']}  roads={fgd['n_roads']}  "
                   f"→ mask cells: building={int(bm_f.sum())}  road={int(rm_f.sum())}")
 
+        # 地表色を空中写真から（最優先の surface_grid_override に流す）
+        surface_override = tellus_surface_grid
+        if surface_ortho:
+            from ortho_surface import ortho_surface_grid
+            ph, pw = dem_patch.shape
+            dst_meta = {
+                "lat_min": patch_bbox_latlon[0], "lat_max": patch_bbox_latlon[1],
+                "lon_min": patch_bbox_latlon[2], "lon_max": patch_bbox_latlon[3],
+                "res_lat": (patch_bbox_latlon[1] - patch_bbox_latlon[0]) / ph,
+                "res_lon": (patch_bbox_latlon[3] - patch_bbox_latlon[2]) / pw,
+                "shape": (ph, pw),
+            }
+            surface_override = ortho_surface_grid(dst_meta, zoom=ortho_zoom,
+                                                  saturation=ortho_saturation)
+
         print(f"Converting to blocks [enhanced] "
               f"(h_res={h_res}m/block, v_res={v_res}m/block, "
               f"v_exag_land={v_exag}, v_exag_sea={v_es:.2f}, "
@@ -613,6 +638,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
               f"cliff_thr={cliff_threshold_m_per_m}"
               + (f", esa_cover ✓" if cover_patch is not None else "")
               + (f", osm ✓" if use_osm else "")
+              + (f", ortho ✓" if surface_ortho else "")
               + ")...")
         blocks, size = dem_to_blocks_enhanced(
             dem_patch, idn_patch, h_res_dem, h_res,
@@ -628,7 +654,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_mask=building_mask,
             road_mask=road_mask,
             building_height_m=building_height_m,
-            surface_grid_override=tellus_surface_grid,
+            building_height_patch=bh_patch,
+            color_building_roofs=surface_ortho,
+            surface_grid_override=surface_override,
         )
     elif terrain_quality == "legacy":
         print(f"Converting to blocks [legacy] "
@@ -667,6 +695,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         if use_fgd:
             full_meta.setdefault("use_fgd", True)
             full_meta.setdefault("building_height_m", float(building_height_m))
+        if surface_ortho:
+            full_meta.setdefault("surface_ortho", True)
+            full_meta.setdefault("ortho_zoom", int(ortho_zoom))
         if terrain_quality == "enhanced":
             full_meta.setdefault("sea_level_m", float(sea_level_m))
             full_meta.setdefault("ocean_max_depth_m", float(ocean_max_depth_m))
