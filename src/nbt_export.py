@@ -36,14 +36,18 @@ import nbtlib
 
 # パレットは block_palette.py（単一真実源, ~80 バニラブロック）から生成。
 # water/blue_ice はアニメーションテクスチャ回避のため stained_glass で代替（block_palette 内で定義）。
-from block_palette import BLOCKS as _BLOCKS, PALETTE_KEYS as _PALETTE_KEYS
+from block_palette import (BLOCKS as _BLOCKS, PALETTE_KEYS as _PALETTE_KEYS,
+                           block_state_properties as _block_state_properties)
 
 
 def _palette_compound(key: str) -> nbtlib.Compound:
     name = _BLOCKS[key][0]
-    if name == "minecraft:grass_block":
-        return nbtlib.Compound({"Name": nbtlib.String(name),
-                                "Properties": nbtlib.Compound({"snowy": nbtlib.String("false")})})
+    props = _block_state_properties(name)
+    if props:
+        return nbtlib.Compound({
+            "Name": nbtlib.String(name),
+            "Properties": nbtlib.Compound({k: nbtlib.String(v) for k, v in props.items()}),
+        })
     return nbtlib.Compound({"Name": nbtlib.String(name)})
 
 
@@ -341,7 +345,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   building_height_grid: np.ndarray | None = None,
                   tellus_world_dir: str | None = None,
                   tellus_world_scale: float = 1.0,
-                  tellus_sea_level_y: int = 0):
+                  tellus_sea_level_y: int = 0,
+                  bridges_json: str | None = None):
     """
     DEMと浸水マップの指定範囲をMinecraft NBT Structureに変換する。
 
@@ -579,6 +584,10 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
 
         # OSM 取得 + ブロック grid 上の建物・道路 mask を事前生成
         building_mask = road_mask = None
+        building_height_block = None   # P1: per-building 集約のフラット高さ（FG-GML 経路）
+        building_id_grid = None        # P2: 建物ごとの整数ラベル
+        building_wall_keys = None      # P2: 建物 id → 壁ブロックキー
+        building_roof_keys = None      # P2: 建物 id → 屋根ブロックキー(fallback)
         if use_osm:
             from tellus_data import fetch_osm_buildings_roads
             osm = fetch_osm_buildings_roads(
@@ -598,7 +607,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
 
         # FG-GML（国土地理院ローカルベクタ）建物・道路 mask。OSM と併用時は union。
         if use_fgd:
+            import warnings as _warnings
             from fgd_vector import load_fgd_buildings_roads
+            from terrain_render import build_building_maps
             fgd = load_fgd_buildings_roads(
                 fgd_bld_xml, fgd_rdedg_xml,
                 lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
@@ -607,14 +618,34 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             factor = max(1, round(h_res / h_res_dem))
             nz_g = dem_patch.shape[0] // factor
             nx_g = dem_patch.shape[1] // factor
-            bm_f, rm_f = build_osm_masks(
-                fgd, patch_bbox_latlon,
+            # 道路だけ従来 mask（建物は per-building 集約で別途生成）
+            _, rm_f = build_osm_masks(
+                {"roads": fgd["roads"]}, patch_bbox_latlon,
                 grid_h=nz_g, grid_w=nx_g, h_res_block_m=h_res,
             )
+            # P1: 建物高さ[m] を block grid にダウンサンプル → 各 footprint で p75 集約しフラット化
+            # P2: 同時に建物 id / type 別の壁・屋根キーも生成
+            dsm_h_block = None
+            if bh_patch is not None:
+                bpf = bh_patch[:nz_g*factor, :nx_g*factor].reshape(nz_g, factor, nx_g, factor)
+                with _warnings.catch_warnings():
+                    _warnings.simplefilter("ignore", RuntimeWarning)
+                    dsm_h_block = np.nanmean(bpf, axis=(1, 3))
+            bmaps = build_building_maps(
+                fgd["buildings"], dsm_h_block, patch_bbox_latlon, nz_g, nx_g,
+            )
+            bm_f = bmaps["mask"]
             building_mask = bm_f if building_mask is None else (building_mask | bm_f)
             road_mask = rm_f if road_mask is None else (road_mask | rm_f)
+            building_height_block = bmaps["height"]
+            building_id_grid = bmaps["id"]
+            building_wall_keys = bmaps["wall_keys"]
+            building_roof_keys = bmaps["roof_keys"]
+            _bh_in = building_height_block[np.isfinite(building_height_block)]
+            _med = float(np.median(_bh_in)) if _bh_in.size else 0.0
             print(f"  [fgd] buildings={fgd['n_buildings']}  roads={fgd['n_roads']}  "
-                  f"→ mask cells: building={int(bm_f.sum())}  road={int(rm_f.sum())}")
+                  f"→ mask cells: building={int(bm_f.sum())}  road={int(rm_f.sum())}  "
+                  f"per-building flat-height median={_med:.1f}m  n_bld={len(building_wall_keys)}")
 
         # 地表色を空中写真から（最優先の surface_grid_override に流す）
         surface_override = tellus_surface_grid
@@ -630,6 +661,19 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             }
             surface_override = ortho_surface_grid(dst_meta, zoom=ortho_zoom,
                                                   saturation=ortho_saturation)
+
+        # OSM 橋（bridge=yes + layer）を読み、patch 範囲に交差するものを立体化対象に
+        bridges_render = None
+        if bridges_json:
+            from bridge_osm import load_bridges
+            bridges_render = load_bridges(
+                bridges_json,
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+            )
+            print(f"  [bridge] OSM 橋 {len(bridges_render)} 本を patch 内に配置"
+                  + (f"（例: {', '.join(b['name'] for b in bridges_render if b['name'])[:60]}）"
+                     if any(b['name'] for b in bridges_render) else ""))
 
         print(f"Converting to blocks [enhanced] "
               f"(h_res={h_res}m/block, v_res={v_res}m/block, "
@@ -655,8 +699,14 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             road_mask=road_mask,
             building_height_m=building_height_m,
             building_height_patch=bh_patch,
+            building_height_block=building_height_block,
+            building_id=building_id_grid,
+            building_wall_keys=building_wall_keys,
+            building_roof_keys=building_roof_keys,
             color_building_roofs=surface_ortho,
             surface_grid_override=surface_override,
+            bridges=bridges_render,
+            patch_bbox_latlon=patch_bbox_latlon,
         )
     elif terrain_quality == "legacy":
         print(f"Converting to blocks [legacy] "

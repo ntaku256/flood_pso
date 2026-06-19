@@ -141,6 +141,22 @@ def role(key: str) -> str:
     return BLOCKS[key][2]
 
 
+def block_state_properties(name: str) -> dict[str, str] | None:
+    """minecraft ブロック名 → BlockState の Properties（単一真実源, None=Properties 無し）。
+
+    NBT (nbt_export) と litematic (nbt_to_litematic) のパレット生成が共通で使う。
+    - grass_block : snowy=false（従来挙動）
+    - *_leaves    : persistent=true → ワールド配置後に葉が時間で崩壊して消えるのを防ぐ
+      （構造物/litematic に Properties 無しで置くと worldgen 既定 persistent=false で
+       幹から離れた葉が decay して消える）。distance=1 も明示。
+    """
+    if name == "minecraft:grass_block":
+        return {"snowy": "false"}
+    if name.endswith("_leaves"):
+        return {"persistent": "true", "distance": "1"}
+    return None
+
+
 def name_to_rgb() -> dict[str, tuple[int, int, int]]:
     """minecraft:name → (r,g,b)。プレビュー/ビューア用。"""
     return {mc: c for (mc, c, _) in BLOCKS.values()}

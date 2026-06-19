@@ -91,21 +91,44 @@ def _iter_features(xml_path: str, local_name: str):
                 del parent[0]
 
 
+def _building_rings(el) -> tuple[list | None, list[list]]:
+    """BldA 要素 → (exterior_coords, [hole_coords,...])。
+    PolygonPatch の exterior（外周）と interior（中庭の穴）を分離して返す。
+    exterior が無ければ (None, [])。"""
+    ext = None
+    holes: list[list] = []
+    for patch in el.iter(f"{{{GML}}}PolygonPatch"):
+        ex = patch.find(f"{{{GML}}}exterior")
+        if ex is not None:
+            pl = ex.find(f".//{POSLIST}")
+            if pl is not None and pl.text:
+                c = _parse_poslist(pl.text)
+                if len(c) >= 3 and ext is None:
+                    ext = c
+        for inr in patch.findall(f"{{{GML}}}interior"):
+            pl = inr.find(f".//{POSLIST}")
+            if pl is not None and pl.text:
+                c = _parse_poslist(pl.text)
+                if len(c) >= 3:
+                    holes.append(c)
+    return ext, holes
+
+
 def load_buildings(xml_path: str, *, lat_min, lat_max, lon_min, lon_max) -> list[dict]:
-    """BldA → [{"coords":[[lat,lon],...], "tags":{"fgd_type","height_m"}}]"""
+    """BldA → [{"coords":[[lat,lon],...], "holes":[[[lat,lon],...],...],
+               "tags":{"fgd_type","height_m"}}]
+    coords=外周（後方互換）, holes=中庭の穴（per-building 高さ集約で空洞化に使う）。"""
     out = []
     for el in _iter_features(xml_path, "BldA"):
-        pl = el.find(f".//{POSLIST}")
-        if pl is None or not pl.text:
+        ext, holes = _building_rings(el)
+        if ext is None:
             continue
-        coords = _parse_poslist(pl.text)
-        if len(coords) < 3:
-            continue
-        if not _coords_intersect_bbox(coords, lat_min, lat_max, lon_min, lon_max):
+        if not _coords_intersect_bbox(ext, lat_min, lat_max, lon_min, lon_max):
             continue
         tp = el.findtext(f"{{{FGD}}}type") or ""
         h = BUILDING_HEIGHT_BY_TYPE.get(tp, DEFAULT_BUILDING_HEIGHT)
-        out.append({"coords": coords, "tags": {"fgd_type": tp, "height_m": h}})
+        out.append({"coords": ext, "holes": holes,
+                    "tags": {"fgd_type": tp, "height_m": h}})
     return out
 
 

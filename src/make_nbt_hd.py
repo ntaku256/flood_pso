@@ -133,6 +133,14 @@ def main():
                     help="建物の高さ [m]（DSM が無いとき/--no-building-heights 時の一律値）")
     ap.add_argument("--no-building-heights", action="store_true",
                     help="和歌山 LiDAR DSM(_org) からの建物実高さ推定を使わず一律高さにする")
+    ap.add_argument("--no-veg-filter", action="store_true",
+                    help="建物 DSM(_org) から LiDAR 植生クラス(class 3)を除外しない。"
+                         "既定は除外して樹木混入の建物高さ（御坊で建物の24%が影響）を浄化")
+    ap.add_argument("--bridges-json", type=str,
+                    default=str(REPO_ROOT / "data_cache" / "osm" / "gobo_bridges_geom.json"),
+                    help="OSM 橋(bridge=yes highway)の Overpass geom JSON。存在すれば道路が"
+                         "水域を渡る箇所に桁+坂+橋脚を立体化（FG-GMLに橋情報が無いため）。"
+                         "空文字で無効化")
     ap.add_argument("--v-exag", type=float, default=None,
                     help="陸の垂直誇張倍率を上書き（プリセットの v_exag を override）")
     ap.add_argument("--smooth-sigma", type=float, default=1.0,
@@ -152,6 +160,11 @@ def main():
     ap.add_argument("--scale", type=float, default=1.0,
                     help="1ブロックを細かくして全体を拡大する倍率。1.3 で 1block≈0.77m、"
                          "ブロック数は約1.69倍。LiDAR もこの解像度で再グリッドする")
+    ap.add_argument("--tiles", type=str, default=None,
+                    help="出力を重なりなくグリッド分割（大スケール時の OOM 回避）。"
+                         "'COLSxROWS'（例 4x1=東西4分割, 2x2=四分割）または整数N=Nx1。"
+                         "col0=西/row0=北。ファイル名に _c{col}/_r{row}c{col} を付す。"
+                         "DEM は1回だけロードしタイルごとに書き出すので省メモリ。")
     ap.add_argument("--tag-suffix", type=str, default="",
                     help="出力ファイル名の追加サフィックス（例: --tag-suffix amada）")
     args = ap.parse_args()
@@ -196,8 +209,11 @@ def main():
         if org_path.exists():
             from wakayama_pcd import load_wakayama_dem
             from tellus_data import reproject_to_grid
-            print(f"Loading Wakayama LiDAR DSM (building heights): {org_path.name}")
-            dsm_info = load_wakayama_dem(str(org_path), res_m=lidar_res)
+            veg_classes = None if args.no_veg_filter else (3,)
+            print(f"Loading Wakayama LiDAR DSM (building heights): {org_path.name}"
+                  + ("" if veg_classes is None else f"  [veg-filter: exclude class {veg_classes}]"))
+            dsm_info = load_wakayama_dem(str(org_path), res_m=lidar_res,
+                                         exclude_classes=veg_classes)
             dsm_on_dem = reproject_to_grid(dsm_info["dem"], dsm_info, dem_info, fill_value=np.nan)
             building_height_grid = np.clip(dsm_on_dem - dem, 0, None).astype(np.float32)
             print(f"  obj-height: median={np.nanmedian(building_height_grid):.2f}m "
@@ -232,6 +248,35 @@ def main():
     print(f"  preset={args.preset}  center=({lat_c:.6f},{lon_c:.6f})  "
           f"{width_m}×{depth_m}m  h_res={h_res}m  ~{est['estimated_nbt_MB']} MB/file  "
           f"({est['nx (East-West blocks)']}×{est['nz (North-South blocks)']} blocks)")
+
+    # ── タイル分割（--tiles）: 全域を重なりなく COLS×ROWS に割り、各タイルを個別に書き出す。
+    #    DEM/inundation は全域で1回だけ計算し、export_to_nbt が中心+幅でクロップする（省メモリ）。
+    if args.tiles:
+        _s = args.tiles.lower().replace(" ", "")
+        n_cols, n_rows = (int(v) for v in _s.split("x")) if "x" in _s else (int(_s), 1)
+    else:
+        n_cols, n_rows = 1, 1
+    import math as _m2
+    _lon_per_m = 1.0 / (111320.0 * _m2.cos(_m2.radians(lat_c)))
+    _lat_per_m = 1.0 / 111320.0
+    _tw, _td = width_m / n_cols, depth_m / n_rows
+    tile_specs = []  # (ttag, tile_lat_c, tile_lon_c, tile_w, tile_d)
+    for ri in range(n_rows):
+        for ci in range(n_cols):
+            t_lon = lon_c + (ci - (n_cols - 1) / 2.0) * _tw * _lon_per_m  # col0=西
+            t_lat = lat_c + ((n_rows - 1) / 2.0 - ri) * _td * _lat_per_m  # row0=北
+            if n_cols == 1 and n_rows == 1:
+                ttag = ""
+            elif n_rows == 1:
+                ttag = f"_c{ci}"
+            elif n_cols == 1:
+                ttag = f"_r{ri}"
+            else:
+                ttag = f"_r{ri}c{ci}"
+            tile_specs.append((ttag, t_lat, t_lon, _tw, _td))
+    if args.tiles:
+        print(f"  tiles={n_cols}×{n_rows}  各 {_tw:.0f}×{_td:.0f}m  "
+              f"(~{int(_tw/h_res)}×{int(_td/h_res)} blocks/tile)")
 
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
 
@@ -311,70 +356,86 @@ def main():
         if args.use_fgd: tsuffix += "_fgd"
         if args.surface_ortho: tsuffix += "_ortho"
         usuffix = f"_{args.tag_suffix}" if args.tag_suffix else ""
-        out = OUT_DIR / f"gobo_hd_K{K}{suffix}_seed{args.seed}_{args.preset}_{tag}{tsuffix}{qsuffix}{usuffix}.nbt"
-        meta = {
-            "experiment": "flood_pso_HD_benchmark",
-            "method": tag,
-            "method_long": r["method_long"],
-            "loss_kind": case.get("loss_kind", "depth"),
-            "K": K, "D": case["D"],
-            "seed": args.seed, "budget": case.get("budget"),
-            "water_level_global_m": r["water"],
-            "dh_amp_m": 1.5,
-            "dh_bounds_m": [-2.0, 2.0],
-            "dh_map":   r["dh"],          # ndarray → Float List + _shape
-            "sigma":    float(SIGMA),
-            "loss":     r["loss"],
-            "iou":      r["iou"],
-            "dh_rmse":  r["dh_rmse"],
-            "n_evals":  r["n_evals"],
-            "elapsed_s": r["elapsed_s"],
-            "river_bbox": [RIVER_BBOX["lat_min"], RIVER_BBOX["lat_max"],
-                            RIVER_BBOX["lon_min"], RIVER_BBOX["lon_max"]],
-            "river_elev_max_m": float(RIVER_ELEV_MAX),
-            "dem_source":    "FG-GML-503561-DEM5A-20250620 (国土地理院 5m DEM)",
-            "study_area":    "Gobo city / Hidaka river, Wakayama, Japan",
-            "preset": args.preset,
-            "ref_doc": "flood_pso/docs/05_ベンチマーク結果.md",
-        }
-        if ks > 0:
-            meta["K_s"] = ks
-            meta["sigma_bounds_m"] = [0.0, 3.0]
-            meta["sigma_levels_m"] = [0.0, 0.5, 1.0, 2.0, 4.0]  # flood_sim と整合
-            if r["sigma_map"] is not None:
-                meta["sigma_map"] = r["sigma_map"]   # ndarray → Float List + _shape
+        base_name = (f"gobo_hd_K{K}{suffix}_seed{args.seed}_{args.preset}_"
+                     f"{tag}{tsuffix}{qsuffix}{usuffix}")
         eff_v_exag = args.v_exag if args.v_exag is not None else v_exag
-        export_to_nbt(
-            dem_info, inundation,
-            lat_center=lat_c, lon_center=lon_c,
-            width_m=width_m, depth_m=depth_m,
-            h_res=h_res, v_res=v_res, v_exag=eff_v_exag,
-            out_path=str(out), meta=meta,
-            terrain_quality=args.quality,
-            sea_level_m=args.sea_level,
-            smooth_sigma_cells=args.smooth_sigma,
-            cliff_threshold_m_per_m=args.cliff_threshold,
-            terrain_source=args.terrain_source,
-            mapzen_zoom=args.mapzen_zoom,
-            use_esa=args.use_esa,
-            use_osm=args.use_osm,
-            use_fgd=args.use_fgd,
-            fgd_bld_xml=args.fgd_bld,
-            fgd_rdedg_xml=args.fgd_rdedg,
-            surface_ortho=args.surface_ortho,
-            ortho_zoom=args.ortho_zoom,
-            ortho_saturation=args.ortho_saturation,
-            building_height_m=args.building_height,
-            building_height_grid=building_height_grid,
-            tellus_world_dir=args.tellus_world_dir,
-            tellus_world_scale=args.tellus_world_scale,
-            tellus_sea_level_y=args.tellus_sea_level_y,
-        )
 
-        # 既定で Litematica (.litematic) も併せて出力（redtact / Litematica mod 用）
-        if not args.no_litematic:
-            from nbt_to_litematic import structure_nbt_to_litematic
-            structure_nbt_to_litematic(str(out))
+        # タイルごとに書き出す（--tiles 未指定なら tile_specs は ttag="" の単一要素）。
+        for ttag, t_lat, t_lon, t_w, t_d in tile_specs:
+            out = OUT_DIR / f"{base_name}{ttag}.nbt"
+            if ttag:
+                print(f"\n  -- tile {ttag}: center=({t_lat:.6f},{t_lon:.6f})  "
+                      f"{t_w:.0f}×{t_d:.0f}m → {out.name} --")
+            meta = {
+                "experiment": "flood_pso_HD_benchmark",
+                "method": tag,
+                "method_long": r["method_long"],
+                "loss_kind": case.get("loss_kind", "depth"),
+                "K": K, "D": case["D"],
+                "seed": args.seed, "budget": case.get("budget"),
+                "water_level_global_m": r["water"],
+                "dh_amp_m": 1.5,
+                "dh_bounds_m": [-2.0, 2.0],
+                "dh_map":   r["dh"],          # ndarray → Float List + _shape
+                "sigma":    float(SIGMA),
+                "loss":     r["loss"],
+                "iou":      r["iou"],
+                "dh_rmse":  r["dh_rmse"],
+                "n_evals":  r["n_evals"],
+                "elapsed_s": r["elapsed_s"],
+                "river_bbox": [RIVER_BBOX["lat_min"], RIVER_BBOX["lat_max"],
+                                RIVER_BBOX["lon_min"], RIVER_BBOX["lon_max"]],
+                "river_elev_max_m": float(RIVER_ELEV_MAX),
+                "dem_source":    "FG-GML-503561-DEM5A-20250620 (国土地理院 5m DEM)",
+                "study_area":    "Gobo city / Hidaka river, Wakayama, Japan",
+                "preset": args.preset,
+                # 再現用の幾何パラメータ（タイル単位で記録）
+                "scale": float(args.scale),
+                "lat_center": float(t_lat), "lon_center": float(t_lon),
+                "width_m": float(t_w), "depth_m": float(t_d),
+                "h_res_m": float(h_res), "v_res_m": float(v_res),
+                "v_exag": float(eff_v_exag),
+                "tile": ttag or "full", "tile_grid": f"{n_cols}x{n_rows}",
+                "ref_doc": "flood_pso/docs/05_ベンチマーク結果.md",
+            }
+            if ks > 0:
+                meta["K_s"] = ks
+                meta["sigma_bounds_m"] = [0.0, 3.0]
+                meta["sigma_levels_m"] = [0.0, 0.5, 1.0, 2.0, 4.0]  # flood_sim と整合
+                if r["sigma_map"] is not None:
+                    meta["sigma_map"] = r["sigma_map"]   # ndarray → Float List + _shape
+            export_to_nbt(
+                dem_info, inundation,
+                lat_center=t_lat, lon_center=t_lon,
+                width_m=t_w, depth_m=t_d,
+                h_res=h_res, v_res=v_res, v_exag=eff_v_exag,
+                out_path=str(out), meta=meta,
+                terrain_quality=args.quality,
+                sea_level_m=args.sea_level,
+                smooth_sigma_cells=args.smooth_sigma,
+                cliff_threshold_m_per_m=args.cliff_threshold,
+                terrain_source=args.terrain_source,
+                mapzen_zoom=args.mapzen_zoom,
+                use_esa=args.use_esa,
+                use_osm=args.use_osm,
+                use_fgd=args.use_fgd,
+                fgd_bld_xml=args.fgd_bld,
+                fgd_rdedg_xml=args.fgd_rdedg,
+                surface_ortho=args.surface_ortho,
+                ortho_zoom=args.ortho_zoom,
+                ortho_saturation=args.ortho_saturation,
+                building_height_m=args.building_height,
+                building_height_grid=building_height_grid,
+                tellus_world_dir=args.tellus_world_dir,
+                tellus_world_scale=args.tellus_world_scale,
+                tellus_sea_level_y=args.tellus_sea_level_y,
+                bridges_json=(args.bridges_json or None),
+            )
+
+            # 既定で Litematica (.litematic) も併せて出力（redtact / Litematica mod 用）
+            if not args.no_litematic:
+                from nbt_to_litematic import structure_nbt_to_litematic
+                structure_nbt_to_litematic(str(out))
 
     print(f"\nAll done. Output dir: {OUT_DIR}")
 

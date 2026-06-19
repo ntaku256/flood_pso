@@ -33,10 +33,19 @@ EPSG_WGS84 = "EPSG:4326"
 M_PER_DEG_LAT = 111320.0
 
 
-def _read_xyz(path: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """grd/org テキストから easting, northing, Z を読む（pandas C parser）。"""
+def _read_xyz(path: str, want_class: bool = False):
+    """grd/org テキストから easting, northing, Z（+ want_class なら class）を読む。
+    列: grd=4列[id,E,N,Z], org=5列[id,E,N,Z,class]。先頭3数値列[1,2,3]=E,N,Z, [4]=class。
+    want_class=True は org（5列）専用。grd には class 列が無いので呼ばないこと。"""
     import pandas as pd
-    # 列数可変（grd=4, org=5）。先頭3つの数値列のうち [1,2,3] = E,N,Z。
+    if want_class:
+        df = pd.read_csv(path, header=None, usecols=[1, 2, 3, 4],
+                         names=["e", "n", "z", "c"],
+                         dtype={"e": np.float64, "n": np.float64,
+                                "z": np.float64, "c": np.int16},
+                         engine="c", memory_map=True)
+        return (df["e"].to_numpy(), df["n"].to_numpy(),
+                df["z"].to_numpy(), df["c"].to_numpy())
     df = pd.read_csv(path, header=None, usecols=[1, 2, 3],
                      names=["e", "n", "z"], dtype=np.float64,
                      engine="c", memory_map=True)
@@ -57,15 +66,22 @@ def _fill_nan_nearest(grid: np.ndarray) -> np.ndarray:
 
 def load_wakayama_dem(grd_path: str, res_m: float = 1.0,
                       cache: bool = True, fill_gaps: bool = True,
-                      verbose: bool = True) -> dict:
+                      verbose: bool = True,
+                      exclude_classes: tuple | None = None) -> dict:
     """
     和歌山県点群（グラウンド推奨）を res_m[m] の緯度経度グリッド DEM にして
     dem_parser 互換 dict を返す。
 
     res_m=1.0 で「真の 1m」DEM。結果は同ディレクトリに .npz キャッシュ。
+
+    exclude_classes : org（DSM, 5列）でこの LiDAR 分類コードの点を除外してからグリッド化。
+      例 (3,) で植生（低木）を除いた「地面＋建物」DSM になり、建物高さの樹木混入を防ぐ。
+      grd（地形, 4列）には class 列が無いので指定しないこと。除外版は別キャッシュに保存。
     """
     grd_path = str(grd_path)
-    cache_path = Path(grd_path).with_suffix(f".grid{res_m:g}m.npz")
+    exc = tuple(sorted(set(int(c) for c in exclude_classes))) if exclude_classes else ()
+    exc_tag = ("_exc" + "".join(str(c) for c in exc)) if exc else ""
+    cache_path = Path(grd_path).with_suffix(f".grid{res_m:g}m{exc_tag}.npz")
     if cache and cache_path.exists():
         if verbose:
             print(f"[wakayama] load cache {cache_path.name}")
@@ -74,7 +90,16 @@ def load_wakayama_dem(grd_path: str, res_m: float = 1.0,
 
     if verbose:
         print(f"[wakayama] reading {Path(grd_path).name} ...")
-    e, n, zv = _read_xyz(grd_path)
+    if exc:
+        e, n, zv, cv = _read_xyz(grd_path, want_class=True)
+        keep = ~np.isin(cv, exc)
+        n_drop = int((~keep).sum())
+        e, n, zv = e[keep], n[keep], zv[keep]
+        if verbose:
+            print(f"[wakayama] exclude classes {exc}: dropped {n_drop:,} pts "
+                  f"({n_drop / max(1, len(keep)) * 100:.1f}%)")
+    else:
+        e, n, zv = _read_xyz(grd_path)
 
     from pyproj import Transformer
     tr = Transformer.from_crs(EPSG_ZONE6, EPSG_WGS84, always_xy=True)

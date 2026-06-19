@@ -351,6 +351,215 @@ def build_osm_masks(
     return building_mask, road_mask
 
 
+# FG-GML type → 壁/屋根ブロック（屋根は ortho 無効時 or 集約不能時の fallback）。
+# 木造住宅=白壁 / RC=コンクリ灰 / 無壁舎(倉庫・車庫)=石 で見た目を3分化。
+BUILDING_WALL_BY_TYPE = {
+    "普通建物":     "white_concrete",
+    "堅ろう建物":   "light_gray_concrete",
+    "高層建物":     "light_gray_concrete",
+    "普通無壁舎":   "stone",
+    "堅ろう無壁舎": "stone",
+}
+BUILDING_ROOF_BY_TYPE = {
+    "普通建物":     "gray_concrete",
+    "堅ろう建物":   "light_gray_concrete",
+    "高層建物":     "light_gray_concrete",
+    "普通無壁舎":   "gray_concrete",
+    "堅ろう無壁舎": "gray_concrete",
+}
+DEFAULT_WALL_KEY = "white_concrete"
+DEFAULT_ROOF_KEY = "gray_concrete"
+
+
+def build_building_maps(
+    buildings: list,
+    dsm_h_block: np.ndarray | None,
+    patch_bbox_latlon: tuple,
+    grid_h: int, grid_w: int,
+    *,
+    pct: int = 75,
+    type_floor_frac: float = 0.6,
+    min_h_m: float = 2.0,
+) -> dict:
+    """FG-GML 各建物を1棟単位でラスタ化し、描画に必要な block-grid マップ一式を返す。
+
+    - height : footprint 内 DSM-DEM の pct パーセンタイル（既定 p75）を **1棟1値** でフラット化（P1）。
+      per-cell 拾いの屋根凸凹・植生スパイク・切株化を解消。type 高さ×type_floor_frac を下限に。
+    - id     : 建物ごとの整数ラベル（-1=非建物）。屋根色を1棟で均一化する集約に使う（P2）。
+    - wall_keys / roof_keys : 建物 id → FG-GML type 由来の壁/屋根ブロックキー（P2 fallback）。
+    interior（中庭）は除外して空洞に保つ。dsm_h_block=None なら type 高さのみでフラット化。
+
+    returns dict(mask:bool, height:float32 NaN外, id:int32 -1外, wall_keys:list, roof_keys:list)。
+    """
+    import matplotlib.path as mpath
+    mask = np.zeros((grid_h, grid_w), dtype=bool)
+    hmap = np.full((grid_h, grid_w), np.nan, dtype=np.float32)
+    idmap = np.full((grid_h, grid_w), -1, dtype=np.int32)
+    wall_keys: list[str] = []
+    roof_keys: list[str] = []
+    bid = 0
+    for b in buildings:
+        ext = b.get("coords")
+        if not ext or len(ext) < 3:
+            continue
+        pts = np.array([_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, grid_h, grid_w)
+                        for la, lo in ext])
+        x0 = max(0, int(np.floor(pts[:, 0].min())))
+        x1 = min(grid_w, int(np.ceil(pts[:, 0].max())) + 1)
+        y0 = max(0, int(np.floor(pts[:, 1].min())))
+        y1 = min(grid_h, int(np.ceil(pts[:, 1].max())) + 1)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        gx, gy = np.meshgrid(np.arange(x0, x1) + 0.5, np.arange(y0, y1) + 0.5)
+        gp = np.column_stack([gx.ravel(), gy.ravel()])
+        ins = mpath.Path(pts).contains_points(gp).reshape(gy.shape)
+        for hole in (b.get("holes") or []):
+            if len(hole) < 3:
+                continue
+            hpts = np.array([_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, grid_h, grid_w)
+                             for la, lo in hole])
+            ins &= ~mpath.Path(hpts).contains_points(gp).reshape(gy.shape)
+        if not ins.any():
+            continue
+        tp = b.get("tags", {}).get("fgd_type", "")
+        floor = float(b.get("tags", {}).get("height_m", 6.0)) * type_floor_frac
+        h = floor
+        if dsm_h_block is not None:
+            vals = dsm_h_block[y0:y1, x0:x1][ins]
+            vals = vals[np.isfinite(vals)]
+            if vals.size:
+                h = max(float(np.percentile(vals, pct)), floor)
+        h = max(h, min_h_m)
+        sub_m = mask[y0:y1, x0:x1]; sub_m[ins] = True
+        sub_h = hmap[y0:y1, x0:x1]; sub_h[ins] = h     # 重なりは後勝ち（FG-GML はほぼ排他）
+        sub_i = idmap[y0:y1, x0:x1]; sub_i[ins] = bid
+        wall_keys.append(BUILDING_WALL_BY_TYPE.get(tp, DEFAULT_WALL_KEY))
+        roof_keys.append(BUILDING_ROOF_BY_TYPE.get(tp, DEFAULT_ROOF_KEY))
+        bid += 1
+    return {"mask": mask, "height": hmap, "id": idmap,
+            "wall_keys": wall_keys, "roof_keys": roof_keys}
+
+
+def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
+                      y_surf_land, sea_mask, y_sea_surface, y_sea_floor,
+                      scale_land, h_res_block_m,
+                      deck_key="gray_concrete", pier_key="light_gray_concrete",
+                      cap_key="stone", rail_key="stone") -> int:
+    """OSM 橋（polyline + layer + road_class + width）を Tellus 流に立体化して blocks へ追加。
+
+    桁Y(station) = max(両岸補間 baseline + ramp(layer×3m),  局所地形/水面 + ramp(clearance))
+      ramp は端0→中央最大の 4:1 勾配（=アプローチ坂）。clearance(main6/normal5/dirt3 m)が
+      layer 情報無しでも川を跨がせる。道路幅でデッキを敷き、縁に欄干、一定間隔で橋脚+笠を川底まで。
+    既存ブロックより後に置く（litematic は後勝ち）ので水上でデッキが優先される。
+    返り値: 置いた最大 y（max_y 更新用）。
+    """
+    import math
+    LEVEL_H_M, MAX_RISE_M, RAMP_HV = 3.0, 10.0, 4.0
+    CLEAR_M = {"main": 6.0, "normal": 5.0, "dirt": 3.0}
+    PIER_SPACING_M = 16.0
+    seen: set = set()
+    ymax = [0]
+
+    def put(ix, iy, iz, key):
+        if not (0 <= ix < nx and 0 <= iz < nz) or iy < 0 or iy > 500:
+            return
+        k = (ix, iy, iz)
+        if k in seen:
+            return
+        seen.add(k)
+        if iy > ymax[0]:
+            ymax[0] = iy
+        blocks.append(nbtlib.Compound({
+            "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(iy), nbtlib.Int(iz)]),
+            "state": block_id(key),
+        }))
+
+    def col(x, z):
+        return int(round(x)), int(round(z))
+
+    def terrain_y(x, z):
+        i, j = col(x, z)
+        return int(y_surf_land[j, i]) if (0 <= j < nz and 0 <= i < nx) else 1
+
+    def ground_y(x, z):     # 水なら水面、陸なら地表
+        i, j = col(x, z)
+        if 0 <= j < nz and 0 <= i < nx:
+            return int(y_sea_surface) if sea_mask[j, i] else int(y_surf_land[j, i])
+        return 1
+
+    def floor_y(x, z):      # 橋脚の底（川底 or 地表）
+        i, j = col(x, z)
+        if 0 <= j < nz and 0 <= i < nx:
+            return int(y_sea_floor[j, i]) if sea_mask[j, i] else int(y_surf_land[j, i])
+        return 0
+
+    def ramp(station, total, full):
+        if full <= 0 or total <= 1e-6:
+            return 0.0
+        rl = full * RAMP_HV
+        s = min(max(station, 0.0), total)
+        if total >= rl * 2.0:
+            if s < rl:
+                return full * (s / rl)
+            if s > total - rl:
+                return full * ((total - s) / rl)
+            return full
+        half = total * 0.5
+        if half <= 1e-6:
+            return full
+        return full * (s / half) if s <= half else full * ((total - s) / half)
+
+    for b in bridges:
+        pts = [_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, nz, nx) for la, lo in b["coords"]]
+        rc = b.get("road_class", "normal")
+        half_w = max(0, int(round((float(b.get("width_m") or 5.5) / max(h_res_block_m, 0.1)) / 2.0)))
+        layer = int(b.get("layer", 1))
+        seg, total = [], 0.0
+        for (x0, z0), (x1, z1) in zip(pts, pts[1:]):
+            L = math.hypot(x1 - x0, z1 - z0); seg.append(L); total += L
+        if total < 2.0:
+            continue
+        startS, endS = terrain_y(*pts[0]), terrain_y(*pts[-1])
+        rise_full = min(layer * LEVEL_H_M, MAX_RISE_M) * scale_land
+        clear_full = CLEAR_M.get(rc, 5.0) * scale_land
+        pier_step = max(4.0, PIER_SPACING_M / max(h_res_block_m, 0.1))
+        next_pier = pier_step
+        s_acc = 0.0
+        for si in range(len(seg)):
+            (x0, z0), (x1, z1) = pts[si], pts[si + 1]
+            L = seg[si]
+            if L < 1e-6:
+                continue
+            tx, tz = (x1 - x0) / L, (z1 - z0) / L
+            ox, oz = -tz, tx
+            n = max(1, int(L / 0.5))
+            for k in range(n + 1):
+                t = k / n
+                cx, cz = x0 + (x1 - x0) * t, z0 + (z1 - z0) * t
+                station = s_acc + L * t
+                base = startS + (endS - startS) * (station / total)
+                dy = int(round(max(base + ramp(station, total, rise_full),
+                                   ground_y(cx, cz) + ramp(station, total, clear_full))))
+                for w in range(-half_w, half_w + 1):
+                    ix, iz = col(cx + ox * w, cz + oz * w)
+                    put(ix, dy, iz, deck_key)
+                    put(ix, dy - 1, iz, deck_key)
+                    if abs(w) == half_w and half_w >= 1:
+                        put(ix, dy + 1, iz, rail_key)
+                if station >= next_pier and not (si == 0 and k == 0):
+                    next_pier += pier_step
+                    fy = floor_y(cx, cz)
+                    if dy - 2 > fy:
+                        shafts = (-half_w + 1, half_w - 1) if (rc == "main" and half_w >= 2) else (0,)
+                        for w in shafts:
+                            ix, iz = col(cx + ox * w, cz + oz * w)
+                            for yy in range(fy, dy - 1):
+                                put(ix, yy, iz, pier_key)
+                            put(ix, dy - 1, iz, cap_key)
+            s_acc += L
+    return ymax[0]
+
+
 # ─────────────────────────────────────────────────────────────
 # Enhanced ブロック化
 # ─────────────────────────────────────────────────────────────
@@ -375,11 +584,19 @@ def dem_to_blocks_enhanced(
     road_mask: np.ndarray | None = None,
     building_height_m: float = 6.0,
     building_height_patch: np.ndarray | None = None,
+    building_height_block: np.ndarray | None = None,
+    building_id: np.ndarray | None = None,
+    building_wall_keys: list | None = None,
+    building_roof_keys: list | None = None,
+    roof_color_tol: float = 55.0,
     color_building_roofs: bool = False,
     wall_block: str = "white_concrete",
     window_block: str = "gray_concrete",
     floor_height: int = 3,
     surface_grid_override: np.ndarray | None = None,
+    bridges: list | None = None,
+    patch_bbox_latlon: tuple | None = None,
+    road_block: str = "gray_concrete",
 ) -> tuple[list, list[int]]:
     """
     `nbt_export.dem_to_blocks` の置き換え。Tellus 風の改善 5 点を適用：
@@ -418,9 +635,12 @@ def dem_to_blocks_enhanced(
         cp = cover_patch[:nz*factor, :nx*factor].reshape(nz, factor, nx, factor)
         cover_ds = np.median(cp, axis=(1, 3)).astype(np.uint8)
 
-    # 建物高さ[m]（DSM 由来）をダウンサンプル。建物セルで実測高さ/屋根形状を使う。
+    # 建物高さ[m]。building_height_block（per-building 集約済みのフラット高さ, block grid）が
+    # あればそれを優先（屋根フラット化）。無ければ従来どおり DSM patch を per-cell ダウンサンプル。
     bh_ds = None
-    if building_height_patch is not None:
+    if building_height_block is not None and building_height_block.shape == (nz, nx):
+        bh_ds = building_height_block
+    elif building_height_patch is not None:
         bp = building_height_patch[:nz*factor, :nx*factor].reshape(nz, factor, nx, factor)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
@@ -492,7 +712,7 @@ def dem_to_blocks_enhanced(
     # OSM 道路は地表を gravel で上書き（陸セルのみ、建物より優先順位は低い）
     if road_mask is not None and road_mask.shape == surf_block.shape:
         land_for_road = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
-        surf_block[road_mask & land_for_road] = "gravel"
+        surf_block[road_mask & land_for_road] = road_block
 
     valid_elevs = dem_ds[~np.isnan(dem_ds)]
     max_elev_y = int(valid_elevs.max() * scale_land) if len(valid_elevs) > 0 else 1
@@ -562,6 +782,29 @@ def dem_to_blocks_enhanced(
     if building_mask is not None and building_mask.shape == dem_ds.shape:
         default_bh = max(2, int(round(building_height_m * scale_land)))
         fh = max(2, int(floor_height))
+        # P2: 屋根を1棟の代表色に寄せる。ただし単色だと不自然なので、代表色から
+        #     RGB 距離 roof_color_tol 以内（=同系統の濃淡）はセルの色を残し、外れ色
+        #     （木の緑・隣家の別色など speckle）だけ代表色へスナップする。
+        #     color_building_roofs 無効/未集約は type 由来の屋根キー（単色）。
+        roof_by_id = None          # 各建物の代表屋根キー
+        roof_dom_rgb = None        # 代表屋根キーの RGB（同系統判定用）
+        if building_id is not None and building_roof_keys is not None:
+            roof_by_id = list(building_roof_keys)
+            if color_building_roofs:
+                from collections import Counter
+                from block_palette import BLOCKS as _BP
+                bsel = (building_id >= 0) & building_mask & land_mask
+                acc: dict[int, Counter] = {}
+                for _id, _c in zip(building_id[bsel].tolist(),
+                                   np.asarray(surf_block)[bsel].tolist()):
+                    acc.setdefault(_id, Counter())[_c] += 1
+                for _id, c in acc.items():
+                    if 0 <= _id < len(roof_by_id):
+                        roof_by_id[_id] = c.most_common(1)[0][0]
+                roof_dom_rgb = [(_BP[k][1] if k in _BP else (128, 128, 128))
+                                for k in roof_by_id]
+        _tol2 = float(roof_color_tol) * float(roof_color_tol)
+        from block_palette import BLOCKS as _BP2
         b_idx = np.argwhere(building_mask & land_mask)
         b_max_y = 0
         for j, i_ in b_idx.tolist():
@@ -576,18 +819,47 @@ def dem_to_blocks_enhanced(
             top_y = y_top + bh_blocks
             if top_y > b_max_y:
                 b_max_y = top_y
-            roof_kind = surf_block[j, i_] if color_building_roofs else "stone"
+            bid_c = int(building_id[j, i_]) if building_id is not None else -1
+            if roof_dom_rgb is not None and 0 <= bid_c < len(roof_by_id):
+                # color_building_roofs 経路: 同系統の濃淡は残し、外れ色だけ代表色へ
+                cell_k = surf_block[j, i_]
+                dom_k = roof_by_id[bid_c]
+                if cell_k == dom_k:
+                    roof_kind = dom_k
+                else:
+                    cr = _BP2[cell_k][1] if cell_k in _BP2 else (128, 128, 128)
+                    dr = roof_dom_rgb[bid_c]
+                    dist2 = (cr[0]-dr[0])**2 + (cr[1]-dr[1])**2 + (cr[2]-dr[2])**2
+                    roof_kind = cell_k if dist2 <= _tol2 else dom_k
+            elif roof_by_id is not None and 0 <= bid_c < len(roof_by_id):
+                roof_kind = roof_by_id[bid_c]                     # type 屋根（単色）
+            else:
+                roof_kind = surf_block[j, i_] if color_building_roofs else "stone"
+            if building_wall_keys is not None and 0 <= bid_c < len(building_wall_keys):
+                wall_kind = building_wall_keys[bid_c]             # type 別の壁
+            else:
+                wall_kind = wall_block
             for fy in range(y_top + 1, top_y + 1):
                 if fy == top_y:
                     kind = roof_kind                              # 屋根
                 elif (fy - y_top) % fh == 0 and fy < top_y - 1:
                     kind = window_block                          # 階ごとの窓帯
                 else:
-                    kind = wall_block                            # 壁
+                    kind = wall_kind                             # 壁
                 blocks.append(nbtlib.Compound({
                     "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(fy), nbtlib.Int(bz_v)]),
                     "state": block_id(kind),
                 }))
         max_y = max(max_y, b_max_y + 2)
+
+    # --- 橋（OSM bridge を Tellus 流に立体化）。最後に置いて水上で優先させる。 ---
+    if bridges and patch_bbox_latlon is not None:
+        bridge_ymax = add_bridge_blocks(
+            blocks, bridges, patch_bbox_latlon, nz, nx,
+            y_surf_land=y_surf_land, sea_mask=sea_mask,
+            y_sea_surface=y_sea_surface, y_sea_floor=y_sea_floor,
+            scale_land=scale_land, h_res_block_m=h_res_block,
+        )
+        max_y = max(max_y, bridge_ymax + 2)
 
     return blocks, [nx, max_y + 1, nz]

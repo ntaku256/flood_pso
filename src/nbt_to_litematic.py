@@ -66,10 +66,13 @@ def pack_litematica_bits(values: np.ndarray, bits: int) -> np.ndarray:
 
 
 def _name_to_compound(name: str) -> Compound:
-    """パレット名 → BlockStatePalette 用 Compound（grass_block のみ snowy 既定を補う）。"""
-    if name == "minecraft:grass_block":
+    """パレット名 → BlockStatePalette 用 Compound。Properties は block_palette が単一真実源
+    （grass_block=snowy false / *_leaves=persistent true で葉の崩壊を防ぐ 等）。"""
+    from block_palette import block_state_properties
+    props = block_state_properties(name)
+    if props:
         return Compound({"Name": String(name),
-                         "Properties": Compound({"snowy": String("false")})})
+                         "Properties": Compound({k: String(v) for k, v in props.items()})})
     return Compound({"Name": String(name)})
 
 
