@@ -330,6 +330,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   mapzen_zoom: int = 15,
                   use_esa: bool = False,
                   use_osm: bool = False,
+                  use_fgd: bool = False,
+                  fgd_bld_xml: str | None = None,
+                  fgd_rdedg_xml: str | None = None,
                   building_height_m: float = 6.0,
                   tellus_world_dir: str | None = None,
                   tellus_world_scale: float = 1.0,
@@ -583,6 +586,26 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             print(f"  [osm] buildings={osm['n_buildings']}  roads={osm['n_roads']}  "
                   f"→ mask cells: building={int(building_mask.sum())}  road={int(road_mask.sum())}")
 
+        # FG-GML（国土地理院ローカルベクタ）建物・道路 mask。OSM と併用時は union。
+        if use_fgd:
+            from fgd_vector import load_fgd_buildings_roads
+            fgd = load_fgd_buildings_roads(
+                fgd_bld_xml, fgd_rdedg_xml,
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+            )
+            factor = max(1, round(h_res / h_res_dem))
+            nz_g = dem_patch.shape[0] // factor
+            nx_g = dem_patch.shape[1] // factor
+            bm_f, rm_f = build_osm_masks(
+                fgd, patch_bbox_latlon,
+                grid_h=nz_g, grid_w=nx_g, h_res_block_m=h_res,
+            )
+            building_mask = bm_f if building_mask is None else (building_mask | bm_f)
+            road_mask = rm_f if road_mask is None else (road_mask | rm_f)
+            print(f"  [fgd] buildings={fgd['n_buildings']}  roads={fgd['n_roads']}  "
+                  f"→ mask cells: building={int(bm_f.sum())}  road={int(rm_f.sum())}")
+
         print(f"Converting to blocks [enhanced] "
               f"(h_res={h_res}m/block, v_res={v_res}m/block, "
               f"v_exag_land={v_exag}, v_exag_sea={v_es:.2f}, "
@@ -640,6 +663,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             full_meta.setdefault("tellus_sea_level_y", int(tellus_sea_level_y))
         if use_osm:
             full_meta.setdefault("use_osm", True)
+            full_meta.setdefault("building_height_m", float(building_height_m))
+        if use_fgd:
+            full_meta.setdefault("use_fgd", True)
             full_meta.setdefault("building_height_m", float(building_height_m))
         if terrain_quality == "enhanced":
             full_meta.setdefault("sea_level_m", float(sea_level_m))

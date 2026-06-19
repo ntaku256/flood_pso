@@ -73,6 +73,19 @@ cd /home/moriken/web-app/flood_pso
 .venv/bin/python src/make_nbt_hd.py --K 16 --seed 0 --preset md_5m   # PSO/CCPSO2/GT 比較
 # プリセット: xs_overview / sm_5m / md_5m / lg_10m / xl_5m / huge_5m
 # NBT 内 flood_pso_meta コンパウンドに手法・loss・dh_map・seed 等を全て埋め込み
+
+# 5. 歩行可能な高精細ワールド（Layer C / 防災教育）
+#    1m/block・真スケール(v_exag=1)・FG-GML 建物/道路を載せた「歩ける御坊」
+.venv/bin/python src/make_nbt_hd.py --K 16 --seed 0 --preset gobo_walk_1km --methods gt --use-fgd
+# --use-fgd : 国土地理院 FG-GML の BldA(建物)/RdEdg(道路) をローカルから配置（API不要）
+#             ※初回は kennkyuu20260114 側で `git lfs pull` で BldA/RdEdg を実体化
+# 既定の地形は GSI 5m を 1m に bilinear 補間（滑らか）。
+
+# 5b. 真の 1m 地形（和歌山県 LiDAR グラウンド点群）で歩ける御坊
+.venv/bin/python src/make_nbt_hd.py --K 16 --seed 0 --preset gobo_walk_1km --methods gt \
+    --use-fgd --wakayama-grd data_cache/wakayama_lidar/06RC802_grd.txt --tag-suffix lidar
+# --wakayama-grd : 系VI(JGD2011)点群を 1m 緯度経度グリッド DEM 化（src/wakayama_pcd.py、要 pyproj/pandas）
+#                  GSI DEM1A は御坊未整備のため和歌山県オープンデータを利用。タイル被覆中心へ自動設定。
 ```
 
 ## 主要結果（多シード平均）

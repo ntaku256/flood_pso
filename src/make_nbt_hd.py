@@ -31,6 +31,10 @@ from nbt_export import export_to_nbt, estimate_size
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DEM_DIR = REPO_ROOT.parent / "kennkyuu20260114" / "地形データ" / "FG-GML-503561-DEM5A-20250620"
 DEM_DIR  = os.environ.get("FLOOD_PSO_DEM_DIR", str(DEFAULT_DEM_DIR))
+# FG-GML ベクタ（建物 BldA / 道路 RdEdg）。--use-fgd の既定ソース。
+FGD_ALL_DIR = REPO_ROOT.parent / "kennkyuu20260114" / "地形データ" / "FG-GML-503561-ALL-20251001"
+DEFAULT_BLD_XML   = str(FGD_ALL_DIR / "FG-GML-503561-BldA-20251001-0001.xml")
+DEFAULT_RDEDG_XML = str(FGD_ALL_DIR / "FG-GML-503561-RdEdg-20251001-0001.xml")
 BENCH_DIR = REPO_ROOT / "results" / "benchmark"
 OUT_DIR  = REPO_ROOT / "results" / "nbt" / "hd"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -57,6 +61,16 @@ PRESETS = {
     "amada_500m_5m": (500,   500,  5, 1, 1.5),  # 同 500m × 500m
     "amada_500m_1m": (500,   500,  1, 1, 1.5),  # 同 500m × 500m × 1m/block（建物・道路を高精細に）
     "huge_5m":     (15000,15000,  5, 1, 2),
+    # 歩行用：真スケール v_exag=1（崖だらけにならない）、1m/block、御坊市街地 1km²。
+    # --use-fgd で建物・道路を載せると「歩ける町」になる。
+    "gobo_walk_1km": (1000, 1000, 1, 1, 1.0),
+    "gobo_walk_2km": (2000, 2000, 1, 1, 1.0),
+}
+
+# preset 既定の中心座標（--center-lat/lon 未指定時）。歩行用は市街地中心へ。
+PRESET_CENTERS = {
+    "gobo_walk_1km": (33.8875, 135.1515),
+    "gobo_walk_2km": (33.8875, 135.1515),
 }
 
 
@@ -93,8 +107,18 @@ def main():
     ap.add_argument("--use-osm", action="store_true",
                     help="OpenStreetMap の建物 polygon と道路 polyline を Overpass API から取得して "
                          "地表に重ねる（建物=stone 立体、道路=gravel 上書き）")
+    ap.add_argument("--wakayama-grd", default=None,
+                    help="和歌山県 LiDAR グラウンド点群テキスト（_grd.txt）を真の1m DEM として使う。"
+                         "指定時は GSI 5m DEM の代わりにこれを読む（系VI→緯度経度・1mグリッド化）")
+    ap.add_argument("--use-fgd", action="store_true",
+                    help="国土地理院 FG-GML の建物(BldA)・道路(RdEdg)をローカルから取得して "
+                         "地表に重ねる（建物=stone 立体、道路=gravel 上書き、API不要・高精度）")
+    ap.add_argument("--fgd-bld", default=DEFAULT_BLD_XML,
+                    help="--use-fgd の建物 BldA GML パス")
+    ap.add_argument("--fgd-rdedg", default=DEFAULT_RDEDG_XML,
+                    help="--use-fgd の道路 RdEdg GML パス")
     ap.add_argument("--building-height", type=float, default=6.0,
-                    help="OSM 建物の高さ [m]（既定 6m ≒ 2 階建て）")
+                    help="建物の高さ [m]（既定 6m ≒ 2 階建て）")
     ap.add_argument("--v-exag", type=float, default=None,
                     help="陸の垂直誇張倍率を上書き（プリセットの v_exag を override）")
     ap.add_argument("--smooth-sigma", type=float, default=1.0,
@@ -127,9 +151,14 @@ def main():
     if ks != args.ks:
         print(f"  warning: case file ks={ks} does not match --ks={args.ks}")
 
-    # DEM 読み込み（NBT 化はフル解像度 5m DEM を使う）
-    print("Loading DEM (5m, full resolution)...")
-    dem_info = mosaic_tiles(DEM_DIR)
+    # DEM 読み込み。--wakayama-grd 指定時は真の1m LiDAR、未指定は GSI 5m DEM。
+    if args.wakayama_grd:
+        from wakayama_pcd import load_wakayama_dem
+        print(f"Loading Wakayama LiDAR DEM (true 1m): {args.wakayama_grd}")
+        dem_info = load_wakayama_dem(args.wakayama_grd)
+    else:
+        print("Loading DEM (5m, full resolution)...")
+        dem_info = mosaic_tiles(DEM_DIR)
     dem = dem_info["dem"]
     source = make_river_source(
         dem,
@@ -143,8 +172,13 @@ def main():
     if args.width  is not None: width_m = args.width
     if args.depth  is not None: depth_m = args.depth
     if args.h_res  is not None: h_res   = args.h_res
-    lat_c = args.center_lat if args.center_lat is not None else LAT_CENTER
-    lon_c = args.center_lon if args.center_lon is not None else LON_CENTER
+    _def_lat, _def_lon = PRESET_CENTERS.get(args.preset, (LAT_CENTER, LON_CENTER))
+    if args.wakayama_grd:
+        # LiDAR タイルの被覆中心を既定中心にする（タイルは市街地の一部のみ）
+        _def_lat = 0.5 * (dem_info["lat_min"] + dem_info["lat_max"])
+        _def_lon = 0.5 * (dem_info["lon_min"] + dem_info["lon_max"])
+    lat_c = args.center_lat if args.center_lat is not None else _def_lat
+    lon_c = args.center_lon if args.center_lon is not None else _def_lon
     est = estimate_size(dem_info, lat_c, lon_c,
                         width_m, depth_m, h_res=h_res, v_res=v_res, v_exag=v_exag)
     print(f"  preset={args.preset}  center=({lat_c:.6f},{lon_c:.6f})  "
@@ -226,6 +260,7 @@ def main():
         tsuffix = "" if args.terrain_source == "gsi" else f"_{args.terrain_source}"
         if args.use_esa: tsuffix += "_esa"
         if args.use_osm: tsuffix += "_osm"
+        if args.use_fgd: tsuffix += "_fgd"
         usuffix = f"_{args.tag_suffix}" if args.tag_suffix else ""
         out = OUT_DIR / f"gobo_hd_K{K}{suffix}_seed{args.seed}_{args.preset}_{tag}{tsuffix}{qsuffix}{usuffix}.nbt"
         meta = {
@@ -274,6 +309,9 @@ def main():
             mapzen_zoom=args.mapzen_zoom,
             use_esa=args.use_esa,
             use_osm=args.use_osm,
+            use_fgd=args.use_fgd,
+            fgd_bld_xml=args.fgd_bld,
+            fgd_rdedg_xml=args.fgd_rdedg,
             building_height_m=args.building_height,
             tellus_world_dir=args.tellus_world_dir,
             tellus_world_scale=args.tellus_world_scale,
