@@ -208,6 +208,15 @@ def main():
         _def_lon = 0.5 * (dem_info["lon_min"] + dem_info["lon_max"])
     lat_c = args.center_lat if args.center_lat is not None else _def_lat
     lon_c = args.center_lon if args.center_lon is not None else _def_lon
+    # LiDAR タイル指定で size/center を明示していなければ、タイル全域をカバーする
+    # （preset の 1km² だとタイル 2km×1.5km の一部しか出ないため）。
+    if (args.wakayama_grd and args.width is None and args.depth is None
+            and args.center_lat is None and args.center_lon is None):
+        import math as _math
+        width_m = (dem_info["lon_max"] - dem_info["lon_min"]) * 111320.0 \
+            * _math.cos(_math.radians(lat_c)) * 0.985
+        depth_m = (dem_info["lat_max"] - dem_info["lat_min"]) * 111320.0 * 0.985
+        print(f"  [wakayama] タイル全域: {width_m:.0f}×{depth_m:.0f}m")
     est = estimate_size(dem_info, lat_c, lon_c,
                         width_m, depth_m, h_res=h_res, v_res=v_res, v_exag=v_exag)
     print(f"  preset={args.preset}  center=({lat_c:.6f},{lon_c:.6f})  "

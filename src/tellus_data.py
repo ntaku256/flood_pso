@@ -526,18 +526,30 @@ def fetch_osm_buildings_roads(
 
     import urllib.parse as _up
     body = _up.urlencode({"data": query}).encode("utf-8")
-    req = urllib.request.Request(
-        OVERPASS_URL, data=body,
-        headers={
-            "User-Agent": "flood_pso/tellus_data",
-            "Content-Type": "application/x-www-form-urlencoded",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as r:
-            raw = r.read()
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Overpass API failed: HTTP {e.code} {e.reason}") from e
+    # Overpass は混雑時に 429/504 を返すので複数ミラー × リトライ。
+    mirrors = [OVERPASS_URL,
+               "https://overpass.kumi.systems/api/interpreter",
+               "https://overpass.openstreetmap.fr/api/interpreter"]
+    raw = None
+    last_err = None
+    for attempt in range(6):
+        url = mirrors[attempt % len(mirrors)]
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"User-Agent": "flood_pso/tellus_data",
+                     "Content-Type": "application/x-www-form-urlencoded"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                raw = r.read()
+            break
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+            last_err = e
+            if verbose:
+                print(f"  [osm] {url.split('//')[1].split('/')[0]} failed ({e}); retry...")
+            time.sleep(2.0 * (attempt + 1))
+    if raw is None:
+        raise RuntimeError(f"Overpass API failed after retries: {last_err}")
     response = _json.loads(raw.decode("utf-8"))
 
     buildings: list = []
