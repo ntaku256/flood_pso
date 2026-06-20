@@ -124,3 +124,14 @@ m = f["flood_pso_meta"]
 print(m["method"], m["iou"], m["dh_map_shape"])
 # → ccpso2  0.96  [16, 16]
 ```
+
+## データ出典・ライセンス
+
+本リポジトリおよび生成物（NBT/litematic/可視化）には第三者データを含む。公開・配布時は以下を明記すること。
+データの役割・規約の詳細は **`docs/08_データとPSO位置づけ.md`**。
+
+- **国土地理院**: 基盤地図情報（建物 BldA・道路 RdEdg・水域・5m DEM）、地理院タイル（空中写真 seamlessphoto・洪水浸水想定区域）を加工して利用。各利用規約に従い**出典明示が必須**（「出典：国土地理院」）。商用・大規模公開時は測量成果の承認要否を要確認。
+- **和歌山県**: 3次元点群オープンデータ（航空レーザ測量, `06RC802`）を加工して利用。正確なライセンスは配布元で要確認、**出典明示**。原データは大容量のため `data_cache/`（.gitignore）で未収録。
+- **OpenStreetMap**: 橋データ（`data_cache/osm/gobo_bridges_geom.json`）は OSM 由来。**© OpenStreetMap contributors**、**ODbL 1.0**。当 JSON を含む再配布は ODbL（継承）に従う。
+
+> 出力は座標＋バニラブロック ID のみで、Minecraft のテクスチャ等アセットは含まない。
