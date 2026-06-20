@@ -442,19 +442,21 @@ def build_building_maps(
 
 def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                       y_surf_land, sea_mask, y_sea_surface, y_sea_floor,
-                      scale_land, h_res_block_m,
-                      deck_key="gray_concrete", pier_key="light_gray_concrete",
-                      cap_key="stone", rail_key="stone") -> int:
+                      scale_land, h_res_block_m, surf_block=None,
+                      deck_key="andesite", pier_key="andesite",
+                      cap_key="andesite", rail_key="andesite",
+                      arch_rise_m=0.0) -> int:
     """OSM 橋（polyline + layer + road_class + width）を Tellus 流に立体化して blocks へ追加。
 
-    桁Y(station) = max(両岸補間 baseline + ramp(layer×3m),  局所地形/水面 + ramp(clearance))
+    桁Y(station) = max(両岸補間 baseline + ramp(layer×arch_rise_m),  局所地形/水面 + ramp(clearance))
       ramp は端0→中央最大の 4:1 勾配（=アプローチ坂）。clearance(main6/normal5/dirt3 m)が
-      layer 情報無しでも川を跨がせる。道路幅でデッキを敷き、縁に欄干、一定間隔で橋脚+笠を川底まで。
+      layer 情報無しでも川を跨がせる。arch_rise_m=0 なら両岸補間に沿う平坦橋（天田橋等は両端高さに）。
+    デッキは2層: 上面=surf_block（衛星写真の路面色）／下面+橋脚+欄干+笠=deck_key(安山岩)。
     既存ブロックより後に置く（litematic は後勝ち）ので水上でデッキが優先される。
     返り値: 置いた最大 y（max_y 更新用）。
     """
     import math
-    LEVEL_H_M, MAX_RISE_M, RAMP_HV = 3.0, 10.0, 4.0
+    MAX_RISE_M, RAMP_HV = 10.0, 4.0
     CLEAR_M = {"main": 6.0, "normal": 5.0, "dirt": 3.0}
     PIER_SPACING_M = 16.0
     seen: set = set()
@@ -520,8 +522,19 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         if total < 2.0:
             continue
         startS, endS = terrain_y(*pts[0]), terrain_y(*pts[-1])
-        rise_full = min(layer * LEVEL_H_M, MAX_RISE_M) * scale_land
+        rise_full = min(layer * arch_rise_m, MAX_RISE_M) * scale_land
         clear_full = CLEAR_M.get(rc, 5.0) * scale_land
+        # スパンが水を渡るか（渡る時だけ水面+clearance を最低デッキ高に）
+        has_water = False
+        for (xa, za), (xb, zb) in zip(pts, pts[1:]):
+            for tt in (0.2, 0.4, 0.6, 0.8):
+                ci, cj = int(round(xa + (xb - xa) * tt)), int(round(za + (zb - za) * tt))
+                if 0 <= cj < nz and 0 <= ci < nx and sea_mask[cj, ci]:
+                    has_water = True
+                    break
+            if has_water:
+                break
+        min_deck = (int(y_sea_surface) + clear_full) if has_water else -1.0e9
         pier_step = max(4.0, PIER_SPACING_M / max(h_res_block_m, 0.1))
         next_pier = pier_step
         s_acc = 0.0
@@ -538,12 +551,21 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                 cx, cz = x0 + (x1 - x0) * t, z0 + (z1 - z0) * t
                 station = s_acc + L * t
                 base = startS + (endS - startS) * (station / total)
-                dy = int(round(max(base + ramp(station, total, rise_full),
-                                   ground_y(cx, cz) + ramp(station, total, clear_full))))
+                # 水面クリアランス: 両端の道路高から 4:1 で立ち上がり min_deck で頭打ち。
+                # 端付近の地形に依存しないので橋台手前の不自然な瘤が出ない。
+                lift = min(min_deck,
+                           startS + station / RAMP_HV,
+                           endS + (total - station) / RAMP_HV)
+                dy = int(round(max(base + ramp(station, total, rise_full), lift)))
                 for w in range(-half_w, half_w + 1):
                     ix, iz = col(cx + ox * w, cz + oz * w)
-                    put(ix, dy, iz, deck_key)
-                    put(ix, dy - 1, iz, deck_key)
+                    top_key = deck_key
+                    if surf_block is not None and 0 <= iz < nz and 0 <= ix < nx:
+                        sk = surf_block[iz, ix]
+                        if sk:
+                            top_key = sk            # 上面=衛星写真の路面色
+                    put(ix, dy, iz, top_key)
+                    put(ix, dy - 1, iz, deck_key)   # 下面=安山岩(構造)
                     if abs(w) == half_w and half_w >= 1:
                         put(ix, dy + 1, iz, rail_key)
                 if station >= next_pier and not (si == 0 and k == 0):
@@ -596,7 +618,7 @@ def dem_to_blocks_enhanced(
     surface_grid_override: np.ndarray | None = None,
     bridges: list | None = None,
     patch_bbox_latlon: tuple | None = None,
-    road_block: str = "gray_concrete",
+    road_block: str = "andesite",
 ) -> tuple[list, list[int]]:
     """
     `nbt_export.dem_to_blocks` の置き換え。Tellus 風の改善 5 点を適用：
@@ -859,6 +881,7 @@ def dem_to_blocks_enhanced(
             y_surf_land=y_surf_land, sea_mask=sea_mask,
             y_sea_surface=y_sea_surface, y_sea_floor=y_sea_floor,
             scale_land=scale_land, h_res_block_m=h_res_block,
+            surf_block=surf_block,
         )
         max_y = max(max_y, bridge_ymax + 2)
 
