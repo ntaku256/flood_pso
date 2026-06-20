@@ -1,0 +1,361 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API 0.7.62.11 87bfad18",
+  "osm3s": {
+    "timestamp_osm_base": "2026-06-20T10:54:02Z",
+    "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."
+  },
+  "elements": [
+
+{
+  "type": "way",
+  "id": 126014579,
+  "bounds": {
+    "minlat": 33.8860813,
+    "minlon": 135.1525727,
+    "maxlat": 33.8861525,
+    "maxlon": 135.1525990
+  },
+  "geometry": [
+    { "lat": 33.8860813, "lon": 135.1525990 },
+    { "lat": 33.8861525, "lon": 135.1525727 }
+  ],
+  "tags": {
+    "alt_name": "熊野街道",
+    "alt_name:en": "Kumano Highway",
+    "bridge": "yes",
+    "highway": "trunk",
+    "lanes": "2",
+    "layer": "1",
+    "name": "国道42号",
+    "name:en": "National Highway Route 42",
+    "name:ja": "国道42号",
+    "ref": "42",
+    "source": "bing 2012;GSImaps/std",
+    "surface": "asphalt"
+  }
+},
+{
+  "type": "way",
+  "id": 126014635,
+  "bounds": {
+    "minlat": 33.8820054,
+    "minlon": 135.1526418,
+    "maxlat": 33.8827163,
+    "maxlon": 135.1528278
+  },
+  "geometry": [
+    { "lat": 33.8827163, "lon": 135.1526418 },
+    { "lat": 33.8820054, "lon": 135.1528278 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "secondary",
+    "layer": "1",
+    "name": "日高港線",
+    "ref": "186",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:LINE_NAME": "日高港線",
+    "yh:LINE_NUM": "186",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "一般都道府県道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 126014636,
+  "bounds": {
+    "minlat": 33.8833229,
+    "minlon": 135.1527555,
+    "maxlat": 33.8834400,
+    "maxlon": 135.1528411
+  },
+  "geometry": [
+    { "lat": 33.8834400, "lon": 135.1528411 },
+    { "lat": 33.8833229, "lon": 135.1527555 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "secondary",
+    "layer": "1",
+    "name": "日高港線",
+    "ref": "186",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:LINE_NAME": "日高港線",
+    "yh:LINE_NUM": "186",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "一般都道府県道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 126014646,
+  "bounds": {
+    "minlat": 33.8860992,
+    "minlon": 135.1493516,
+    "maxlat": 33.8863394,
+    "maxlon": 135.1499161
+  },
+  "geometry": [
+    { "lat": 33.8860992, "lon": 135.1499161 },
+    { "lat": 33.8863394, "lon": 135.1493516 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "secondary",
+    "layer": "1",
+    "name": "柏御坊線",
+    "ref": "188",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:LINE_NAME": "柏御坊線",
+    "yh:LINE_NUM": "188",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "一般都道府県道",
+    "yh:WIDTH": "5.5m〜13.0m",
+    "yh:WIDTH_RANK": "2"
+  }
+},
+{
+  "type": "way",
+  "id": 126014745,
+  "bounds": {
+    "minlat": 33.8895992,
+    "minlon": 135.1479056,
+    "maxlat": 33.8899874,
+    "maxlon": 135.1483597
+  },
+  "geometry": [
+    { "lat": 33.8895992, "lon": 135.1479056 },
+    { "lat": 33.8899874, "lon": 135.1483597 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 126052670,
+  "bounds": {
+    "minlat": 33.8796675,
+    "minlon": 135.1580671,
+    "maxlat": 33.8811166,
+    "maxlon": 135.1609018
+  },
+  "geometry": [
+    { "lat": 33.8811166, "lon": 135.1580671 },
+    { "lat": 33.8796675, "lon": 135.1609018 }
+  ],
+  "tags": {
+    "alt_name": "熊野街道",
+    "alt_name:en": "Kumano Highway",
+    "bridge": "yes",
+    "bridge:name": "天田橋",
+    "bridge:name:en": "Amada Bridge",
+    "highway": "trunk",
+    "lanes": "2",
+    "layer": "1",
+    "name": "国道42号",
+    "name:en": "National Highway Route 42",
+    "name:ja": "国道42号",
+    "ref": "42",
+    "source": "YahooJapan/ALPSMAP;GSImaps/std",
+    "surface": "asphalt"
+  }
+},
+{
+  "type": "way",
+  "id": 126053481,
+  "bounds": {
+    "minlat": 33.8755030,
+    "minlon": 135.1584937,
+    "maxlat": 33.8758213,
+    "maxlon": 135.1586314
+  },
+  "geometry": [
+    { "lat": 33.8758213, "lon": 135.1586314 },
+    { "lat": 33.8755030, "lon": 135.1584937 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "residential",
+    "layer": "1",
+    "source": "bing"
+  }
+},
+{
+  "type": "way",
+  "id": 243508890,
+  "bounds": {
+    "minlat": 33.8868548,
+    "minlon": 135.1551258,
+    "maxlat": 33.8868640,
+    "maxlon": 135.1552735
+  },
+  "geometry": [
+    { "lat": 33.8868640, "lon": 135.1552735 },
+    { "lat": 33.8868548, "lon": 135.1551258 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "source": "bing"
+  }
+},
+{
+  "type": "way",
+  "id": 247782257,
+  "bounds": {
+    "minlat": 33.8860751,
+    "minlon": 135.1566427,
+    "maxlat": 33.8861759,
+    "maxlon": 135.1566610
+  },
+  "geometry": [
+    { "lat": 33.8860751, "lon": 135.1566427 },
+    { "lat": 33.8861759, "lon": 135.1566610 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "residential",
+    "source": "bing"
+  }
+},
+{
+  "type": "way",
+  "id": 345664100,
+  "bounds": {
+    "minlat": 33.8871905,
+    "minlon": 135.1542045,
+    "maxlat": 33.8872639,
+    "maxlon": 135.1542073
+  },
+  "geometry": [
+    { "lat": 33.8871905, "lon": 135.1542073 },
+    { "lat": 33.8872639, "lon": 135.1542045 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "name": "新薗橋",
+    "surface": "asphalt"
+  }
+},
+{
+  "type": "way",
+  "id": 383557350,
+  "bounds": {
+    "minlat": 33.8876190,
+    "minlon": 135.1592341,
+    "maxlat": 33.8876443,
+    "maxlon": 135.1593262
+  },
+  "geometry": [
+    { "lat": 33.8876443, "lon": 135.1592341 },
+    { "lat": 33.8876190, "lon": 135.1593262 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "residential",
+    "layer": "1"
+  }
+},
+{
+  "type": "way",
+  "id": 383557351,
+  "bounds": {
+    "minlat": 33.8867759,
+    "minlon": 135.1586421,
+    "maxlat": 33.8869211,
+    "maxlon": 135.1586433
+  },
+  "geometry": [
+    { "lat": 33.8867759, "lon": 135.1586421 },
+    { "lat": 33.8869211, "lon": 135.1586433 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP"
+  }
+},
+{
+  "type": "way",
+  "id": 1016190978,
+  "bounds": {
+    "minlat": 33.8864312,
+    "minlon": 135.1558794,
+    "maxlat": 33.8864975,
+    "maxlon": 135.1558811
+  },
+  "geometry": [
+    { "lat": 33.8864975, "lon": 135.1558811 },
+    { "lat": 33.8864312, "lon": 135.1558794 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "service",
+    "layer": "1",
+    "service": "alley",
+    "source": "GSImaps/std"
+  }
+},
+{
+  "type": "way",
+  "id": 1016190981,
+  "bounds": {
+    "minlat": 33.8860369,
+    "minlon": 135.1575912,
+    "maxlat": 33.8861030,
+    "maxlon": 135.1575979
+  },
+  "geometry": [
+    { "lat": 33.8860369, "lon": 135.1575979 },
+    { "lat": 33.8861030, "lon": 135.1575912 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "secondary",
+    "layer": "1",
+    "name": "井関御坊線",
+    "ref": "176",
+    "source": "YahooJapan/ALPSMAP"
+  }
+},
+{
+  "type": "way",
+  "id": 1183425495,
+  "bounds": {
+    "minlat": 33.8865095,
+    "minlon": 135.1530326,
+    "maxlat": 33.8865695,
+    "maxlon": 135.1530451
+  },
+  "geometry": [
+    { "lat": 33.8865095, "lon": 135.1530451 },
+    { "lat": 33.8865695, "lon": 135.1530326 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "residential",
+    "layer": "1"
+  }
+}
+
+  ]
+}

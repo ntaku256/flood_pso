@@ -1,0 +1,109 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API 0.7.62.11 87bfad18",
+  "osm3s": {
+    "timestamp_osm_base": "2026-06-20T11:49:01Z",
+    "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."
+  },
+  "elements": [
+
+{
+  "type": "way",
+  "id": 126052578,
+  "bounds": {
+    "minlat": 33.8280025,
+    "minlon": 135.1851287,
+    "maxlat": 33.8280832,
+    "maxlon": 135.1852587
+  },
+  "geometry": [
+    { "lat": 33.8280025, "lon": 135.1852587 },
+    { "lat": 33.8280832, "lon": 135.1851287 }
+  ],
+  "tags": {
+    "alt_name": "熊野街道",
+    "alt_name:en": "Kumano Highway",
+    "bridge": "yes",
+    "highway": "trunk",
+    "lanes": "2",
+    "layer": "1",
+    "name": "国道42号",
+    "name:en": "National Highway Route 42",
+    "name:ja": "国道42号",
+    "ref": "42",
+    "source": "YahooJapan/ALPSMAP;GSImaps/std",
+    "surface": "asphalt"
+  }
+},
+{
+  "type": "way",
+  "id": 126053175,
+  "bounds": {
+    "minlat": 33.8274553,
+    "minlon": 135.1847096,
+    "maxlat": 33.8275399,
+    "maxlon": 135.1849310
+  },
+  "geometry": [
+    { "lat": 33.8274553, "lon": 135.1849310 },
+    { "lat": 33.8275399, "lon": 135.1847096 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 126053600,
+  "bounds": {
+    "minlat": 33.8182512,
+    "minlon": 135.1936694,
+    "maxlat": 33.8183887,
+    "maxlon": 135.1938683
+  },
+  "geometry": [
+    { "lat": 33.8182512, "lon": 135.1938683 },
+    { "lat": 33.8183887, "lon": 135.1936694 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP"
+  }
+},
+{
+  "type": "way",
+  "id": 385194099,
+  "bounds": {
+    "minlat": 33.8350013,
+    "minlon": 135.1857667,
+    "maxlat": 33.8360699,
+    "maxlon": 135.1871049
+  },
+  "geometry": [
+    { "lat": 33.8350013, "lon": 135.1871049 },
+    { "lat": 33.8352519, "lon": 135.1869239 },
+    { "lat": 33.8354262, "lon": 135.1867823 },
+    { "lat": 33.8355689, "lon": 135.1866092 },
+    { "lat": 33.8356898, "lon": 135.1864478 },
+    { "lat": 33.8360699, "lon": 135.1857667 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "tertiary",
+    "layer": "1",
+    "source": "GSImaps/ort"
+  }
+}
+
+  ]
+}

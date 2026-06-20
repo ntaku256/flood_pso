@@ -1,0 +1,112 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API 0.7.62.11 87bfad18",
+  "osm3s": {
+    "timestamp_osm_base": "2026-06-20T11:21:36Z",
+    "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."
+  },
+  "elements": [
+
+{
+  "type": "way",
+  "id": 126053182,
+  "bounds": {
+    "minlat": 33.8476465,
+    "minlon": 135.1680760,
+    "maxlat": 33.8477440,
+    "maxlon": 135.1683763
+  },
+  "geometry": [
+    { "lat": 33.8476465, "lon": 135.1683763 },
+    { "lat": 33.8477440, "lon": 135.1680760 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 126053245,
+  "bounds": {
+    "minlat": 33.8514504,
+    "minlon": 135.1711972,
+    "maxlat": 33.8516101,
+    "maxlon": 135.1713314
+  },
+  "geometry": [
+    { "lat": 33.8516101, "lon": 135.1711972 },
+    { "lat": 33.8514504, "lon": 135.1713314 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "tertiary",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "5.5m〜13.0m",
+    "yh:WIDTH_RANK": "2"
+  }
+},
+{
+  "type": "way",
+  "id": 126054141,
+  "bounds": {
+    "minlat": 33.8582900,
+    "minlon": 135.1541770,
+    "maxlat": 33.8590310,
+    "maxlon": 135.1585660
+  },
+  "geometry": [
+    { "lat": 33.8590310, "lon": 135.1585660 },
+    { "lat": 33.8589330, "lon": 135.1579360 },
+    { "lat": 33.8585940, "lon": 135.1559220 },
+    { "lat": 33.8584250, "lon": 135.1549630 },
+    { "lat": 33.8583750, "lon": 135.1546580 },
+    { "lat": 33.8582900, "lon": 135.1541770 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "tertiary",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "5.5m〜13.0m",
+    "yh:WIDTH_RANK": "2"
+  }
+},
+{
+  "type": "way",
+  "id": 1128219809,
+  "bounds": {
+    "minlat": 33.8472212,
+    "minlon": 135.1735413,
+    "maxlat": 33.8474019,
+    "maxlon": 135.1739448
+  },
+  "geometry": [
+    { "lat": 33.8472212, "lon": 135.1735413 },
+    { "lat": 33.8474019, "lon": 135.1739448 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "track",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "tracktype": "grade1"
+  }
+}
+
+  ]
+}

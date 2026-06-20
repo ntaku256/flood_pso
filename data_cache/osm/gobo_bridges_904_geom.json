@@ -1,0 +1,108 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API 0.7.62.11 87bfad18",
+  "osm3s": {
+    "timestamp_osm_base": "2026-06-20T11:34:56Z",
+    "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."
+  },
+  "elements": [
+
+{
+  "type": "way",
+  "id": 126053182,
+  "bounds": {
+    "minlat": 33.8476465,
+    "minlon": 135.1680760,
+    "maxlat": 33.8477440,
+    "maxlon": 135.1683763
+  },
+  "geometry": [
+    { "lat": 33.8476465, "lon": 135.1683763 },
+    { "lat": 33.8477440, "lon": 135.1680760 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 126053301,
+  "bounds": {
+    "minlat": 33.8425186,
+    "minlon": 135.1764024,
+    "maxlat": 33.8427569,
+    "maxlon": 135.1764926
+  },
+  "geometry": [
+    { "lat": 33.8427569, "lon": 135.1764024 },
+    { "lat": 33.8425186, "lon": 135.1764926 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "tertiary",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "5.5m〜13.0m",
+    "yh:WIDTH_RANK": "2"
+  }
+},
+{
+  "type": "way",
+  "id": 126053459,
+  "bounds": {
+    "minlat": 33.8404961,
+    "minlon": 135.1748878,
+    "maxlat": 33.8405607,
+    "maxlon": 135.1750920
+  },
+  "geometry": [
+    { "lat": 33.8405607, "lon": 135.1748878 },
+    { "lat": 33.8404961, "lon": 135.1750920 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 1128219809,
+  "bounds": {
+    "minlat": 33.8472212,
+    "minlon": 135.1735413,
+    "maxlat": 33.8474019,
+    "maxlon": 135.1739448
+  },
+  "geometry": [
+    { "lat": 33.8472212, "lon": 135.1735413 },
+    { "lat": 33.8474019, "lon": 135.1739448 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "track",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "tracktype": "grade1"
+  }
+}
+
+  ]
+}
