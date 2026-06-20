@@ -1,0 +1,802 @@
+{
+  "version": 0.6,
+  "generator": "Overpass API 0.7.62.11 87bfad18",
+  "osm3s": {
+    "timestamp_osm_base": "2026-06-20T02:51:00Z",
+    "copyright": "The data included in this document is from www.openstreetmap.org. The data is made available under ODbL."
+  },
+  "elements": [
+
+{
+  "type": "way",
+  "id": 126014579,
+  "bounds": {
+    "minlat": 33.8860813,
+    "minlon": 135.1525727,
+    "maxlat": 33.8861525,
+    "maxlon": 135.1525990
+  },
+  "geometry": [
+    { "lat": 33.8860813, "lon": 135.1525990 },
+    { "lat": 33.8861525, "lon": 135.1525727 }
+  ],
+  "tags": {
+    "alt_name": "熊野街道",
+    "alt_name:en": "Kumano Highway",
+    "bridge": "yes",
+    "highway": "trunk",
+    "lanes": "2",
+    "layer": "1",
+    "name": "国道42号",
+    "name:en": "National Highway Route 42",
+    "name:ja": "国道42号",
+    "ref": "42",
+    "source": "bing 2012;GSImaps/std",
+    "surface": "asphalt"
+  }
+},
+{
+  "type": "way",
+  "id": 126014596,
+  "bounds": {
+    "minlat": 33.9033131,
+    "minlon": 135.1410237,
+    "maxlat": 33.9033224,
+    "maxlon": 135.1412497
+  },
+  "geometry": [
+    { "lat": 33.9033224, "lon": 135.1412497 },
+    { "lat": 33.9033131, "lon": 135.1410237 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "primary",
+    "lanes": "2",
+    "layer": "1",
+    "name": "御坊由良線",
+    "name:en": "Gobo Yura Line",
+    "name:ja": "御坊由良線",
+    "name:ja-Hira": "ごぼうゆらせん",
+    "name:ja-Latn": "Gobō Yura-sen",
+    "ref": "24",
+    "source": "YahooJapan/ALPSMAP",
+    "surface": "asphalt",
+    "wikidata": "Q11417641",
+    "wikipedia": "ja:和歌山県道24号御坊由良線"
+  }
+},
+{
+  "type": "way",
+  "id": 126014597,
+  "bounds": {
+    "minlat": 33.9031018,
+    "minlon": 135.1392058,
+    "maxlat": 33.9031834,
+    "maxlon": 135.1395736
+  },
+  "geometry": [
+    { "lat": 33.9031834, "lon": 135.1395736 },
+    { "lat": 33.9031018, "lon": 135.1392058 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "primary",
+    "lanes": "2",
+    "layer": "1",
+    "name": "御坊由良線",
+    "name:en": "Gobo Yura Line",
+    "name:ja": "御坊由良線",
+    "name:ja-Hira": "ごぼうゆらせん",
+    "name:ja-Latn": "Gobō Yura-sen",
+    "ref": "24",
+    "source": "YahooJapan/ALPSMAP",
+    "surface": "asphalt",
+    "wikidata": "Q11417641",
+    "wikipedia": "ja:和歌山県道24号御坊由良線"
+  }
+},
+{
+  "type": "way",
+  "id": 126014602,
+  "bounds": {
+    "minlat": 33.9025248,
+    "minlon": 135.1365029,
+    "maxlat": 33.9025746,
+    "maxlon": 135.1367400
+  },
+  "geometry": [
+    { "lat": 33.9025746, "lon": 135.1367400 },
+    { "lat": 33.9025248, "lon": 135.1365029 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "primary",
+    "lanes": "2",
+    "layer": "1",
+    "name": "御坊由良線",
+    "name:en": "Gobo Yura Line",
+    "name:ja": "御坊由良線",
+    "name:ja-Hira": "ごぼうゆらせん",
+    "name:ja-Latn": "Gobō Yura-sen",
+    "ref": "24",
+    "source": "YahooJapan/ALPSMAP",
+    "surface": "asphalt",
+    "wikidata": "Q11417641",
+    "wikipedia": "ja:和歌山県道24号御坊由良線"
+  }
+},
+{
+  "type": "way",
+  "id": 126014646,
+  "bounds": {
+    "minlat": 33.8860992,
+    "minlon": 135.1493516,
+    "maxlat": 33.8863394,
+    "maxlon": 135.1499161
+  },
+  "geometry": [
+    { "lat": 33.8860992, "lon": 135.1499161 },
+    { "lat": 33.8863394, "lon": 135.1493516 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "secondary",
+    "layer": "1",
+    "name": "柏御坊線",
+    "ref": "188",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:LINE_NAME": "柏御坊線",
+    "yh:LINE_NUM": "188",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "一般都道府県道",
+    "yh:WIDTH": "5.5m〜13.0m",
+    "yh:WIDTH_RANK": "2"
+  }
+},
+{
+  "type": "way",
+  "id": 126014735,
+  "bounds": {
+    "minlat": 33.8910203,
+    "minlon": 135.1460184,
+    "maxlat": 33.8911630,
+    "maxlon": 135.1466289
+  },
+  "geometry": [
+    { "lat": 33.8911630, "lon": 135.1466289 },
+    { "lat": 33.8910203, "lon": 135.1460184 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "residential",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "1.5m〜3.0m",
+    "yh:WIDTH_RANK": "4"
+  }
+},
+{
+  "type": "way",
+  "id": 126014745,
+  "bounds": {
+    "minlat": 33.8895992,
+    "minlon": 135.1479056,
+    "maxlat": 33.8899874,
+    "maxlon": 135.1483597
+  },
+  "geometry": [
+    { "lat": 33.8895992, "lon": 135.1479056 },
+    { "lat": 33.8899874, "lon": 135.1483597 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 126014748,
+  "bounds": {
+    "minlat": 33.8998487,
+    "minlon": 135.1408291,
+    "maxlat": 33.8999564,
+    "maxlon": 135.1411783
+  },
+  "geometry": [
+    { "lat": 33.8999564, "lon": 135.1411783 },
+    { "lat": 33.8998487, "lon": 135.1408291 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 126014766,
+  "bounds": {
+    "minlat": 33.8923009,
+    "minlon": 135.1460443,
+    "maxlat": 33.8924559,
+    "maxlon": 135.1466075
+  },
+  "geometry": [
+    { "lat": 33.8923009, "lon": 135.1460443 },
+    { "lat": 33.8924559, "lon": 135.1466075 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "tertiary",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "5.5m〜13.0m",
+    "yh:WIDTH_RANK": "2"
+  }
+},
+{
+  "type": "way",
+  "id": 126014770,
+  "bounds": {
+    "minlat": 33.8989395,
+    "minlon": 135.1371048,
+    "maxlat": 33.8990568,
+    "maxlon": 135.1371134
+  },
+  "geometry": [
+    { "lat": 33.8990568, "lon": 135.1371048 },
+    { "lat": 33.8989395, "lon": 135.1371134 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "track",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "tracktype": "grade1"
+  }
+},
+{
+  "type": "way",
+  "id": 126014771,
+  "bounds": {
+    "minlat": 33.9014931,
+    "minlon": 135.1404226,
+    "maxlat": 33.9016329,
+    "maxlon": 135.1404865
+  },
+  "geometry": [
+    { "lat": 33.9016329, "lon": 135.1404226 },
+    { "lat": 33.9014931, "lon": 135.1404865 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 126014782,
+  "bounds": {
+    "minlat": 33.8959407,
+    "minlon": 135.1449180,
+    "maxlat": 33.8961240,
+    "maxlon": 135.1449774
+  },
+  "geometry": [
+    { "lat": 33.8961240, "lon": 135.1449180 },
+    { "lat": 33.8959407, "lon": 135.1449774 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "tertiary",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "5.5m〜13.0m",
+    "yh:WIDTH_RANK": "2"
+  }
+},
+{
+  "type": "way",
+  "id": 126014784,
+  "bounds": {
+    "minlat": 33.8980105,
+    "minlon": 135.1415871,
+    "maxlat": 33.8981840,
+    "maxlon": 135.1416090
+  },
+  "geometry": [
+    { "lat": 33.8981840, "lon": 135.1416090 },
+    { "lat": 33.8980105, "lon": 135.1415871 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "residential",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "1.5m〜3.0m",
+    "yh:WIDTH_RANK": "4"
+  }
+},
+{
+  "type": "way",
+  "id": 126014788,
+  "bounds": {
+    "minlat": 33.8982340,
+    "minlon": 135.1455180,
+    "maxlat": 33.8983568,
+    "maxlon": 135.1455744
+  },
+  "geometry": [
+    { "lat": 33.8982340, "lon": 135.1455744 },
+    { "lat": 33.8983568, "lon": 135.1455180 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 126014789,
+  "bounds": {
+    "minlat": 33.8980410,
+    "minlon": 135.1390959,
+    "maxlat": 33.8982404,
+    "maxlon": 135.1391213
+  },
+  "geometry": [
+    { "lat": 33.8982404, "lon": 135.1390959 },
+    { "lat": 33.8980410, "lon": 135.1391213 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "residential",
+    "layer": "1",
+    "source": "bing",
+    "yh:WIDTH": "1.5m〜3.0m"
+  }
+},
+{
+  "type": "way",
+  "id": 126014805,
+  "bounds": {
+    "minlat": 33.8973230,
+    "minlon": 135.1456318,
+    "maxlat": 33.8973478,
+    "maxlon": 135.1457717
+  },
+  "geometry": [
+    { "lat": 33.8973478, "lon": 135.1457717 },
+    { "lat": 33.8973230, "lon": 135.1456318 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "tertiary",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "5.5m〜13.0m",
+    "yh:WIDTH_RANK": "2"
+  }
+},
+{
+  "type": "way",
+  "id": 126053211,
+  "bounds": {
+    "minlat": 33.9035609,
+    "minlon": 135.1495616,
+    "maxlat": 33.9036672,
+    "maxlon": 135.1497301
+  },
+  "geometry": [
+    { "lat": 33.9036672, "lon": 135.1495616 },
+    { "lat": 33.9035609, "lon": 135.1497301 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "residential",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "1.5m〜3.0m",
+    "yh:WIDTH_RANK": "4"
+  }
+},
+{
+  "type": "way",
+  "id": 126053327,
+  "bounds": {
+    "minlat": 33.9020705,
+    "minlon": 135.1482491,
+    "maxlat": 33.9021224,
+    "maxlon": 135.1484501
+  },
+  "geometry": [
+    { "lat": 33.9021224, "lon": 135.1484501 },
+    { "lat": 33.9020705, "lon": 135.1482491 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 126053467,
+  "bounds": {
+    "minlat": 33.8986468,
+    "minlon": 135.1469327,
+    "maxlat": 33.8987656,
+    "maxlon": 135.1469815
+  },
+  "geometry": [
+    { "lat": 33.8987656, "lon": 135.1469327 },
+    { "lat": 33.8986468, "lon": 135.1469815 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP",
+    "yh:STRUCTURE": "橋",
+    "yh:TOTYUMONO": "供用中",
+    "yh:TYPE": "その他一般道",
+    "yh:WIDTH": "3.0m〜5.5m",
+    "yh:WIDTH_RANK": "3"
+  }
+},
+{
+  "type": "way",
+  "id": 243508890,
+  "bounds": {
+    "minlat": 33.8868548,
+    "minlon": 135.1551258,
+    "maxlat": 33.8868640,
+    "maxlon": 135.1552735
+  },
+  "geometry": [
+    { "lat": 33.8868640, "lon": 135.1552735 },
+    { "lat": 33.8868548, "lon": 135.1551258 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "source": "bing"
+  }
+},
+{
+  "type": "way",
+  "id": 247782257,
+  "bounds": {
+    "minlat": 33.8860751,
+    "minlon": 135.1566427,
+    "maxlat": 33.8861759,
+    "maxlon": 135.1566610
+  },
+  "geometry": [
+    { "lat": 33.8860751, "lon": 135.1566427 },
+    { "lat": 33.8861759, "lon": 135.1566610 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "residential",
+    "source": "bing"
+  }
+},
+{
+  "type": "way",
+  "id": 345664100,
+  "bounds": {
+    "minlat": 33.8871905,
+    "minlon": 135.1542045,
+    "maxlat": 33.8872639,
+    "maxlon": 135.1542073
+  },
+  "geometry": [
+    { "lat": 33.8871905, "lon": 135.1542073 },
+    { "lat": 33.8872639, "lon": 135.1542045 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "name": "新薗橋",
+    "surface": "asphalt"
+  }
+},
+{
+  "type": "way",
+  "id": 383557349,
+  "bounds": {
+    "minlat": 33.8881596,
+    "minlon": 135.1595062,
+    "maxlat": 33.8881773,
+    "maxlon": 135.1596111
+  },
+  "geometry": [
+    { "lat": 33.8881773, "lon": 135.1596111 },
+    { "lat": 33.8881596, "lon": 135.1595062 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP"
+  }
+},
+{
+  "type": "way",
+  "id": 383557350,
+  "bounds": {
+    "minlat": 33.8876190,
+    "minlon": 135.1592341,
+    "maxlat": 33.8876443,
+    "maxlon": 135.1593262
+  },
+  "geometry": [
+    { "lat": 33.8876443, "lon": 135.1592341 },
+    { "lat": 33.8876190, "lon": 135.1593262 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "residential",
+    "layer": "1"
+  }
+},
+{
+  "type": "way",
+  "id": 383557351,
+  "bounds": {
+    "minlat": 33.8867759,
+    "minlon": 135.1586421,
+    "maxlat": 33.8869211,
+    "maxlon": 135.1586433
+  },
+  "geometry": [
+    { "lat": 33.8867759, "lon": 135.1586421 },
+    { "lat": 33.8869211, "lon": 135.1586433 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP"
+  }
+},
+{
+  "type": "way",
+  "id": 437721940,
+  "bounds": {
+    "minlat": 33.8945946,
+    "minlon": 135.1608608,
+    "maxlat": 33.8945965,
+    "maxlon": 135.1609277
+  },
+  "geometry": [
+    { "lat": 33.8945946, "lon": 135.1609277 },
+    { "lat": 33.8945965, "lon": 135.1608608 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "bridge:name": "善妙寺橋",
+    "highway": "unclassified",
+    "source": "YahooJapan/ALPSMAP"
+  }
+},
+{
+  "type": "way",
+  "id": 833760753,
+  "bounds": {
+    "minlat": 33.8965911,
+    "minlon": 135.1433818,
+    "maxlat": 33.8968539,
+    "maxlon": 135.1437538
+  },
+  "geometry": [
+    { "lat": 33.8968539, "lon": 135.1437538 },
+    { "lat": 33.8967729, "lon": 135.1436155 },
+    { "lat": 33.8966666, "lon": 135.1434771 },
+    { "lat": 33.8965911, "lon": 135.1433818 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "tertiary",
+    "layer": "1",
+    "name": "令和新橋",
+    "source": "YahooJapan/ALPSMAP"
+  }
+},
+{
+  "type": "way",
+  "id": 1016190978,
+  "bounds": {
+    "minlat": 33.8864312,
+    "minlon": 135.1558794,
+    "maxlat": 33.8864975,
+    "maxlon": 135.1558811
+  },
+  "geometry": [
+    { "lat": 33.8864975, "lon": 135.1558811 },
+    { "lat": 33.8864312, "lon": 135.1558794 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "service",
+    "layer": "1",
+    "service": "alley",
+    "source": "GSImaps/std"
+  }
+},
+{
+  "type": "way",
+  "id": 1016190981,
+  "bounds": {
+    "minlat": 33.8860369,
+    "minlon": 135.1575912,
+    "maxlat": 33.8861030,
+    "maxlon": 135.1575979
+  },
+  "geometry": [
+    { "lat": 33.8860369, "lon": 135.1575979 },
+    { "lat": 33.8861030, "lon": 135.1575912 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "secondary",
+    "layer": "1",
+    "name": "井関御坊線",
+    "ref": "176",
+    "source": "YahooJapan/ALPSMAP"
+  }
+},
+{
+  "type": "way",
+  "id": 1063086051,
+  "bounds": {
+    "minlat": 33.9023553,
+    "minlon": 135.1577376,
+    "maxlat": 33.9024312,
+    "maxlon": 135.1577480
+  },
+  "geometry": [
+    { "lat": 33.9023553, "lon": 135.1577480 },
+    { "lat": 33.9024312, "lon": 135.1577376 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP"
+  }
+},
+{
+  "type": "way",
+  "id": 1183425485,
+  "bounds": {
+    "minlat": 33.8892983,
+    "minlon": 135.1595603,
+    "maxlat": 33.8893241,
+    "maxlon": 135.1596538
+  },
+  "geometry": [
+    { "lat": 33.8893241, "lon": 135.1596538 },
+    { "lat": 33.8892983, "lon": 135.1595603 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1"
+  }
+},
+{
+  "type": "way",
+  "id": 1183425495,
+  "bounds": {
+    "minlat": 33.8865095,
+    "minlon": 135.1530326,
+    "maxlat": 33.8865695,
+    "maxlon": 135.1530451
+  },
+  "geometry": [
+    { "lat": 33.8865095, "lon": 135.1530451 },
+    { "lat": 33.8865695, "lon": 135.1530326 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "residential",
+    "layer": "1"
+  }
+},
+{
+  "type": "way",
+  "id": 1450033653,
+  "bounds": {
+    "minlat": 33.9011903,
+    "minlon": 135.1568418,
+    "maxlat": 33.9013030,
+    "maxlon": 135.1568687
+  },
+  "geometry": [
+    { "lat": 33.9013030, "lon": 135.1568418 },
+    { "lat": 33.9011903, "lon": 135.1568687 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "service",
+    "layer": "1",
+    "service": "alley"
+  }
+},
+{
+  "type": "way",
+  "id": 1450033657,
+  "bounds": {
+    "minlat": 33.8993221,
+    "minlon": 135.1574116,
+    "maxlat": 33.8993512,
+    "maxlon": 135.1574687
+  },
+  "geometry": [
+    { "lat": 33.8993512, "lon": 135.1574687 },
+    { "lat": 33.8993221, "lon": 135.1574116 }
+  ],
+  "tags": {
+    "bridge": "yes",
+    "highway": "unclassified",
+    "layer": "1",
+    "source": "YahooJapan/ALPSMAP"
+  }
+}
+
+  ]
+}

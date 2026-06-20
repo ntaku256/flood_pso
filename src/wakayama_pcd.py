@@ -39,10 +39,11 @@ def _read_xyz(path: str, want_class: bool = False):
     want_class=True は org（5列）専用。grd には class 列が無いので呼ばないこと。"""
     import pandas as pd
     if want_class:
+        # class も float64 で読む（int 固定だと一部タイルで "Integer column has NA"
+        # になる＝複数列同時読みで稀に NA 化する行があるため）。NaN class は呼び出し側で
+        # 「未分類（除外しない）」として扱う。
         df = pd.read_csv(path, header=None, usecols=[1, 2, 3, 4],
-                         names=["e", "n", "z", "c"],
-                         dtype={"e": np.float64, "n": np.float64,
-                                "z": np.float64, "c": np.int16},
+                         names=["e", "n", "z", "c"], dtype=np.float64,
                          engine="c", memory_map=True)
         return (df["e"].to_numpy(), df["n"].to_numpy(),
                 df["z"].to_numpy(), df["c"].to_numpy())
@@ -92,7 +93,13 @@ def load_wakayama_dem(grd_path: str, res_m: float = 1.0,
         print(f"[wakayama] reading {Path(grd_path).name} ...")
     if exc:
         e, n, zv, cv = _read_xyz(grd_path, want_class=True)
-        keep = ~np.isin(cv, exc)
+        # 座標 NaN の壊れ点を除去（複数列読みで稀に発生）
+        finite = np.isfinite(e) & np.isfinite(n) & np.isfinite(zv)
+        if not finite.all():
+            if verbose:
+                print(f"[wakayama] drop {int((~finite).sum()):,} malformed pts (NaN coord)")
+            e, n, zv, cv = e[finite], n[finite], zv[finite], cv[finite]
+        keep = ~np.isin(cv, exc)   # NaN class は isin=False → 未分類として残す
         n_drop = int((~keep).sum())
         e, n, zv = e[keep], n[keep], zv[keep]
         if verbose:
