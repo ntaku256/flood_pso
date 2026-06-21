@@ -592,7 +592,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         v_es = v_exag_sea if v_exag_sea is not None else v_exag * 0.33
 
         # OSM 取得 + ブロック grid 上の建物・道路 mask を事前生成
-        building_mask = road_mask = water_mask = None
+        building_mask = road_mask = water_mask = road_major_mask = None
         building_height_block = None   # P1: per-building 集約のフラット高さ（FG-GML 経路）
         building_id_grid = None        # P2: 建物ごとの整数ラベル
         building_wall_keys = None      # P2: 建物 id → 壁ブロックキー
@@ -607,7 +607,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             factor = max(1, round(h_res / h_res_dem))
             nz_g = dem_patch.shape[0] // factor
             nx_g = dem_patch.shape[1] // factor
-            building_mask, road_mask = build_osm_masks(
+            building_mask, road_mask, road_major_mask = build_osm_masks(
                 osm, patch_bbox_latlon,
                 grid_h=nz_g, grid_w=nx_g, h_res_block_m=h_res,
             )
@@ -628,7 +628,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             nz_g = dem_patch.shape[0] // factor
             nx_g = dem_patch.shape[1] // factor
             # 道路だけ従来 mask（建物は per-building 集約で別途生成）
-            _, rm_f = build_osm_masks(
+            _, rm_f, rmaj_f = build_osm_masks(
                 {"roads": fgd["roads"]}, patch_bbox_latlon,
                 grid_h=nz_g, grid_w=nx_g, h_res_block_m=h_res,
             )
@@ -646,6 +646,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             bm_f = bmaps["mask"]
             building_mask = bm_f if building_mask is None else (building_mask | bm_f)
             road_mask = rm_f if road_mask is None else (road_mask | rm_f)
+            road_major_mask = rmaj_f if road_major_mask is None else (road_major_mask | rmaj_f)
             # FG-GML 水域(WA/WStrA: 河川・池) → 地表を水面に。fgd_wa_xml はカンマ区切り複数可
             if fgd_wa_xml:
                 from fgd_vector import load_water
@@ -735,6 +736,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             bridges=bridges_render,
             patch_bbox_latlon=patch_bbox_latlon,
             water_mask=water_mask,
+            road_major_mask=road_major_mask,
         )
     elif terrain_quality == "legacy":
         print(f"Converting to blocks [legacy] "

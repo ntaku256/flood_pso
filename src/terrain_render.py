@@ -339,16 +339,20 @@ def build_osm_masks(
     (building_mask, road_mask) を生成する。"""
     building_mask = np.zeros((grid_h, grid_w), dtype=bool)
     road_mask     = np.zeros((grid_h, grid_w), dtype=bool)
+    road_major_mask = np.zeros((grid_h, grid_w), dtype=bool)  # 幹線(幅≥4.5m)のみ→舗装
     for b in osm.get("buildings", []):
         m = polygon_mask_from_latlon(b["coords"], patch_bbox_latlon, grid_h, grid_w)
         building_mask |= m
     for r in osm.get("roads", []):
         # buffer 半径 = 道路幅/2 をブロック単位に
-        buf = max(1.0, float(r.get("width_m", 4)) / 2.0 / max(h_res_block_m, 0.1))
+        w = float(r.get("width_m", 4))
+        buf = max(1.0, w / 2.0 / max(h_res_block_m, 0.1))
         m = polyline_buffer_mask_from_latlon(r["coords"], patch_bbox_latlon,
                                               grid_h, grid_w, buffer_cells=buf)
         road_mask |= m
-    return building_mask, road_mask
+        if w >= 4.5:                       # 真幅道路/幹線 → 舗装(andesite)
+            road_major_mask |= m
+    return building_mask, road_mask, road_major_mask
 
 
 # FG-GML type → 壁/屋根ブロック（屋根は ortho 無効時 or 集約不能時の fallback）。
@@ -631,6 +635,8 @@ def dem_to_blocks_enhanced(
     bridges: list | None = None,
     patch_bbox_latlon: tuple | None = None,
     road_block: str = "andesite",
+    road_major_mask: np.ndarray | None = None,
+    road_minor_block: str = "gravel",
     water_mask: np.ndarray | None = None,
     water_block: str = "water",
 ) -> tuple[list, list[int]]:
@@ -771,10 +777,12 @@ def dem_to_blocks_enhanced(
         surf_block[beach & gentle] = "sand"                  # 砂浜（最近・緩斜面）
         surf_block[beach & ~gentle] = "stone"                # 護岸/磯（最近・急斜面）
 
-    # OSM 道路は地表を gravel で上書き（陸セルのみ、建物より優先順位は低い）
+    # 道路を地表に上書き（陸セルのみ）。細道=road_minor_block(砂利)、幹線=road_block(舗装)
     if road_mask is not None and road_mask.shape == surf_block.shape:
         land_for_road = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
-        surf_block[road_mask & land_for_road] = road_block
+        surf_block[road_mask & land_for_road] = road_minor_block
+        if road_major_mask is not None and road_major_mask.shape == surf_block.shape:
+            surf_block[road_major_mask & land_for_road] = road_block
 
     # FG-GML 水域(WA/WStrA: 河川・池等)を地表に水面として上書き（陸セルのみ。海は別途 sea_mask）
     if water_mask is not None and water_mask.shape == surf_block.shape:
