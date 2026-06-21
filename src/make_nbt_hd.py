@@ -117,9 +117,10 @@ def main():
                     help="国土地理院 FG-GML の建物(BldA)・道路(RdEdg)をローカルから取得して "
                          "地表に重ねる（建物=stone 立体、道路=gravel 上書き、API不要・高精度）")
     ap.add_argument("--fgd-bld", default=DEFAULT_BLD_XML,
-                    help="--use-fgd の建物 BldA GML パス")
+                    help="--use-fgd の建物 BldA GML パス。カンマ区切りで複数メッシュ可"
+                         "（タイルが境界を跨ぐとき union, 例 503551,503561）")
     ap.add_argument("--fgd-rdedg", default=DEFAULT_RDEDG_XML,
-                    help="--use-fgd の道路 RdEdg GML パス")
+                    help="--use-fgd の道路 RdEdg GML パス。カンマ区切りで複数メッシュ可")
     ap.add_argument("--surface-ortho", action="store_true",
                     help="GSI シームレス空中写真から地表色を決める（viewer 既知のバニラブロックへ"
                          "色マッチ：草/砂/砂利/石/水/岩盤）。傾斜分類より写真寄りの見た目に")

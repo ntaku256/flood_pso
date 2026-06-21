@@ -185,18 +185,29 @@ def load_fgd_buildings_roads(
     fetch_osm_buildings_roads 互換 dict を返す。
 
     margin_deg : bbox を少し広げて境界の建物切れを防ぐ（~50m）
+    bld_xml/rdedg_xml : 単一パス、リスト、または **カンマ区切り複数パス** を受け付ける。
+      タイルが複数メッシュに跨る場合（例 御坊南端 002 = 503551+503561）に両方を union 読み。
     """
     la0, la1 = lat_min - margin_deg, lat_max + margin_deg
     lo0, lo1 = lon_min - margin_deg, lon_max + margin_deg
 
+    def _as_list(x):
+        if not x:
+            return []
+        if isinstance(x, (list, tuple)):
+            return [str(p) for p in x if p]
+        return [s.strip() for s in str(x).split(",") if s.strip()]
+
     buildings = []
     roads = []
-    if bld_xml and Path(bld_xml).exists():
-        buildings = load_buildings(bld_xml, lat_min=la0, lat_max=la1,
-                                   lon_min=lo0, lon_max=lo1)
-    if rdedg_xml and Path(rdedg_xml).exists():
-        roads = load_roads(rdedg_xml, lat_min=la0, lat_max=la1,
-                           lon_min=lo0, lon_max=lo1)
+    for bx in _as_list(bld_xml):
+        if Path(bx).exists():
+            buildings += load_buildings(bx, lat_min=la0, lat_max=la1,
+                                        lon_min=lo0, lon_max=lo1)
+    for rx in _as_list(rdedg_xml):
+        if Path(rx).exists():
+            roads += load_roads(rx, lat_min=la0, lat_max=la1,
+                                lon_min=lo0, lon_max=lo1)
 
     if verbose:
         print(f"[fgd] buildings={len(buildings)}  roads={len(roads)}  "
