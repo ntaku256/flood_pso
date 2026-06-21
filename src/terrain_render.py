@@ -459,7 +459,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                       scale_land, h_res_block_m, surf_block=None,
                       deck_key="andesite", pier_key="andesite",
                       cap_key="andesite", rail_key="andesite",
-                      arch_rise_m=0.0) -> int:
+                      arch_rise_m=0.0, y_flood_top=None) -> int:
     """OSM 橋（polyline + layer + road_class + width）を Tellus 流に立体化して blocks へ追加。
 
     桁Y(station) = max(両岸補間 baseline + ramp(layer×arch_rise_m),  局所地形/水面 + ramp(clearance))
@@ -607,6 +607,21 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                             for yy in range(fy, dy - 1):
                                 put(ix, yy, iz, pier_key)
                             put(ix, dy - 1, iz, cap_key)
+                # 橋下を「橋を抜いた高さ（周辺の洪水水位/水面）」まで water で埋める。
+                # デッキ・橋脚は既に put 済み(seen)なので上書きされず、橋脚の間だけ水が入る。
+                if y_flood_top is not None:
+                    wt = -1
+                    for w in range(-half_w - 3, half_w + 4):
+                        ix2, iz2 = col(cx + ox * w, cz + oz * w)
+                        if 0 <= iz2 < nz and 0 <= ix2 < nx:
+                            wt = max(wt, int(y_flood_top[iz2, ix2]))
+                            if sea_mask[iz2, ix2]:
+                                wt = max(wt, int(y_sea_surface))
+                    g = floor_y(cx, cz)
+                    for wy in range(g + 1, min(int(dy) - 1, wt) + 1):
+                        for w in range(-half_w, half_w + 1):
+                            ix2, iz2 = col(cx + ox * w, cz + oz * w)
+                            put(ix2, wy, iz2, "water")
             s_acc += L
     return ymax[0]
 
@@ -1069,7 +1084,7 @@ def dem_to_blocks_enhanced(
             y_surf_land=y_surf_land, sea_mask=sea_mask,
             y_sea_surface=y_sea_surface, y_sea_floor=y_sea_floor,
             scale_land=scale_land, h_res_block_m=h_res_block,
-            surf_block=surf_block,
+            surf_block=surf_block, y_flood_top=y_flood_top,
         )
         max_y = max(max_y, bridge_ymax + 2)
 
