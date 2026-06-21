@@ -761,6 +761,16 @@ def dem_to_blocks_enhanced(
         surf_block[(cover_ds == 30) & land_esa] = "grass"        # grassland 草地
         surf_block[(cover_ds == 80) & land_esa] = "water"        # 内陸水面
 
+    # 海岸: ortho 地表でも海岸線(dist_shore 小・低地)を砂浜/礫浜/護岸に（海岸ののっぺり解消）
+    if dist_shore is not None and dist_shore.shape == surf_block.shape:
+        elev0 = np.where(np.isnan(dem_ds), 999.0, dem_ds)
+        gentle = slope_ds < SLOPE_STEEP
+        coast_g = land_mask & (dist_shore <= SHORE_GRAVEL_M) & (elev0 < 3.5) & gentle
+        surf_block[coast_g] = "gravel"                       # 礫浜（中距離）
+        beach = land_mask & (dist_shore <= SHORE_SAND_M) & (elev0 < 3.0)
+        surf_block[beach & gentle] = "sand"                  # 砂浜（最近・緩斜面）
+        surf_block[beach & ~gentle] = "stone"                # 護岸/磯（最近・急斜面）
+
     # OSM 道路は地表を gravel で上書き（陸セルのみ、建物より優先順位は低い）
     if road_mask is not None and road_mask.shape == surf_block.shape:
         land_for_road = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
