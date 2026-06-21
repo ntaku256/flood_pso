@@ -525,6 +525,20 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
             return full
         return full * (s / half) if s <= half else full * ((total - s) / half)
 
+    def end_base(end_pt, in_pt):
+        # 橋端 → 外向き（橋の延長＝奥に続く道路の方向）へ陸地形をサンプルし中央値で安定化。
+        # 端ピンポイント依存をやめ、データ境界/水面/穴での baseline 破綻や橋台手前の瘤を防ぐ。
+        dx, dz = end_pt[0] - in_pt[0], end_pt[1] - in_pt[1]
+        L = math.hypot(dx, dz)
+        if L > 1e-6:
+            dx, dz = dx / L, dz / L
+        ys = []
+        for d in range(0, 26):    # 端から外側 0..25 block（奥に続く道路方向）の陸地形
+            i, j = col(end_pt[0] + dx * d, end_pt[1] + dz * d)
+            if 0 <= j < nz and 0 <= i < nx and not sea_mask[j, i] and np.isfinite(y_surf_land[j, i]):
+                ys.append(int(y_surf_land[j, i]))
+        return int(np.median(ys)) if ys else terrain_y(*end_pt)
+
     for b in bridges:
         pts = [_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, nz, nx) for la, lo in b["coords"]]
         rc = b.get("road_class", "normal")
@@ -535,7 +549,8 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
             L = math.hypot(x1 - x0, z1 - z0); seg.append(L); total += L
         if total < 2.0:
             continue
-        startS, endS = terrain_y(*pts[0]), terrain_y(*pts[-1])
+        startS = end_base(pts[0], pts[1] if len(pts) > 1 else pts[0])
+        endS = end_base(pts[-1], pts[-2] if len(pts) > 1 else pts[-1])
         rise_full = min(layer * arch_rise_m, MAX_RISE_M) * scale_land
         clear_full = CLEAR_M.get(rc, 5.0) * scale_land
         # スパンが水を渡るか（渡る時だけ水面+clearance を最低デッキ高に）
@@ -576,7 +591,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                     top_key = deck_key
                     if surf_block is not None and 0 <= iz < nz and 0 <= ix < nx:
                         sk = surf_block[iz, ix]
-                        if sk:
+                        if sk and sk != "water":    # 水域(河川/海)の色は橋の路面に使わない
                             top_key = sk            # 上面=衛星写真の路面色
                     put(ix, dy, iz, top_key)
                     put(ix, dy - 1, iz, deck_key)   # 下面=安山岩(構造)
