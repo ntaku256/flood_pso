@@ -380,6 +380,8 @@ def build_building_maps(
     pct: int = 75,
     type_floor_frac: float = 0.6,
     min_h_m: float = 2.0,
+    roof_slope: float = 0.35,
+    roof_cap: float = 3.0,
 ) -> dict:
     """FG-GML 各建物を1棟単位でラスタ化し、描画に必要な block-grid マップ一式を返す。
 
@@ -431,7 +433,15 @@ def build_building_maps(
                 h = max(float(np.percentile(vals, pct)), floor)
         h = max(h, min_h_m)
         sub_m = mask[y0:y1, x0:x1]; sub_m[ins] = True
-        sub_h = hmap[y0:y1, x0:x1]; sub_h[ins] = h     # 重なりは後勝ち（FG-GML はほぼ排他）
+        # 屋根形状: 普通建物(住宅)は寄棟風の勾配屋根(縁=壁top, 内側ほど高い)。
+        # 堅ろう建物(RC)・無壁舎(倉庫)は陸屋根(フラット)のまま。
+        sub_h = hmap[y0:y1, x0:x1]
+        if roof_slope > 0 and tp == "普通建物" and ins.sum() >= 4:
+            d = distance_transform_edt(ins).astype(np.float32)   # 縁からの内側距離(block)
+            rise = np.minimum(np.clip(d - 1.0, 0, None) * roof_slope, roof_cap)
+            sub_h[ins] = h + rise[ins]                            # 重なりは後勝ち
+        else:
+            sub_h[ins] = h
         sub_i = idmap[y0:y1, x0:x1]; sub_i[ins] = bid
         wall_keys.append(BUILDING_WALL_BY_TYPE.get(tp, DEFAULT_WALL_KEY))
         roof_keys.append(BUILDING_ROOF_BY_TYPE.get(tp, DEFAULT_ROOF_KEY))
