@@ -630,7 +630,8 @@ def dem_to_blocks_enhanced(
     color_building_roofs: bool = False,
     wall_block: str = "white_concrete",
     window_block: str = "gray_concrete",
-    floor_height: int = 3,
+    floor_height: int = 5,
+    floor_block: str = "light_gray_concrete",
     surface_grid_override: np.ndarray | None = None,
     bridges: list | None = None,
     patch_bbox_latlon: tuple | None = None,
@@ -915,16 +916,29 @@ def dem_to_blocks_enhanced(
             else:
                 wall_kind = wall_block
             for fy in range(y_top + 1, top_y + 1):
+                r = (fy - y_top - 1) % fh    # 階内位置 0..fh-1 (0=床スラブ, 壁4+床1=5/階)
                 if fy == top_y:
                     kind = roof_kind                              # 屋根
-                elif (fy - y_top) % fh == 0 and fy < top_y - 1:
-                    kind = window_block                          # 階ごとの窓帯
+                elif r == 0 and fy != y_top + 1:
+                    kind = floor_block                           # 各階の床スラブ(1階地面は除く)
+                elif r == 2 and fy < top_y - 1:
+                    kind = window_block                          # 窓帯(階の中段)
                 else:
                     kind = wall_kind                             # 壁
                 blocks.append(nbtlib.Compound({
                     "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(fy), nbtlib.Int(bz_v)]),
                     "state": block_id(kind),
                 }))
+            # 軒(庇): 屋根レベルを footprint 外1ブロックに張り出す（壁より屋根が出る家らしさ）
+            for di, dj in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                ni, nj = i_ + di, j + dj
+                if 0 <= ni < nx and 0 <= nj < nz and \
+                        (building_id is None or building_id[nj, ni] < 0):
+                    blocks.append(nbtlib.Compound({
+                        "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(int(BX[nj, ni])),
+                                                          nbtlib.Int(top_y), nbtlib.Int(int(BZ[nj, ni]))]),
+                        "state": block_id(roof_kind),
+                    }))
         max_y = max(max_y, b_max_y + 2)
 
     # --- 樹木（LiDAR class3 由来）。建物・道路・水域・海(land_mask)には立てない。
