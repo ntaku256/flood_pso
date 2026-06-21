@@ -811,10 +811,17 @@ def dem_to_blocks_enhanced(
             "state": block_id(floor_kind),
         }))
         # 海底直下に少しの stone 地盤
-        for dy in range(max(0, floor_y - 3), floor_y):
+        base_y = max(0, floor_y - 3)
+        for dy in range(base_y, floor_y):
             blocks.append(nbtlib.Compound({
                 "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(dy), nbtlib.Int(bz_v)]),
                 "state": block_id("stone"),
+            }))
+        # 一番下に土台層（各柱の最下の1個下＝地形の起伏に沿う。海底の砂/砂利が浮かないよう支える）
+        if base_y - 1 >= 0:
+            blocks.append(nbtlib.Compound({
+                "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(base_y - 1), nbtlib.Int(bz_v)]),
+                "state": block_id("deepslate"),
             }))
         # 水柱（floor+1 ～ sea_surface）
         for fy in range(floor_y + 1, y_sea_surface + 1):
@@ -916,6 +923,11 @@ def dem_to_blocks_enhanced(
                 wall_kind = building_wall_keys[bid_c]             # type 別の壁
             else:
                 wall_kind = wall_block
+            # 屋根に砂利/砂が来ると重力で落ちるので落ちない石に置換（軒も同じ roof_kind）
+            if roof_kind == "gravel":
+                roof_kind = "andesite"
+            elif roof_kind == "sand":
+                roof_kind = "sandstone"
             for fy in range(y_top + 1, top_y + 1):
                 r = (fy - y_top - 1) % fh    # 階内位置 0..fh-1 (0=床スラブ, 壁4+床1=5/階)
                 if fy == top_y:
@@ -981,9 +993,11 @@ def dem_to_blocks_enhanced(
             return "spruce_log", "spruce_leaves", "cone"
 
         if tree_mode == "sparse":
-            step = max(2, int(round(4.0 / h_res_block)))   # ~4m 間隔で1本
+            step = max(2, int(round(2.5 / h_res_block)))   # ~2.5m 間隔（森林を密に）
             rows = np.arange(nz)[:, None]; cols = np.arange(nx)[None, :]
-            sel = cand & ((rows % step) == 0) & ((cols % step) == 0)
+            # 行帯ごとに半ステップずらして隣列を斜めにずらす（千鳥配置で自然な森に）
+            offset = ((rows // step) % 2) * (step // 2)
+            sel = cand & ((rows % step) == 0) & (((cols - offset) % step) == 0)
             for j, i_ in np.argwhere(sel).tolist():
                 th_m = float(tree_ds[j, i_])
                 th = max(2, min(int(round(th_m * scale_land)), 30))
