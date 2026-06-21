@@ -103,6 +103,55 @@ cd /home/moriken/web-app/flood_pso
 # _parse_fast 流用で高速（数秒）。redtact は .litematic/.litematica/.schem/.nbt いずれも読める。
 ```
 
+## 歩行ワールド生成オプション一覧（`make_nbt_hd.py`）
+
+御坊を真1m・写真地表・全リアル化で出す基本形（⭐＝2026-06 追加のリアル化オプション）:
+
+```bash
+.venv/bin/python src/make_nbt_hd.py --K 16 --seed 0 --preset gobo_walk_1km --methods gt \
+  --use-fgd --wakayama-grd data_cache/wakayama_lidar/06RC802_grd.txt \
+  --surface-ortho --trees --tree-mode sparse --evac --scale 1.5 \
+  --center-lat 33.882 --center-lon 135.164 --width 1000 --depth 1000 --tag-suffix demo
+```
+
+**データソース**
+| オプション | 既定 | 説明 |
+|---|---|---|
+| `--use-fgd` | off | FG-GML 建物(BldA)/道路(RdEdg) をローカル配置（API不要） |
+| `--fgd-bld` / `--fgd-rdedg` | 503561 | 建物/道路 GML。**カンマ区切りで複数メッシュ**（境界タイルは `503551,503561`） |
+| `--fgd-wa` ⭐ | 503561(ON) | 水域 WA/WStrA を水面に（河川・池）。空文字で無効 |
+| `--wakayama-grd <grd[,grd…]>` ⭐ | – | 和歌山LiDAR 1m DEM。**カンマ区切りで複数図郭を mosaic**（タイル境界跨ぎ） |
+| `--wakayama-org <org>` | 自動 | DSM(建物実高さ)の明示パス（無指定なら `_grd→_org` 自動） |
+| `--use-esa` ⭐ | off | ESA WorldCover 土地利用を地表に重ね（cropland→田畑 等。rasterio 要） |
+| `--use-osm` | off | OSM 建物/道路を Overpass から取得 |
+
+**地表・見た目**
+| `--surface-ortho` | off | GSI 空中写真色で地表ブロックを決定 |
+| `--ortho-zoom` / `--ortho-saturation` | 18 / 1.4 | 写真解像度(18≈0.6m/px) / 彩度ブースト |
+
+**樹木（LiDAR class3）⭐**
+| `--trees` | off | 植生点→樹冠高で樹木配置（高さ別樹種＝低木birch/中木oak/高木spruce、緑フィルタ、建物/道路/水域/海は除外） |
+| `--tree-mode canopy\|sparse` | canopy | canopy=密な森 / sparse=間引き個別木(球/円錐・千鳥配置) |
+| `--no-veg-filter` | off | 建物DSMから植生class3を除外しない |
+
+**建物・洪水**
+| `--no-building-heights` / `--building-height <m>` | off / 6.0 | LiDAR実高さを使わず一律高さ / その値 |
+| `--no-flood-barrier` ⭐ | off | 建物を浸水バリアにしない（既定は水が建物を避ける） |
+
+**橋・避難 ⭐**
+| `--bridges-json <json>` | gobo_bridges | OSM橋を立体化（桁+坂+橋脚）。空文字で無効 |
+| `--evac` / `--evac-xml <gml>` ⭐ | off / P20-12_30 | 国土数値情報P20 指定緊急避難場所を緑光柱マーカーで配置 |
+
+**範囲・解像度・出力**
+| `--center-lat` / `--center-lon` | 御坊中心 | 出力エリア中心 |
+| `--width <m>` / `--depth <m>` | preset | 東西 / 南北幅 |
+| `--scale <r>` | 1.0 | 1.5 で 1block≈0.667m（細かく拡大、LiDARも再グリッド） |
+| `--tiles RxC` | – | 重なりなくグリッド分割（大スケール時の OOM 回避） |
+| `--tag-suffix <s>` / `--no-litematic` | "" / off | 出力名サフィックス / .litematic 抑止 |
+
+> 注: 御坊中心の広範囲(建物1700+/水域多数)は描画が重く OOM 気味 → `--width/--depth` で範囲を絞るか `--tiles` で分割する。
+> 建物の屋根に来た砂利/砂は andesite/sandstone に、海底の砂/砂利は最下に deepslate 土台層を地形なりに敷いて重力落下を防止（自動）。
+
 ## 主要結果（多シード平均）
 
 | K | D=1+K² | Standard PSO loss (depth MAE) | CCPSO2 loss |
