@@ -753,6 +753,14 @@ def dem_to_blocks_enhanced(
             dem_ds, slope_ds, convex_ds, dist_shore, sea_level_m=sea_level_m,
         )
 
+    # ESA WorldCover の土地利用を ortho 地表に重ねて田畑・草地・内陸水を明確化
+    # （写真色の上に意味カテゴリを反映。森/市街は ortho の細かい色のまま残す）
+    if cover_ds is not None and cover_ds.shape == surf_block.shape:
+        land_esa = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
+        surf_block[(cover_ds == 40) & land_esa] = "coarse_dirt"  # cropland 田畑(耕地)
+        surf_block[(cover_ds == 30) & land_esa] = "grass"        # grassland 草地
+        surf_block[(cover_ds == 80) & land_esa] = "water"        # 内陸水面
+
     # OSM 道路は地表を gravel で上書き（陸セルのみ、建物より優先順位は低い）
     if road_mask is not None and road_mask.shape == surf_block.shape:
         land_for_road = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)

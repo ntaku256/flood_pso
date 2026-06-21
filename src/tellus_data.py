@@ -302,11 +302,11 @@ def fetch_esa_worldcover_tile(tile_id: str,
                                 cache_dir: Path = DEFAULT_CACHE_DIR,
                                 verbose: bool = True) -> Path:
     """3°×3° の WorldCover GeoTIFF をローカルにダウンロード。Path を返す。"""
-    out = cache_dir / "esa" / f"ESA_WorldCover_10m_2021_v200_{tile_id}.tif"
+    out = cache_dir / "esa" / f"ESA_WorldCover_10m_2021_v200_{tile_id}_Map.tif"
     if out.exists():
         return out
     out.parent.mkdir(parents=True, exist_ok=True)
-    url = f"{ESA_BASE_URL}/ESA_WorldCover_10m_2021_v200_{tile_id}.tif"
+    url = f"{ESA_BASE_URL}/ESA_WorldCover_10m_2021_v200_{tile_id}_Map.tif"
     if verbose:
         print(f"[esa] downloading {tile_id} ...")
     data = _http_get_with_retry(url, timeout=180.0)

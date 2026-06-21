@@ -393,6 +393,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
 
     # ─── terrain_source 分岐：表示用 dem を Mapzen / Tellus world で差し替え ───
     cover_patch = None
+    cover_patch_full = None         # ESA WorldCover（use_esa 時のみ取得, dem grid 整合）
     tellus_surface_grid = None      # tellus_world のときのみセット (object dtype, palette key)
     tellus_inundation_grid = None   # tellus_world のときに使う再投影済 inundation
     if terrain_source == "tellus_world":
@@ -554,7 +555,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             bh_patch = building_height_grid[r0:r1, c0:c1]
         if tree_height_grid is not None and tree_height_grid.shape == dem.shape:
             tree_patch = tree_height_grid[r0:r1, c0:c1]
-        if terrain_source == "mapzen" and use_esa:
+        if use_esa and cover_patch_full is not None:
             cover_patch = cover_patch_full[r0:r1, c0:c1]
 
         # patch の経緯度 bbox（OSM 取得 + grid 変換に使用）
