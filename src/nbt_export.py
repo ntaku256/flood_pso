@@ -349,7 +349,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   tellus_world_dir: str | None = None,
                   tellus_world_scale: float = 1.0,
                   tellus_sea_level_y: int = 0,
-                  bridges_json: str | None = None):
+                  bridges_json: str | None = None,
+                  evac_xml: str | None = None):
     """
     DEMと浸水マップの指定範囲をMinecraft NBT Structureに変換する。
 
@@ -701,6 +702,15 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   + (f"（例: {', '.join(b['name'] for b in bridges_render if b['name'])[:60]}）"
                      if any(b['name'] for b in bridges_render) else ""))
 
+        evac_render = None
+        if evac_xml:
+            from ksj_evac import load_evac_facilities
+            evac_render = load_evac_facilities(
+                evac_xml,
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+            )
+
         print(f"Converting to blocks [enhanced] "
               f"(h_res={h_res}m/block, v_res={v_res}m/block, "
               f"v_exag_land={v_exag}, v_exag_sea={v_es:.2f}, "
@@ -734,6 +744,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             color_building_roofs=surface_ortho,
             surface_grid_override=surface_override,
             bridges=bridges_render,
+            evac_facilities=evac_render,
             patch_bbox_latlon=patch_bbox_latlon,
             water_mask=water_mask,
             road_major_mask=road_major_mask,

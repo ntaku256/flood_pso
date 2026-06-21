@@ -640,6 +640,7 @@ def dem_to_blocks_enhanced(
     road_minor_block: str = "gravel",
     water_mask: np.ndarray | None = None,
     water_block: str = "water",
+    evac_facilities: list | None = None,
 ) -> tuple[list, list[int]]:
     """
     `nbt_export.dem_to_blocks` の置き換え。Tellus 風の改善 5 点を適用：
@@ -1042,5 +1043,29 @@ def dem_to_blocks_enhanced(
             surf_block=surf_block,
         )
         max_y = max(max_y, bridge_ymax + 2)
+
+    # --- 避難所マーカー（国土数値情報 P20）。地表から緑柱+発光で遠くから視認 ---
+    if evac_facilities and patch_bbox_latlon is not None:
+        EVAC_H = 28
+        for ev in evac_facilities:
+            x_, z_ = _lonlat_to_grid_xy(ev["lat"], ev["lon"], patch_bbox_latlon, nz, nx)
+            ix, iz = int(round(x_)), int(round(z_))
+            if not (0 <= ix < nx and 0 <= iz < nz):
+                continue
+            y0v = y_surf_land[iz, ix]
+            if not np.isfinite(y0v):
+                continue
+            y0 = int(y0v)
+            for fy in range(y0 + 1, y0 + EVAC_H):
+                blocks.append(nbtlib.Compound({
+                    "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(fy), nbtlib.Int(iz)]),
+                    "state": block_id("lime_concrete"),
+                }))
+            for ty in (y0 + EVAC_H, y0 + EVAC_H + 1):   # 頂部の発光2段
+                blocks.append(nbtlib.Compound({
+                    "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(ty), nbtlib.Int(iz)]),
+                    "state": block_id("sea_lantern"),
+                }))
+            max_y = max(max_y, y0 + EVAC_H + 2)
 
     return blocks, [nx, max_y + 1, nz]

@@ -83,6 +83,7 @@ BLOCKS: dict[str, tuple[str, tuple[int, int, int], str]] = {
     "brown_concrete":      ("minecraft:brown_concrete", (96, 59, 31), "opaque"),
     "green_concrete":      ("minecraft:green_concrete", (73, 91, 36), "opaque"),
     "red_concrete":        ("minecraft:red_concrete", (142, 32, 32), "opaque"),
+    "sea_lantern":         ("minecraft:sea_lantern", (211, 227, 207), "opaque"),  # 避難所マーカー発光
     "black_concrete":      ("minecraft:black_concrete", (8, 10, 15), "opaque"),
 
     # ── Terracotta 16（dyed） ──
@@ -126,7 +127,10 @@ BLOCKS: dict[str, tuple[str, tuple[int, int, int], str]] = {
 PALETTE_KEYS: list[str] = list(BLOCKS.keys())
 
 # カラーマッチに使うアンカー（opaque のみ。air/water/ice は除外）
-MATCH_KEYS: list[str] = [k for k, (_, _, role) in BLOCKS.items() if role == "opaque"]
+# 発光等のマーカー専用ブロックは地表オルソ色マッチのアンカーから除外
+_NON_MATCH = {"sea_lantern"}
+MATCH_KEYS: list[str] = [k for k, (_, _, role) in BLOCKS.items()
+                         if role == "opaque" and k not in _NON_MATCH]
 
 
 def minecraft_name(key: str) -> str:

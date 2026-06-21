@@ -154,6 +154,11 @@ def main():
                     help="OSM 橋(bridge=yes highway)の Overpass geom JSON。存在すれば道路が"
                          "水域を渡る箇所に桁+坂+橋脚を立体化（FG-GMLに橋情報が無いため）。"
                          "空文字で無効化")
+    ap.add_argument("--evac", action="store_true",
+                    help="国土数値情報 P20 避難施設を緑柱+発光マーカーで配置（パーソナル防災ナビ用）")
+    ap.add_argument("--evac-xml", type=str,
+                    default=str(REPO_ROOT / "data_cache" / "ksj" / "P20-12_30.xml"),
+                    help="--evac の P20 避難施設 GML パス（既定: 和歌山県 P20-12）")
     ap.add_argument("--v-exag", type=float, default=None,
                     help="陸の垂直誇張倍率を上書き（プリセットの v_exag を override）")
     ap.add_argument("--smooth-sigma", type=float, default=1.0,
@@ -472,6 +477,7 @@ def main():
                 tellus_world_scale=args.tellus_world_scale,
                 tellus_sea_level_y=args.tellus_sea_level_y,
                 bridges_json=(args.bridges_json or None),
+                evac_xml=(args.evac_xml if args.evac else None),
             )
 
             # 既定で Litematica (.litematic) も併せて出力（redtact / Litematica mod 用）
