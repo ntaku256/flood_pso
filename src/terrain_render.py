@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import warnings
 import numpy as np
-from scipy.ndimage import gaussian_filter, distance_transform_edt
+from scipy.ndimage import gaussian_filter, distance_transform_edt, binary_dilation
 import nbtlib
 
 # nbt_export 側のパレットを再利用（同じ block_id/PALETTE 定義）
@@ -607,6 +607,8 @@ def dem_to_blocks_enhanced(
     building_height_m: float = 6.0,
     building_height_patch: np.ndarray | None = None,
     building_height_block: np.ndarray | None = None,
+    tree_height_patch: np.ndarray | None = None,
+    tree_mode: str = "canopy",
     building_id: np.ndarray | None = None,
     building_wall_keys: list | None = None,
     building_roof_keys: list | None = None,
@@ -619,6 +621,8 @@ def dem_to_blocks_enhanced(
     bridges: list | None = None,
     patch_bbox_latlon: tuple | None = None,
     road_block: str = "andesite",
+    water_mask: np.ndarray | None = None,
+    water_block: str = "water",
 ) -> tuple[list, list[int]]:
     """
     `nbt_export.dem_to_blocks` の置き換え。Tellus 風の改善 5 点を適用：
@@ -667,6 +671,14 @@ def dem_to_blocks_enhanced(
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             bh_ds = np.nanmean(bp, axis=(1, 3))
+
+    # 樹冠高[m]（LiDAR class3 由来）をダウンサンプル
+    tree_ds = None
+    if tree_height_patch is not None:
+        tp = tree_height_patch[:nz*factor, :nx*factor].reshape(nz, factor, nx, factor)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            tree_ds = np.nanmean(tp, axis=(1, 3))
 
     # ─── 3) 海/陸マスク + 地形特徴量（ダウンサンプル後の解像度で計算） ───
     sea_mask  = make_sea_mask(dem_ds, sea_level_m)
@@ -735,6 +747,11 @@ def dem_to_blocks_enhanced(
     if road_mask is not None and road_mask.shape == surf_block.shape:
         land_for_road = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
         surf_block[road_mask & land_for_road] = road_block
+
+    # FG-GML 水域(WA/WStrA: 河川・池等)を地表に水面として上書き（陸セルのみ。海は別途 sea_mask）
+    if water_mask is not None and water_mask.shape == surf_block.shape:
+        land_for_water = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
+        surf_block[water_mask & land_for_water] = water_block
 
     valid_elevs = dem_ds[~np.isnan(dem_ds)]
     max_elev_y = int(valid_elevs.max() * scale_land) if len(valid_elevs) > 0 else 1
@@ -873,6 +890,97 @@ def dem_to_blocks_enhanced(
                     "state": block_id(kind),
                 }))
         max_y = max(max_y, b_max_y + 2)
+
+    # --- 樹木（LiDAR class3 由来）。建物・道路・水域・海(land_mask)には立てない。
+    #     tree_mode: "canopy"=セル毎に幹+葉(密な森) / "sparse"=間引いた個別樹木(球状樹冠) ---
+    if tree_ds is not None and tree_ds.shape == dem_ds.shape:
+        no_tree = (building_mask.copy() if building_mask is not None
+                   else np.zeros(dem_ds.shape, dtype=bool))
+        if road_mask is not None and road_mask.shape == dem_ds.shape:
+            no_tree |= road_mask
+        if water_mask is not None and water_mask.shape == dem_ds.shape:
+            no_tree |= water_mask
+        cand = (tree_ds >= 2.0) & land_mask & ~no_tree
+        # 空中写真(surf_block)で周囲5ブロックに緑系(草/葉/苔)が無い所には木を置かない
+        # （class3 が建物影・ノイズで誤検出した非植生に木が立つのを防ぐ）
+        from block_palette import BLOCKS as _BPg
+        green = np.zeros(dem_ds.shape, dtype=bool)
+        for key in np.unique(surf_block):
+            v = _BPg.get(key)
+            if v is not None:
+                r0, g0, b0 = v[1]
+                if g0 > r0 and g0 > b0 and g0 > 55:   # 緑っぽい地表
+                    green |= (surf_block == key)
+        if green.any():
+            cand &= binary_dilation(green, iterations=5)
+        t_max_y = 0
+
+        def _putt(ix, iy, iz, key):
+            if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
+                blocks.append(nbtlib.Compound({
+                    "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(int(ix)), nbtlib.Int(int(iy)), nbtlib.Int(int(iz))]),
+                    "state": block_id(key)}))
+
+        def _species(th_m):
+            # 高さで樹種: 低木=明るい茂み(birch) / 中木=広葉(oak) / 高木=針葉(spruce, 円錐)
+            if th_m < 4.0:
+                return "oak_log", "birch_leaves", "bush"
+            if th_m < 8.0:
+                return "oak_log", "oak_leaves", "round"
+            return "spruce_log", "spruce_leaves", "cone"
+
+        if tree_mode == "sparse":
+            step = max(2, int(round(4.0 / h_res_block)))   # ~4m 間隔で1本
+            rows = np.arange(nz)[:, None]; cols = np.arange(nx)[None, :]
+            sel = cand & ((rows % step) == 0) & ((cols % step) == 0)
+            for j, i_ in np.argwhere(sel).tolist():
+                th_m = float(tree_ds[j, i_])
+                th = max(2, min(int(round(th_m * scale_land)), 30))
+                log_k, leaf_k, shape = _species(th_m)
+                y0 = int(y_surf_land[j, i_]); top = y0 + th
+                if shape == "bush":                          # 低木: 地表から葉を接地(幹なし, canopy風)
+                    for fy in range(y0 + 1, top + 1):        # 中心は地表から樹冠高まで葉柱
+                        _putt(i_, fy, j, leaf_k)
+                    for dj in (-1, 0, 1):                    # 上部を横に広げて隣と繋ぐ
+                        for di in (-1, 0, 1):
+                            _putt(i_ + di, top, j + dj, leaf_k)
+                            if th >= 3:
+                                _putt(i_ + di, top - 1, j + dj, leaf_k)
+                    t_max_y = max(t_max_y, top)
+                elif shape == "cone":                        # 針葉: 幹+円錐樹冠
+                    ch = max(3, th * 2 // 3); base = top - ch
+                    for fy in range(y0 + 1, base + 1):
+                        _putt(i_, fy, j, log_k)
+                    for li, cy in enumerate(range(base, top + 1)):
+                        rr = max(0, int(round((1.0 - li / max(1, ch)) * 2)))
+                        for dj in range(-rr, rr + 1):
+                            for di in range(-rr, rr + 1):
+                                if di*di + dj*dj <= rr*rr + 1:
+                                    _putt(i_ + di, cy, j + dj, leaf_k)
+                    _putt(i_, top + 1, j, leaf_k)
+                    t_max_y = max(t_max_y, top + 1)
+                else:                                        # 中木: 幹+球状樹冠
+                    r = 2 if th >= 8 else 1
+                    for fy in range(y0 + 1, top - r + 1):
+                        _putt(i_, fy, j, log_k)
+                    cyc = top - r
+                    for dj in range(-r, r + 1):
+                        for di in range(-r, r + 1):
+                            for dy in range(-r, r + 1):
+                                if di*di + dj*dj + dy*dy <= r*r + 1:
+                                    _putt(i_ + di, cyc + dy, j + dj, leaf_k)
+                    t_max_y = max(t_max_y, top + 1)
+        else:  # canopy（既定）: セル毎に幹+葉。葉/幹は高さの樹種で
+            for j, i_ in np.argwhere(cand).tolist():
+                th_m = float(tree_ds[j, i_])
+                th = max(2, min(int(round(th_m * scale_land)), 30))
+                log_k, leaf_k, _ = _species(th_m)
+                y0 = int(y_surf_land[j, i_]); top = y0 + th
+                trunk_top = y0 + max(1, th // 2)
+                for fy in range(y0 + 1, top + 1):
+                    _putt(i_, fy, j, log_k if fy <= trunk_top else leaf_k)
+                t_max_y = max(t_max_y, top)
+        max_y = max(max_y, t_max_y + 2)
 
     # --- 橋（OSM bridge を Tellus 流に立体化）。最後に置いて水上で優先させる。 ---
     if bridges and patch_bbox_latlon is not None:

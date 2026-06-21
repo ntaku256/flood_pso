@@ -35,6 +35,8 @@ DEM_DIR  = os.environ.get("FLOOD_PSO_DEM_DIR", str(DEFAULT_DEM_DIR))
 FGD_ALL_DIR = REPO_ROOT.parent / "kennkyuu20260114" / "地形データ" / "FG-GML-503561-ALL-20251001"
 DEFAULT_BLD_XML   = str(FGD_ALL_DIR / "FG-GML-503561-BldA-20251001-0001.xml")
 DEFAULT_RDEDG_XML = str(FGD_ALL_DIR / "FG-GML-503561-RdEdg-20251001-0001.xml")
+DEFAULT_WA_XML    = (str(FGD_ALL_DIR / "FG-GML-503561-WA-20251001-0001.xml") + "," +
+                     str(FGD_ALL_DIR / "FG-GML-503561-WStrA-20251001-0001.xml"))
 BENCH_DIR = REPO_ROOT / "results" / "benchmark"
 OUT_DIR  = REPO_ROOT / "results" / "nbt" / "hd"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -121,6 +123,9 @@ def main():
                          "（タイルが境界を跨ぐとき union, 例 503551,503561）")
     ap.add_argument("--fgd-rdedg", default=DEFAULT_RDEDG_XML,
                     help="--use-fgd の道路 RdEdg GML パス。カンマ区切りで複数メッシュ可")
+    ap.add_argument("--fgd-wa", default=DEFAULT_WA_XML,
+                    help="--use-fgd の水域 WA/WStrA GML パス（河川・池を水面に）。"
+                         "カンマ区切りで複数可。空文字で水域無効")
     ap.add_argument("--surface-ortho", action="store_true",
                     help="GSI シームレス空中写真から地表色を決める（viewer 既知のバニラブロックへ"
                          "色マッチ：草/砂/砂利/石/水/岩盤）。傾斜分類より写真寄りの見た目に")
@@ -134,6 +139,13 @@ def main():
                     help="建物の高さ [m]（DSM が無いとき/--no-building-heights 時の一律値）")
     ap.add_argument("--no-building-heights", action="store_true",
                     help="和歌山 LiDAR DSM(_org) からの建物実高さ推定を使わず一律高さにする")
+    ap.add_argument("--no-flood-barrier", action="store_true",
+                    help="洪水計算で建物を浸水バリアにしない（従来どおり地形のみで浸水）")
+    ap.add_argument("--trees", action="store_true",
+                    help="LiDAR class3(植生)から樹冠高マップを作り、陸セルに幹+葉の樹木を立てる"
+                         "（建物・道路・水域・海は除外）")
+    ap.add_argument("--tree-mode", default="canopy", choices=["canopy", "sparse"],
+                    help="樹木配置法: canopy=class3セル毎に幹+葉(密な森) / sparse=間引いた個別樹木(球状樹冠)")
     ap.add_argument("--no-veg-filter", action="store_true",
                     help="建物 DSM(_org) から LiDAR 植生クラス(class 3)を除外しない。"
                          "既定は除外して樹木混入の建物高さ（御坊で建物の24%が影響）を浄化")
@@ -205,20 +217,44 @@ def main():
     # 建物高さグリッド（DSM 由来）：和歌山 LiDAR の _org（DSM）があれば DSM-DEM を建物実高に使う。
     building_height_grid = None
     if args.wakayama_grd and not args.no_building_heights:
-        org_path = Path(args.wakayama_org) if args.wakayama_org \
-            else Path(str(args.wakayama_grd).replace("_grd.txt", "_org.txt"))
-        if org_path.exists():
+        org_csv = args.wakayama_org if args.wakayama_org \
+            else str(args.wakayama_grd).replace("_grd.txt", "_org.txt")
+        if Path(org_csv.split(",")[0].strip()).exists():
             from wakayama_pcd import load_wakayama_dem
             from tellus_data import reproject_to_grid
             veg_classes = None if args.no_veg_filter else (3,)
-            print(f"Loading Wakayama LiDAR DSM (building heights): {org_path.name}"
+            print(f"Loading Wakayama LiDAR DSM (building heights)"
                   + ("" if veg_classes is None else f"  [veg-filter: exclude class {veg_classes}]"))
-            dsm_info = load_wakayama_dem(str(org_path), res_m=lidar_res,
+            dsm_info = load_wakayama_dem(org_csv, res_m=lidar_res,
                                          exclude_classes=veg_classes)
             dsm_on_dem = reproject_to_grid(dsm_info["dem"], dsm_info, dem_info, fill_value=np.nan)
             building_height_grid = np.clip(dsm_on_dem - dem, 0, None).astype(np.float32)
             print(f"  obj-height: median={np.nanmedian(building_height_grid):.2f}m "
                   f"99%={np.nanpercentile(building_height_grid,99):.1f}m")
+
+    # 樹冠高グリッド（LiDAR class3=植生のみの DSM − DEM）。--trees で樹木を立てる。
+    tree_height_grid = None
+    if args.wakayama_grd and args.trees:
+        org_csv = args.wakayama_org if args.wakayama_org \
+            else str(args.wakayama_grd).replace("_grd.txt", "_org.txt")
+        if Path(org_csv.split(",")[0].strip()).exists():
+            from wakayama_pcd import load_wakayama_dem
+            from tellus_data import reproject_to_grid
+            print(f"Loading Wakayama LiDAR canopy (class3)")
+            canopy = load_wakayama_dem(org_csv, res_m=lidar_res, keep_classes=(3,))
+            canopy_on_dem = reproject_to_grid(canopy["dem"], canopy, dem_info, fill_value=np.nan)
+            tree_height_grid = np.clip(canopy_on_dem - dem, 0, None).astype(np.float32)
+            n_tree = int(np.sum(tree_height_grid > 2.0))
+            print(f"  canopy: median={np.nanmedian(tree_height_grid[tree_height_grid>0]):.1f}m "
+                  f"樹木セル(>2m)={n_tree:,}")
+
+    # 洪水バリア: 建物footprintの高さを地形に加えた DEM で浸水計算（水が建物を避け道路を流れる）。
+    # --no-flood-barrier で従来どおり地形のみ。地形描画は dem（建物は別レイヤ）のまま。
+    dem_flood = dem
+    if (not args.no_flood_barrier) and building_height_grid is not None \
+            and building_height_grid.shape == dem.shape:
+        dem_flood = dem + np.nan_to_num(building_height_grid, nan=0.0)
+        print(f"  flood-barrier: 建物 {int(np.sum(building_height_grid > 0.5)):,} セルを浸水バリア化")
 
     width_m, depth_m, h_res, v_res, v_exag = PRESETS[args.preset]
     if args.width  is not None: width_m = args.width
@@ -337,14 +373,14 @@ def main():
         # 5m フル解像度 DEM 上でシミュレーションを再実行
         if r["sigma_map"] is not None:
             inundation = simulate_flood_hd(
-                dem, source,
+                dem_flood, source,
                 water_level_global=r["water"],
                 dh_map=r["dh"],
                 sigma_map=r["sigma_map"],
             )
         else:
             inundation = simulate_flood_hd(
-                dem, source,
+                dem_flood, source,
                 water_level_global=r["water"],
                 dh_map=r["dh"],
                 sigma=SIGMA,
@@ -424,11 +460,14 @@ def main():
                 use_fgd=args.use_fgd,
                 fgd_bld_xml=args.fgd_bld,
                 fgd_rdedg_xml=args.fgd_rdedg,
+                fgd_wa_xml=(args.fgd_wa or None),
                 surface_ortho=args.surface_ortho,
                 ortho_zoom=args.ortho_zoom,
                 ortho_saturation=args.ortho_saturation,
                 building_height_m=args.building_height,
                 building_height_grid=building_height_grid,
+                tree_height_grid=tree_height_grid,
+                tree_mode=args.tree_mode,
                 tellus_world_dir=args.tellus_world_dir,
                 tellus_world_scale=args.tellus_world_scale,
                 tellus_sea_level_y=args.tellus_sea_level_y,

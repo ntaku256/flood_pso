@@ -338,11 +338,14 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   use_fgd: bool = False,
                   fgd_bld_xml: str | None = None,
                   fgd_rdedg_xml: str | None = None,
+                  fgd_wa_xml: str | None = None,
                   surface_ortho: bool = False,
                   ortho_zoom: int = 18,
                   ortho_saturation: float = 1.4,
                   building_height_m: float = 6.0,
                   building_height_grid: np.ndarray | None = None,
+                  tree_height_grid: np.ndarray | None = None,
+                  tree_mode: str = "canopy",
                   tellus_world_dir: str | None = None,
                   tellus_world_scale: float = 1.0,
                   tellus_sea_level_y: int = 0,
@@ -518,6 +521,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
     res_lat = dem_info_render["res_lat"]
     res_lon = dem_info_render["res_lon"]
     bh_patch = None   # 建物高さ[m] パッチ（DSM 由来, 任意）
+    tree_patch = None  # 樹冠高[m] パッチ（LiDAR class3 由来, 任意）
 
     if terrain_source == "tellus_world":
         # tellus_world では fetch_grid 段階で既に target bbox を切り出してあるので
@@ -548,6 +552,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         idn_patch = inundation_render[r0:r1, c0:c1]
         if building_height_grid is not None and building_height_grid.shape == dem.shape:
             bh_patch = building_height_grid[r0:r1, c0:c1]
+        if tree_height_grid is not None and tree_height_grid.shape == dem.shape:
+            tree_patch = tree_height_grid[r0:r1, c0:c1]
         if terrain_source == "mapzen" and use_esa:
             cover_patch = cover_patch_full[r0:r1, c0:c1]
 
@@ -575,6 +581,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             cover_patch = nd_zoom(cover_patch, up_factor, order=0, mode="nearest")
         if bh_patch is not None:
             bh_patch = nd_zoom(bh_patch, up_factor, order=1, mode="nearest")
+        if tree_patch is not None:
+            tree_patch = nd_zoom(tree_patch, up_factor, order=1, mode="nearest")
         print(f"  [upsample] {up_factor:.2f}× source DEM → patch shape {dem_patch.shape}")
         h_res_dem = h_res
 
@@ -583,7 +591,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         v_es = v_exag_sea if v_exag_sea is not None else v_exag * 0.33
 
         # OSM 取得 + ブロック grid 上の建物・道路 mask を事前生成
-        building_mask = road_mask = None
+        building_mask = road_mask = water_mask = None
         building_height_block = None   # P1: per-building 集約のフラット高さ（FG-GML 経路）
         building_id_grid = None        # P2: 建物ごとの整数ラベル
         building_wall_keys = None      # P2: 建物 id → 壁ブロックキー
@@ -637,6 +645,22 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             bm_f = bmaps["mask"]
             building_mask = bm_f if building_mask is None else (building_mask | bm_f)
             road_mask = rm_f if road_mask is None else (road_mask | rm_f)
+            # FG-GML 水域(WA/WStrA: 河川・池) → 地表を水面に。fgd_wa_xml はカンマ区切り複数可
+            if fgd_wa_xml:
+                from fgd_vector import load_water
+                from terrain_render import polygon_mask_from_latlon
+                wm = np.zeros((nz_g, nx_g), dtype=bool)
+                _nw = 0
+                for wx in str(fgd_wa_xml).split(","):
+                    wx = wx.strip()
+                    if not wx:
+                        continue
+                    for w in load_water(wx, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                                        lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3]):
+                        wm |= polygon_mask_from_latlon(w["coords"], patch_bbox_latlon, nz_g, nx_g)
+                        _nw += 1
+                water_mask = wm if water_mask is None else (water_mask | wm)
+                print(f"  [fgd-water] WA/WStrA {_nw}面 → 水面mask cells={int(wm.sum())}")
             building_height_block = bmaps["height"]
             building_id_grid = bmaps["id"]
             building_wall_keys = bmaps["wall_keys"]
@@ -699,6 +723,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             road_mask=road_mask,
             building_height_m=building_height_m,
             building_height_patch=bh_patch,
+            tree_height_patch=tree_patch,
+            tree_mode=tree_mode,
             building_height_block=building_height_block,
             building_id=building_id_grid,
             building_wall_keys=building_wall_keys,
@@ -707,6 +733,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             surface_grid_override=surface_override,
             bridges=bridges_render,
             patch_bbox_latlon=patch_bbox_latlon,
+            water_mask=water_mask,
         )
     elif terrain_quality == "legacy":
         print(f"Converting to blocks [legacy] "

@@ -68,7 +68,8 @@ def _fill_nan_nearest(grid: np.ndarray) -> np.ndarray:
 def load_wakayama_dem(grd_path: str, res_m: float = 1.0,
                       cache: bool = True, fill_gaps: bool = True,
                       verbose: bool = True,
-                      exclude_classes: tuple | None = None) -> dict:
+                      exclude_classes: tuple | None = None,
+                      keep_classes: tuple | None = None) -> dict:
     """
     和歌山県点群（グラウンド推奨）を res_m[m] の緯度経度グリッド DEM にして
     dem_parser 互換 dict を返す。
@@ -79,34 +80,44 @@ def load_wakayama_dem(grd_path: str, res_m: float = 1.0,
       例 (3,) で植生（低木）を除いた「地面＋建物」DSM になり、建物高さの樹木混入を防ぐ。
       grd（地形, 4列）には class 列が無いので指定しないこと。除外版は別キャッシュに保存。
     """
-    grd_path = str(grd_path)
+    # grd_path はカンマ区切りで複数図郭を mosaic 可（範囲がタイル境界を跨ぐとき）
+    paths = [p.strip() for p in str(grd_path).split(",") if p.strip()]
+    multi = len(paths) > 1
     exc = tuple(sorted(set(int(c) for c in exclude_classes))) if exclude_classes else ()
-    exc_tag = ("_exc" + "".join(str(c) for c in exc)) if exc else ""
-    cache_path = Path(grd_path).with_suffix(f".grid{res_m:g}m{exc_tag}.npz")
+    kep = tuple(sorted(set(int(c) for c in keep_classes))) if keep_classes else ()
+    tag = ("_exc" + "".join(str(c) for c in exc)) if exc else ""
+    tag += ("_keep" + "".join(str(c) for c in kep)) if kep else ""
+    if multi:
+        stems = "+".join(sorted(Path(p).stem for p in paths))
+        cache_path = Path(paths[0]).parent / f"{stems}.grid{res_m:g}m{tag}.npz"
+    else:
+        cache_path = Path(paths[0]).with_suffix(f".grid{res_m:g}m{tag}.npz")
     if cache and cache_path.exists():
         if verbose:
             print(f"[wakayama] load cache {cache_path.name}")
         z = np.load(cache_path)
         return {k: (float(z[k]) if z[k].ndim == 0 else z[k]) for k in z.files}
 
-    if verbose:
-        print(f"[wakayama] reading {Path(grd_path).name} ...")
-    if exc:
-        e, n, zv, cv = _read_xyz(grd_path, want_class=True)
-        # 座標 NaN の壊れ点を除去（複数列読みで稀に発生）
-        finite = np.isfinite(e) & np.isfinite(n) & np.isfinite(zv)
-        if not finite.all():
-            if verbose:
-                print(f"[wakayama] drop {int((~finite).sum()):,} malformed pts (NaN coord)")
-            e, n, zv, cv = e[finite], n[finite], zv[finite], cv[finite]
-        keep = ~np.isin(cv, exc)   # NaN class は isin=False → 未分類として残す
-        n_drop = int((~keep).sum())
-        e, n, zv = e[keep], n[keep], zv[keep]
+    Es, Ns, Zs = [], [], []
+    for p in paths:
         if verbose:
-            print(f"[wakayama] exclude classes {exc}: dropped {n_drop:,} pts "
-                  f"({n_drop / max(1, len(keep)) * 100:.1f}%)")
-    else:
-        e, n, zv = _read_xyz(grd_path)
+            print(f"[wakayama] reading {Path(p).name} ...")
+        if exc or kep:
+            e, n, zv, cv = _read_xyz(p, want_class=True)
+            finite = np.isfinite(e) & np.isfinite(n) & np.isfinite(zv)
+            if not finite.all():
+                e, n, zv, cv = e[finite], n[finite], zv[finite], cv[finite]
+            m = np.isin(cv, kep) if kep else ~np.isin(cv, exc)
+            if verbose:
+                print(f"[wakayama]   classes {'keep'+str(kep) if kep else 'exc'+str(exc)}: "
+                      f"{int(m.sum()):,}/{len(m):,} pts")
+            e, n, zv = e[m], n[m], zv[m]
+        else:
+            e, n, zv = _read_xyz(p)
+        Es.append(e); Ns.append(n); Zs.append(zv)
+    e = np.concatenate(Es); n = np.concatenate(Ns); zv = np.concatenate(Zs)
+    if multi and verbose:
+        print(f"[wakayama] mosaic {len(paths)} 図郭 → {len(e):,} pts")
 
     from pyproj import Transformer
     tr = Transformer.from_crs(EPSG_ZONE6, EPSG_WGS84, always_xy=True)
