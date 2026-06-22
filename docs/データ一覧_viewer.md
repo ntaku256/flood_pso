@@ -1,19 +1,26 @@
 # 多源データ一覧 ＋ viewer（御坊歩行ワールド生成 2026-06）
 
-今回の生成（御坊全域 10 LiDAR図郭 × scale1.5・4分割 + 洪水校正GT）に使った全データを種類ごとにグループ化。データ撮影・図化の参照用。
+今回の生成（御坊全域 10 LiDAR図郭 × scale1.5・4分割 + 洪水校正GT）に使った全データ（**11種 A-K**。2026-06に I 水域 / J 避難所 / K ESA土地利用 を追加）を種類ごとにグループ化。データ撮影・図化の参照用。
 
-## 1. 代表ファイル一覧（種類ごとに1つ）
+## 1. 代表データ一覧（**役割ごと**に1つ。overview図 `results/data_preview/overview.png` の11役割に対応）
 
-| # | 種類 | 役割 | 代表ファイル | 形式 | サイズ | 点数/枚数 |
-|---|---|---|---|---|---|---|
-| A | LiDAR 地形 (grd) | 地物除去後の真の1m地形(DEM)。歩行ワールドの起伏・標高 | `06RC703_grd.txt` | テキストCSV 4列: id, easting, northing, Z（平面直角座標系VI=EPSG:6674/JGD2011） | 169.4MB | 10ファイル |
-| B | LiDAR DSM (org) | 建物・樹木込みの表層(DSM)。DSM−DEM=物体高(建物高さ)、class列で植生分離 | `06RC703_org.txt` | テキストCSV 5列: id, easting, northing, Z, class | 967.5MB | 10ファイル |
-| C | FG-GML 建物 (BldA) | 建物フットプリント。high/type で壁材、LiDARで高さ。複数メッシュ union | `FG-GML-503561-BldA-20251001-0001.xml` | GML(XML) | 29.0MB | 2ファイル |
-| D | FG-GML 道路 (RdEdg) | 道路網。幅バッファで安山岩の路面に | `FG-GML-503561-RdEdg-20251001-0001.xml` | GML(XML) | 11.5MB | 2ファイル |
-| E | GSI 5m DEM (DEM5A) | 洪水校正(PSO)のフォワード地形。25m に粗化して氾濫計算 | `FG-GML-5035-61-02-DEM5A-20250620.xml` | GML(XML) 標高グリッド | 0.7MB | 1ファイル |
-| F | GSI 空中写真 (ortho) | 地表色・屋根色・橋デッキ上面。~80バニラブロックへ色マッチ | `104805.jpg` | JPGタイル(地理院タイル seamlessphoto, zoom18≈0.6m/px) | 0.0MB | 1ファイル |
-| G | OSM 橋 (bridge geom) | 橋の位置・幅・層。Tellus流に桁+坂+橋脚を立体化 | `gobo_bridges_002_geom.json` | GeoJSON(Overpass out geom) | 0.0MB | 10ファイル |
-| H | ベンチ case (GT浸水) | 歩行ワールドに重ねる浸水域(GT)。洪水校正ベンチの生データ | `case_K16_seed0.json` | JSON | 0.2MB | 1ファイル |
+| # | 役割 | 内容 | 代表ファイル | 形式 | サイズ |
+|---|---|---|---|---|---|
+| 1 | 地形 | 地物除去後の真の1m地形(DEM)。起伏・標高 | `06RC802_grd.txt` | CSV 4列(系VI EPSG:6674/JGD2011) | 169MB×10 |
+| 2 | 建物高さ | LiDAR DSM−DEM（class列で植生除外）＝建物の実高さ | `06RC802_org.txt`（class≠3を使用） | CSV 5列 (…,Z,class) | 967MB×10 |
+| 3 | 樹木 | **同じ org の class3(植生)** の樹冠高 → 高さ別樹種を配置 | `06RC802_org.txt`（class3を使用） | CSV 5列 | （2と同ファイル） |
+| 4 | 建物 | FG-GML footprint。type別壁・寄棟屋根・複数メッシュ union | `FG-GML-503561-BldA-20251001-0001.xml` | GML(XML) | 29.0MB |
+| 5 | 道路 | FG-GML 道路縁。幹線=舗装/細道=砂利 | `FG-GML-503561-RdEdg-20251001-0001.xml` | GML(XML) | 11.5MB |
+| 6 | 水域 | FG-GML WA/WStrA → 河川・池を水面に（`--fgd-wa`） | `FG-GML-503561-WA-20251001-0001.xml` | GML(XML) 面 | 1.9MB |
+| 7 | 橋 | OSM bridge → 桁+坂+橋脚を立体化、橋下は洪水水位まで充水 | `gobo_bridges_geom.json` | GeoJSON(Overpass) | – |
+| 8 | 地表色 | GSI 空中写真 → ~80バニラブロックへ色マッチ | `104805.jpg` | JPGタイル(seamlessphoto z18≈0.6m/px) | – |
+| 9 | 洪水フォワード地形 | GSI 5m DEM。氾濫計算のフォワード地形 | `FG-GML-5035-61-02-DEM5A-20250620.xml` | GML(XML) 標高 | 0.7MB |
+| 10 | 浸水GT | 洪水校正ベンチの浸水域(GT)。ワールドに重ねる | `case_K16_seed0.json` | JSON | 0.2MB |
+| 11 | 土地利用 | ESA WorldCover。田畑/森/市街の補助（`--use-esa`, 既定OFF） | `ESA_WorldCover_10m_2021_v200_N33E135_Map.tif` | GeoTIFF 10m | 36.7MB |
+| ＋ | 避難所(防災レイヤ) | 国土数値情報P20 指定緊急避難場所 → 緑の光柱マーカー(`--evac`)。**多源データ overview図には含めず、防災レイヤとして配置** | `P20-12_30.xml` | GML(XML) point | 0.3MB(御坊32件) |
+
+> 役割で整理。**同じ LiDAR org から「建物高さ(DSM−DEM, 植生除外)」と「樹木(class3 樹冠高)」を別役割**として使う。
+> 避難所は避難の目的地マーカー（防災レイヤ）で、多源データの overview 図からは除外（B方針）。
 
 ## 2. 種類ごとの全ファイル
 
