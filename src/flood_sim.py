@@ -236,6 +236,22 @@ def depth_loss(sim_inundation: np.ndarray, gt_inundation: np.ndarray,
     return float(np.sum(diff[union]) / n)
 
 
+def dh_roughness(dh_map: np.ndarray) -> float:
+    """
+    Δh マップの「粗さ」= 隣接セル差の二乗平均（Dirichlet / Tikhonov エネルギー）。
+    滑らかな場ほど小さく、±飽和した非平滑な場ほど大きい。
+
+    用途: 高次元逆問題は ill-posed（観測浸水だけでは Δh 場を一意に決められない）ため、
+    目的関数を loss + λ·dh_roughness(Δh) として滑らかさの事前情報を与え、可同定性を改善する。
+    真値 Δh は uniform→gaussian(σ=0.8) で滑らかなので、この正則化は真値復元と loss 最小化を整合させる。
+    """
+    if dh_map.ndim != 2 or dh_map.size < 2:
+        return 0.0
+    gy = np.diff(dh_map, axis=0)
+    gx = np.diff(dh_map, axis=1)
+    return float((np.sum(gy * gy) + np.sum(gx * gx)) / dh_map.size)
+
+
 # ─────────────────────────────────────────────────────────────
 # 動作確認
 # ─────────────────────────────────────────────────────────────

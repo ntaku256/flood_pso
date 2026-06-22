@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dem_parser import mosaic_tiles, downsample
 from flood_sim import make_river_source, simulate_flood_hd, iou_loss
 from pso_calibrate_hd import make_synthetic_ground_truth
-from flood_sim import depth_loss
+from flood_sim import depth_loss, dh_roughness
 from ccpso2 import CCPSO2
 
 import pyswarms as ps  # noqa
@@ -93,10 +93,11 @@ class EvalCountedObjective:
     損失は LOSS_KIND（depth or iou）に応じて切替。
     ks > 0 のとき、x[1+K²:1+K²+ks²] を sigma_map (K_s × K_s) として渡す。
     """
-    def __init__(self, dem, source, gt_inundation, gt_mask, K, sigma, ks=0):
+    def __init__(self, dem, source, gt_inundation, gt_mask, K, sigma, ks=0, dh_tv=0.0):
         self.dem = dem; self.source = source
         self.gt_inundation = gt_inundation; self.gt_mask = gt_mask
         self.K = K; self.sigma = sigma; self.ks = ks
+        self.dh_tv = dh_tv
         self._loss = _make_loss_fn(gt_inundation, gt_mask)
         self.n_evals = 0
         self.eval_log: list[tuple[int, float]] = []
@@ -119,6 +120,8 @@ class EvalCountedObjective:
                                         water_level_global=water,
                                         dh_map=dh, sigma=self.sigma)
             losses[i] = self._loss(sim)
+            if self.dh_tv:
+                losses[i] += self.dh_tv * dh_roughness(dh)
         self.n_evals += n
         m = float(np.min(losses))
         if m < self._best:
@@ -133,10 +136,11 @@ class EvalCountedObjective:
 
 class CCPSO2EvalLogger:
     """CCPSO2 の objective_full をラップして評価ログを取る。"""
-    def __init__(self, dem, source, gt_inundation, gt_mask, K, sigma, ks=0):
+    def __init__(self, dem, source, gt_inundation, gt_mask, K, sigma, ks=0, dh_tv=0.0):
         self.dem = dem; self.source = source
         self.gt_inundation = gt_inundation; self.gt_mask = gt_mask
         self.K = K; self.sigma = sigma; self.ks = ks
+        self.dh_tv = dh_tv
         self._loss = _make_loss_fn(gt_inundation, gt_mask)
         self.n_evals = 0
         self.eval_log: list[tuple[int, float]] = []
@@ -155,6 +159,8 @@ class CCPSO2EvalLogger:
                                     water_level_global=water,
                                     dh_map=dh, sigma=self.sigma)
         c = self._loss(sim)
+        if self.dh_tv:
+            c += self.dh_tv * dh_roughness(dh)
         self.n_evals += 1
         if c < self._best:
             self._best = c
@@ -166,7 +172,7 @@ class CCPSO2EvalLogger:
 # 1 ケース (K, seed) を両手法で実行
 # ─────────────────────────────────────────────────────────────
 
-def run_one_case(dem, source, K: int, budget: int, seed: int, ks: int = 0) -> dict:
+def run_one_case(dem, source, K: int, budget: int, seed: int, ks: int = 0, dh_tv: float = 0.0) -> dict:
     D = 1 + K * K + ks * ks
     extra = f"  ks={ks}  D_sigma={ks*ks}" if ks > 0 else ""
     print(f"\n--- K={K}  D={D}  budget={budget}  seed={seed}{extra} ---")
@@ -190,7 +196,7 @@ def run_one_case(dem, source, K: int, budget: int, seed: int, ks: int = 0) -> di
     # ── 1) 標準 PSO ───────────────────────────────────────
     n_p_pso = 30
     n_iter_pso = max(1, budget // n_p_pso)
-    obj_pso = EvalCountedObjective(dem, source, gt["gt_inundation"], gt["gt_mask"], K, SIGMA, ks=ks)
+    obj_pso = EvalCountedObjective(dem, source, gt["gt_inundation"], gt["gt_mask"], K, SIGMA, ks=ks, dh_tv=dh_tv)
 
     np.random.seed(seed)
     optimizer = GlobalBestPSO(
@@ -222,14 +228,13 @@ def run_one_case(dem, source, K: int, budget: int, seed: int, ks: int = 0) -> di
           f"evals={obj_pso.n_evals}  t={elapsed_pso:.1f}s")
 
     # ── 2) CCPSO2 ────────────────────────────────────────
-    s = choose_group_size(D)
+    S_cc = [gs for gs in (2, 5, 10, 25, 50, 100, 250) if gs <= D] or [min(2, D)]
     N_cc = 20
-    cycles = max(1, budget // (N_cc * (D // s)))
-    obj_cc = CCPSO2EvalLogger(dem, source, gt["gt_inundation"], gt["gt_mask"], K, SIGMA, ks=ks)
+    obj_cc = CCPSO2EvalLogger(dem, source, gt["gt_inundation"], gt["gt_mask"], K, SIGMA, ks=ks, dh_tv=dh_tv)
 
-    cc = CCPSO2(obj_cc, dim=D, n_particles=N_cc, group_size=s,
-                bounds=(lb, ub), p_cauchy=0.5, seed=seed, verbose=False)
-    res_cc = cc.run(n_cycles=cycles)
+    cc = CCPSO2(obj_cc, dim=D, n_particles=N_cc, group_size=S_cc[0],
+                bounds=(lb, ub), p_cauchy=0.5, seed=seed, verbose=False, group_sizes=S_cc)
+    res_cc = cc.run(max_evals=budget)   # 評価数でバジェット厳密化（適応 s で per-cycle 評価数が変わる）
 
     cc_cum_evals  = [e[0] for e in obj_cc.eval_log]
     cc_best_curve = [e[1] for e in obj_cc.eval_log]
@@ -245,11 +250,11 @@ def run_one_case(dem, source, K: int, budget: int, seed: int, ks: int = 0) -> di
         sim_cc = simulate_flood_hd(dem, source, cc_w, cc_dh, sigma=SIGMA)
     cc_iou = 1.0 - iou_loss(sim_cc, gt["gt_mask"])
     print(f"  CCPSO2 : loss={res_cc['best_cost']:.4f}  IoU={cc_iou:.4f}  Δh_RMSE={cc_dh_rmse:.3f}  "
-          f"evals={obj_cc.n_evals}  t={res_cc['elapsed_s']:.1f}s  s={s}  cycles={cycles}")
+          f"evals={obj_cc.n_evals}  t={res_cc['elapsed_s']:.1f}s  s_set={S_cc}")
 
     out = {
         "K": K, "D": D, "ks": ks, "seed": seed, "budget": budget,
-        "loss_kind": LOSS_KIND,
+        "loss_kind": LOSS_KIND, "dh_tv": dh_tv,
         "pso": {
             "n_p": n_p_pso, "n_iter": n_iter_pso,
             "loss": float(best_cost_pso), "iou": float(pso_iou),
@@ -260,7 +265,7 @@ def run_one_case(dem, source, K: int, budget: int, seed: int, ks: int = 0) -> di
             "best_sigma_map": pso_sm.tolist() if pso_sm is not None else None,
         },
         "ccpso2": {
-            "s": s, "N": N_cc, "cycles": cycles,
+            "s": int(cc.s), "s_set": S_cc, "N": N_cc, "cycles": len(res_cc["history"]) - 1,
             "loss": float(res_cc["best_cost"]), "iou": float(cc_iou),
             "best_w": cc_w, "dh_rmse": cc_dh_rmse,
             "n_evals": obj_cc.n_evals, "elapsed_s": res_cc["elapsed_s"],

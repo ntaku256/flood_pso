@@ -42,7 +42,7 @@ flood_pso_meta:
 
   experiment:       flood_pso_HD_benchmark
   method:           pso | ccpso2 | gt | baseline_2d_pso
-  method_long:      "CCPSO2 (s=16, custom impl)"
+  method_long:      "CCPSO2 (adaptive group size s∈{2,5,10,25,50,100,250}, custom impl)"
   loss_kind:        depth | iou
   K:                16
   D:                257
@@ -55,9 +55,9 @@ flood_pso_meta:
   dh_bounds_m:          [-2.0, 2.0]
   dh_map:               [256個のFloat]   # K*K
   dh_map_shape:         [16, 16]
-  loss:                 0.115
-  iou:                  0.960
-  dh_rmse:              1.450
+  loss:                 0.099
+  iou:                  0.971
+  dh_rmse:              1.343
   n_evals:              5120
   elapsed_s:            15.8
 
@@ -123,8 +123,8 @@ results/nbt/
 ├── gobo_sm_5m.nbt
 ├── gobo_md_5m.nbt
 └── hd/
-    ├── gobo_hd_K16_seed0_md_5m_pso.nbt      # 標準PSO  (IoU=0.949)
-    ├── gobo_hd_K16_seed0_md_5m_ccpso2.nbt   # CCPSO2  (IoU=0.960)  ★ 高次元勝者
+    ├── gobo_hd_K16_seed0_md_5m_pso.nbt      # 標準PSO  (IoU=0.952)
+    ├── gobo_hd_K16_seed0_md_5m_ccpso2.nbt   # CCPSO2  (IoU=0.971)  ★ 高次元勝者
     └── gobo_hd_K16_seed0_md_5m_gt.nbt       # 合成 ground truth   (IoU=1.000)
 ```
 
@@ -143,6 +143,7 @@ results/nbt/
 1. **Block entry が冗長**: 各ブロックを `{pos, state}` 個別 Compound として記述しているため、フラット ByteArray にした schematic 形式より NBT サイズが大きい。マイクラ Structure 公式仕様に合わせるため現状はこの形を維持。
 2. **大規模プリセットでの Python 側メモリ**: huge_5m (3000×3000) は変換中に Python メモリ 8-12 GB を消費する見込み。要計測。
 3. **flood_pso_meta は非標準キー**: マイクラ本体は無視するだけなので互換性影響なし。Web ビューワは独自パース必要。
+4. **dh_rmse メタの解釈**: 正則化なしの素のベンチでは CCPSO2 の Δh パラメータ復元(`dh_rmse`)は PSO より悪い（過適合）。平滑化正則化 λ≈0.02 を入れると CCPSO2 の Δh_RMSE は PSO 同等(≈0.73)になり、IoU 優位は全 seed で保たれる（詳細は `flood_pso/docs/LayerB_Δh逆問題とPP-PSO論文_整理.md` §6）。
 
 ## 研究的位置づけ
 

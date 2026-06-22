@@ -27,7 +27,8 @@ class CCPSO2:
                  bounds: tuple,
                  p_cauchy: float = 0.5,
                  seed: int | None = None,
-                 verbose: bool = False):
+                 verbose: bool = False,
+                 group_sizes: list | None = None):
         """
         Parameters
         ----------
@@ -39,17 +40,29 @@ class CCPSO2:
         p_cauchy       : 位置更新で Cauchy 分布を選ぶ確率
         seed           : 乱数シード
         """
-        # 割り切れない場合、最終グループだけ小さくする（CCPSO2 標準の柔軟運用）
         self.objective_full = objective_full
         self.D  = dim
-        self.s  = group_size
-        self.K_g = (dim + group_size - 1) // group_size  # ceil(dim/s)
         self.N   = n_particles
         self.lb = np.asarray(bounds[0], dtype=np.float64)
         self.ub = np.asarray(bounds[1], dtype=np.float64)
         self.p_cauchy = p_cauchy
         self.verbose = verbose
         self.rng = np.random.RandomState(seed)
+
+        # グループサイズ s。group_sizes を渡すと Li & Yao 2012 の「適応的グループサイズ」
+        # モードになり、改善が止まった時に候補集合 S から s を選び直して再グルーピングする。
+        # 渡さなければ従来通り固定 s（後方互換）。割り切れない場合は最終グループが小さくなる。
+        if group_sizes:
+            self.S = sorted({int(s) for s in group_sizes if 1 <= s <= dim})
+            if not self.S:
+                self.S = [min(group_size, dim)]
+            self.adaptive = True
+            self.s = int(self.rng.choice(self.S))
+        else:
+            self.S = [group_size]
+            self.adaptive = False
+            self.s = group_size
+        self.K_g = (dim + self.s - 1) // self.s  # ceil(dim/s)
 
         # 初期化
         self.pos        = self.lb + (self.ub - self.lb) * self.rng.uniform(size=(self.N, self.D))
@@ -129,17 +142,22 @@ class CCPSO2:
 
         self.history.append(self.b_cost)
 
-        # 改善なしなら再グルーピング
+        # 改善なしなら（適応モードでは s を集合 S から選び直して）再グルーピング
         if self.b_cost >= prev_b - 1e-12:
+            if self.adaptive:
+                self.s = int(self.rng.choice(self.S))
+                self.K_g = (self.D + self.s - 1) // self.s
             self._regroup()
 
         return self.b_cost
 
     # ─────────────────────────────────────────────────────────
-    def run(self, n_cycles: int) -> dict:
+    def run(self, n_cycles: int = 10**9, max_evals: int | None = None) -> dict:
         t0 = time.time()
         for it in range(n_cycles):
             self.step()
+            if max_evals is not None and self.n_evals >= max_evals:
+                break
             if self.verbose and (it % max(1, n_cycles // 20) == 0):
                 print(f"  [CCPSO2] cycle {it:3d}/{n_cycles}  b_cost={self.b_cost:.5f}  evals={self.n_evals}")
         elapsed = time.time() - t0
