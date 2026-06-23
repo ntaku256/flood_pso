@@ -355,30 +355,6 @@ def build_osm_masks(
     return building_mask, road_mask, road_major_mask
 
 
-# 施策5: FG-GML 道路種別 → 路面材質（クラス間を明瞭に：幹線=アスファルト/軽車道=コンクリ/徒歩道=砂利）
-FGD_ROAD_BLOCK = {
-    "真幅道路": "gray_concrete",        # アスファルト幹線（濃灰）
-    "軽車道":   "light_gray_concrete",  # 舗装路（中灰）
-    "徒歩道":   "gravel",               # 未舗装の歩道
-    "庭園路等": "gravel",
-}
-
-
-def build_road_material_grid(roads, patch_bbox_latlon, grid_h, grid_w,
-                             h_res_block_m, *, default="gravel"):
-    """FG-GML 道路を種別ごとの路面材質キーで per-cell ラスタ化（object 配列, None=非道路）。
-    幅の狭い道から描き、広い幹線を上に重ねる（交差点で幹線が優先）。"""
-    grid = np.full((grid_h, grid_w), None, dtype=object)
-    for r in sorted(roads, key=lambda rr: float(rr.get("width_m", 3) or 3)):
-        w = float(r.get("width_m", 3) or 3)
-        buf = max(1.0, w / 2.0 / max(h_res_block_m, 0.1))
-        m = polyline_buffer_mask_from_latlon(r["coords"], patch_bbox_latlon,
-                                             grid_h, grid_w, buffer_cells=buf)
-        tp = (r.get("tags", {}) or {}).get("fgd_type", "")
-        grid[m] = FGD_ROAD_BLOCK.get(tp, default)
-    return grid
-
-
 # FG-GML type → 壁/屋根ブロック（屋根は ortho 無効時 or 集約不能時の fallback）。
 # 木造住宅=白壁 / RC=コンクリ灰 / 無壁舎(倉庫・車庫)=石 で見た目を3分化。
 BUILDING_WALL_BY_TYPE = {
@@ -749,13 +725,11 @@ def dem_to_blocks_enhanced(
     floor_height: int = 5,
     floor_block: str = "light_gray_concrete",
     surface_grid_override: np.ndarray | None = None,
-    material_classify: bool = True,
     bridges: list | None = None,
     patch_bbox_latlon: tuple | None = None,
     road_block: str = "andesite",
     road_major_mask: np.ndarray | None = None,
     road_minor_block: str = "gravel",
-    road_material_grid: np.ndarray | None = None,
     water_mask: np.ndarray | None = None,
     water_block: str = "water",
     evac_facilities: list | None = None,
@@ -879,13 +853,6 @@ def dem_to_blocks_enhanced(
             dem_ds, slope_ds, convex_ds, dist_shore, sea_level_m=sea_level_m,
         )
 
-    # 施策3+2: オルソ地表を ~6 マテリアルへ畳んで 3×3 多数決フィルタ（クラス内リッチ・クラス間明瞭）。
-    #   屋根は raw(surf_raw) を参照するので屋根色の細かさは保つ。道路/水/建物/樹は後段マスクで別途上書き。
-    surf_raw = surf_block
-    if material_classify and surface_grid_override is not None:
-        from ortho_surface import cleanup_ground_surface
-        surf_block = cleanup_ground_surface(surf_block, size=3)
-
     # ESA WorldCover の土地利用を ortho 地表に重ねて田畑・草地・内陸水を明確化
     # （写真色の上に意味カテゴリを反映。森/市街は ortho の細かい色のまま残す）
     if cover_ds is not None and cover_ds.shape == surf_block.shape:
@@ -904,14 +871,8 @@ def dem_to_blocks_enhanced(
         surf_block[beach & gentle] = "sand"                  # 砂浜（最近・緩斜面）
         surf_block[beach & ~gentle] = "stone"                # 護岸/磯（最近・急斜面）
 
-    # 道路を地表に上書き（陸セルのみ）。
-    #   施策5: FG-GML の road_material_grid があれば種別ごとの路面材質（幹線=アスファルト等）。
-    #   無ければ従来の細道=road_minor_block(砂利)/幹線=road_block(舗装) の2分類。
-    if road_material_grid is not None and road_material_grid.shape == surf_block.shape:
-        land_for_road = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
-        rsel = land_for_road & (road_material_grid != None)   # noqa: E711  object配列の非None
-        surf_block[rsel] = road_material_grid[rsel]
-    elif road_mask is not None and road_mask.shape == surf_block.shape:
+    # 道路を地表に上書き（陸セルのみ）。細道=road_minor_block(砂利)、幹線=road_block(舗装)
+    if road_mask is not None and road_mask.shape == surf_block.shape:
         land_for_road = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
         surf_block[road_mask & land_for_road] = road_minor_block
         if road_major_mask is not None and road_major_mask.shape == surf_block.shape:
@@ -1011,7 +972,7 @@ def dem_to_blocks_enhanced(
                 bsel = (building_id >= 0) & building_mask & land_mask
                 acc: dict[int, Counter] = {}
                 for _id, _c in zip(building_id[bsel].tolist(),
-                                   np.asarray(surf_raw)[bsel].tolist()):
+                                   np.asarray(surf_block)[bsel].tolist()):
                     acc.setdefault(_id, Counter())[_c] += 1
                 for _id, c in acc.items():
                     if 0 <= _id < len(roof_by_id):
@@ -1037,7 +998,7 @@ def dem_to_blocks_enhanced(
             bid_c = int(building_id[j, i_]) if building_id is not None else -1
             if roof_dom_rgb is not None and 0 <= bid_c < len(roof_by_id):
                 # color_building_roofs 経路: 同系統の濃淡は残し、外れ色だけ代表色へ
-                cell_k = surf_raw[j, i_]
+                cell_k = surf_block[j, i_]
                 dom_k = roof_by_id[bid_c]
                 if cell_k == dom_k:
                     roof_kind = dom_k
@@ -1049,7 +1010,7 @@ def dem_to_blocks_enhanced(
             elif roof_by_id is not None and 0 <= bid_c < len(roof_by_id):
                 roof_kind = roof_by_id[bid_c]                     # type 屋根（単色）
             else:
-                roof_kind = surf_raw[j, i_] if color_building_roofs else "stone"
+                roof_kind = surf_block[j, i_] if color_building_roofs else "stone"
             if building_wall_keys is not None and 0 <= bid_c < len(building_wall_keys):
                 wall_kind = building_wall_keys[bid_c]             # type 別の壁
             else:

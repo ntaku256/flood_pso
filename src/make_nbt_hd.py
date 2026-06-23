@@ -140,9 +140,6 @@ def main():
                     help="空中写真タイル zoom（18≈0.6m/px, 17≈1.2m/px）")
     ap.add_argument("--ortho-saturation", type=float, default=1.4,
                     help="空中写真の彩度ブースト（自動レベル後。1=彩度補正なし, 1.4既定, 2+で過飽和）")
-    ap.add_argument("--no-ground-material", dest="material_ground", action="store_false",
-                    help="施策3+2を無効化：オルソ地表を ~6 マテリアルへ畳まず、生の最近傍80色"
-                         "マッチのまま使う（A/B比較・回帰用）。既定は畳む（道/水/建物/樹は別途マスク）")
     ap.add_argument("--no-litematic", action="store_true",
                     help="既定で併せて出力する .litematic を抑止（.nbt のみ）")
     ap.add_argument("--building-height", type=float, default=6.0,
@@ -430,7 +427,6 @@ def main():
         if args.use_osm: tsuffix += "_osm"
         if args.use_fgd: tsuffix += "_fgd"
         if args.surface_ortho: tsuffix += "_ortho"
-        if args.surface_ortho and not args.material_ground: tsuffix += "_rawg"
         usuffix = f"_{args.tag_suffix}" if args.tag_suffix else ""
         base_name = (f"gobo_hd_K{K}{suffix}_seed{args.seed}_{args.preset}_"
                      f"{tag}{tsuffix}{qsuffix}{usuffix}")
@@ -502,7 +498,6 @@ def main():
                 surface_ortho=args.surface_ortho,
                 ortho_zoom=args.ortho_zoom,
                 ortho_saturation=args.ortho_saturation,
-                material_ground=args.material_ground,
                 building_height_m=args.building_height,
                 building_height_grid=building_height_grid,
                 tree_height_grid=tree_height_grid,
