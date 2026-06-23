@@ -171,35 +171,6 @@ def load_water(xml_path: str, *, lat_min, lat_max, lon_min, lon_max) -> list[dic
     return out
 
 
-def load_farmplots(geojson_path: str, *, lat_min, lat_max, lon_min, lon_max) -> list[dict]:
-    """MAFF 筆ポリゴン GeoJSON → [{"coords":[[lat,lon],...], "land_type":100|200}]（bbox 交差のみ）。
-    land_type: 100=田, 200=畑。GeoJSON 座標は [lon,lat] なので [lat,lon] へ変換して返す
-    （FG-GML ではなく農水省オープンデータ。terrain_render.build_farm_material_grid 互換）。"""
-    import json
-    with open(geojson_path, encoding="utf-8") as f:
-        gj = json.load(f)
-    out: list[dict] = []
-    for ft in gj.get("features", []):
-        lt = (ft.get("properties") or {}).get("land_type")
-        geom = ft.get("geometry") or {}
-        gt = geom.get("type")
-        if gt == "Polygon":
-            rings = [geom.get("coordinates", [[]])[0]]
-        elif gt == "MultiPolygon":
-            rings = [poly[0] for poly in geom.get("coordinates", []) if poly]
-        else:
-            continue
-        for ring in rings:
-            if len(ring) < 4:
-                continue
-            lons = [c[0] for c in ring]; lats = [c[1] for c in ring]
-            if (max(lats) < lat_min or min(lats) > lat_max
-                    or max(lons) < lon_min or min(lons) > lon_max):
-                continue
-            out.append({"coords": [[c[1], c[0]] for c in ring], "land_type": lt})
-    return out
-
-
 def load_fgd_buildings_roads(
     bld_xml: str | None,
     rdedg_xml: str | None,

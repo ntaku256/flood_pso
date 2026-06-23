@@ -344,7 +344,6 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   ortho_zoom: int = 18,
                   ortho_saturation: float = 1.4,
                   material_ground: bool = True,
-                  farm_geojson: str | None = None,
                   building_height_m: float = 6.0,
                   building_height_grid: np.ndarray | None = None,
                   tree_height_grid: np.ndarray | None = None,
@@ -704,22 +703,6 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             surface_override = ortho_surface_grid(dst_meta, zoom=ortho_zoom,
                                                   saturation=ortho_saturation)
 
-        # 農地筆（MAFF GeoJSON）→ 田/畑 の地表材質グリッド（あれば）。地形非依存・地表のみ。
-        farm_material_grid = None
-        if farm_geojson:
-            from fgd_vector import load_farmplots
-            from terrain_render import build_farm_material_grid
-            _ff = max(1, round(h_res / h_res_dem))
-            _nzf = dem_patch.shape[0] // _ff
-            _nxf = dem_patch.shape[1] // _ff
-            _plots = load_farmplots(
-                farm_geojson,
-                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
-                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3])
-            farm_material_grid = build_farm_material_grid(_plots, patch_bbox_latlon, _nzf, _nxf)
-            _fc = int(np.sum(farm_material_grid != None))   # noqa: E711
-            print(f"  [farm] MAFF筆ポリゴン {len(_plots)}区画（田/畑）→ 地表材質 mask cells={_fc}")
-
         # OSM 橋（bridge=yes + layer）を読み、patch 範囲に交差するものを立体化対象に
         bridges_render = None
         if bridges_json:
@@ -781,7 +764,6 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             water_mask=water_mask,
             road_major_mask=road_major_mask,
             road_material_grid=road_material_grid,
-            farm_material_grid=farm_material_grid,
         )
     elif terrain_quality == "legacy":
         print(f"Converting to blocks [legacy] "

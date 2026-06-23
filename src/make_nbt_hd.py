@@ -37,8 +37,6 @@ DEFAULT_BLD_XML   = str(FGD_ALL_DIR / "FG-GML-503561-BldA-20251001-0001.xml")
 DEFAULT_RDEDG_XML = str(FGD_ALL_DIR / "FG-GML-503561-RdEdg-20251001-0001.xml")
 DEFAULT_WA_XML    = (str(FGD_ALL_DIR / "FG-GML-503561-WA-20251001-0001.xml") + "," +
                      str(FGD_ALL_DIR / "FG-GML-503561-WStrA-20251001-0001.xml"))
-# 農地筆（MAFF 筆ポリゴン）。--farms の既定 GeoJSON（open.fude.maff.go.jp の .fgb から bbox 抽出済）。
-DEFAULT_FARM_GEOJSON = str(REPO_ROOT / "data_cache" / "maff_fude" / "gobo_fude.geojson")
 BENCH_DIR = REPO_ROOT / "results" / "benchmark"
 OUT_DIR  = REPO_ROOT / "results" / "nbt" / "hd"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -145,11 +143,6 @@ def main():
     ap.add_argument("--no-ground-material", dest="material_ground", action="store_false",
                     help="施策3+2を無効化：オルソ地表を ~6 マテリアルへ畳まず、生の最近傍80色"
                          "マッチのまま使う（A/B比較・回帰用）。既定は畳む（道/水/建物/樹は別途マスク）")
-    ap.add_argument("--farms", action="store_true",
-                    help="MAFF 筆ポリゴンで田/畑を地表材質に反映（田=mud / 畑=coarse_dirt）。"
-                         "--farm-geojson の GeoJSON を使用（筆界精度。施策3の上位互換）")
-    ap.add_argument("--farm-geojson", default=DEFAULT_FARM_GEOJSON,
-                    help="MAFF 筆ポリゴン GeoJSON のパス（--farms 時に使用）")
     ap.add_argument("--no-litematic", action="store_true",
                     help="既定で併せて出力する .litematic を抑止（.nbt のみ）")
     ap.add_argument("--building-height", type=float, default=6.0,
@@ -438,7 +431,6 @@ def main():
         if args.use_fgd: tsuffix += "_fgd"
         if args.surface_ortho: tsuffix += "_ortho"
         if args.surface_ortho and not args.material_ground: tsuffix += "_rawg"
-        if args.farms: tsuffix += "_farm"
         usuffix = f"_{args.tag_suffix}" if args.tag_suffix else ""
         base_name = (f"gobo_hd_K{K}{suffix}_seed{args.seed}_{args.preset}_"
                      f"{tag}{tsuffix}{qsuffix}{usuffix}")
@@ -511,7 +503,6 @@ def main():
                 ortho_zoom=args.ortho_zoom,
                 ortho_saturation=args.ortho_saturation,
                 material_ground=args.material_ground,
-                farm_geojson=(args.farm_geojson if args.farms else None),
                 building_height_m=args.building_height,
                 building_height_grid=building_height_grid,
                 tree_height_grid=tree_height_grid,
