@@ -126,6 +126,13 @@ def main():
     ap.add_argument("--fgd-wa", default=DEFAULT_WA_XML,
                     help="--use-fgd の水域 WA/WStrA GML パス（河川・池を水面に）。"
                          "カンマ区切りで複数可。空文字で水域無効")
+    ap.add_argument("--plateau-bld", default=None,
+                    help="PLATEAU CityGML 建物ディレクトリ（udx/bldg）。指定時は建物を PLATEAU の "
+                         "正確な footprint+実測高さ(measuredHeight) から生成（高精度版）")
+    ap.add_argument("--osm-bld", action="store_true",
+                    help="OSM(Overpass) の建物 footprint + LiDAR DSM 高さで建物を生成（いつも通り版）")
+    ap.add_argument("--plateau-lod2", action="store_true",
+                    help="PLATEAU LOD2 の屋根形状を建物高さに反映（城など。--plateau-bld と併用、やや重い）")
     ap.add_argument("--surface-ortho", action="store_true",
                     help="GSI シームレス空中写真から地表色を決める（viewer 既知のバニラブロックへ"
                          "色マッチ：草/砂/砂利/石/水/岩盤）。傾斜分類より写真寄りの見た目に")
@@ -292,6 +299,27 @@ def main():
     print(f"  preset={args.preset}  center=({lat_c:.6f},{lon_c:.6f})  "
           f"{width_m}×{depth_m}m  h_res={h_res}m  ~{est['estimated_nbt_MB']} MB/file  "
           f"({est['nx (East-West blocks)']}×{est['nz (North-South blocks)']} blocks)")
+
+    # 建物リスト（PLATEAU 高精度 / OSM いつも通り）を世界範囲で一括読み込み。
+    # build_building_maps が各パッチ範囲で描画する（FG-GML の代替。LiDAR DSM が高さを補完）。
+    building_list = None
+    if args.plateau_bld or args.osm_bld:
+        import math as _m
+        _hlat = (depth_m / 2 + 120) / 111320.0
+        _hlon = (width_m / 2 + 120) / (111320.0 * _m.cos(_m.radians(lat_c)))
+        _wb = (lat_c - _hlat, lat_c + _hlat, lon_c - _hlon, lon_c + _hlon)
+        if args.plateau_bld:
+            from plateau import load_plateau_buildings
+            building_list = load_plateau_buildings(args.plateau_bld,
+                                                   lat_min=_wb[0], lat_max=_wb[1], lon_min=_wb[2], lon_max=_wb[3],
+                                                   lod2=args.plateau_lod2)
+        else:
+            from tellus_data import fetch_osm_buildings_roads
+            _osm = fetch_osm_buildings_roads(_wb[0], _wb[1], _wb[2], _wb[3])
+            building_list = [{"coords": b["coords"], "holes": [],
+                              "tags": {"fgd_type": "普通建物", "height_m": None}}
+                             for b in _osm["buildings"] if len(b.get("coords", [])) >= 4]
+            print(f"  [osm-bld] 建物 {len(building_list)} 棟（OSM footprint + LiDAR高さ）")
 
     # ── タイル分割（--tiles）: 全域を重なりなく COLS×ROWS に割り、各タイルを個別に書き出す。
     #    DEM/inundation は全域で1回だけ計算し、export_to_nbt が中心+幅でクロップする（省メモリ）。
@@ -466,6 +494,7 @@ def main():
                 fgd_bld_xml=args.fgd_bld,
                 fgd_rdedg_xml=args.fgd_rdedg,
                 fgd_wa_xml=(args.fgd_wa or None),
+                building_list=building_list,
                 surface_ortho=args.surface_ortho,
                 ortho_zoom=args.ortho_zoom,
                 ortho_saturation=args.ortho_saturation,

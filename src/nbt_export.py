@@ -339,6 +339,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   fgd_bld_xml: str | None = None,
                   fgd_rdedg_xml: str | None = None,
                   fgd_wa_xml: str | None = None,
+                  building_list: list | None = None,
                   surface_ortho: bool = False,
                   ortho_zoom: int = 18,
                   ortho_saturation: float = 1.4,
@@ -616,21 +617,26 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   f"→ mask cells: building={int(building_mask.sum())}  road={int(road_mask.sum())}")
 
         # FG-GML（国土地理院ローカルベクタ）建物・道路 mask。OSM と併用時は union。
-        if use_fgd:
+        if use_fgd or building_list is not None:
             import warnings as _warnings
-            from fgd_vector import load_fgd_buildings_roads
             from terrain_render import build_building_maps
-            fgd = load_fgd_buildings_roads(
-                fgd_bld_xml, fgd_rdedg_xml,
-                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
-                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
-            )
+            if building_list is not None:
+                # PLATEAU / OSM などで事前読み込みした建物リストを使う（道路は別経路=OSM）
+                _blds = building_list; _roads = []
+            else:
+                from fgd_vector import load_fgd_buildings_roads
+                _fgd = load_fgd_buildings_roads(
+                    fgd_bld_xml, fgd_rdedg_xml,
+                    lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                    lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                )
+                _blds = _fgd["buildings"]; _roads = _fgd["roads"]
             factor = max(1, round(h_res / h_res_dem))
             nz_g = dem_patch.shape[0] // factor
             nx_g = dem_patch.shape[1] // factor
             # 道路だけ従来 mask（建物は per-building 集約で別途生成）
             _, rm_f, rmaj_f = build_osm_masks(
-                {"roads": fgd["roads"]}, patch_bbox_latlon,
+                {"roads": _roads}, patch_bbox_latlon,
                 grid_h=nz_g, grid_w=nx_g, h_res_block_m=h_res,
             )
             # P1: 建物高さ[m] を block grid にダウンサンプル → 各 footprint で p75 集約しフラット化
@@ -642,7 +648,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                     _warnings.simplefilter("ignore", RuntimeWarning)
                     dsm_h_block = np.nanmean(bpf, axis=(1, 3))
             bmaps = build_building_maps(
-                fgd["buildings"], dsm_h_block, patch_bbox_latlon, nz_g, nx_g,
+                _blds, dsm_h_block, patch_bbox_latlon, nz_g, nx_g,
             )
             bm_f = bmaps["mask"]
             building_mask = bm_f if building_mask is None else (building_mask | bm_f)
@@ -670,7 +676,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_roof_keys = bmaps["roof_keys"]
             _bh_in = building_height_block[np.isfinite(building_height_block)]
             _med = float(np.median(_bh_in)) if _bh_in.size else 0.0
-            print(f"  [fgd] buildings={fgd['n_buildings']}  roads={fgd['n_roads']}  "
+            _src = "plateau/osm" if building_list is not None else "fgd"
+            print(f"  [{_src}] buildings={len(_blds)}  roads={len(_roads)}  "
                   f"→ mask cells: building={int(bm_f.sum())}  road={int(rm_f.sum())}  "
                   f"per-building flat-height median={_med:.1f}m  n_bld={len(building_wall_keys)}")
 

@@ -363,6 +363,17 @@ BUILDING_WALL_BY_TYPE = {
     "高層建物":     "light_gray_concrete",
     "普通無壁舎":   "stone",
     "堅ろう無壁舎": "stone",
+    # PLATEAU 用途別（①）。壁材を用途・構造で変えて色面を多様化
+    "商業ビル":     "light_gray_concrete",   # 商業/業務/複合
+    "宿泊":         "white_concrete",        # ホテル等
+    "マンション":   "white_terracotta",      # 共同住宅（クリーム系）
+    "住宅":         "sandstone",             # 戸建（暖色タン）
+    "木造住宅":     "spruce_planks",         # 木造（木質）
+    "工場":         "andesite",              # 工場（灰）
+    "倉庫":         "gray_concrete",         # 倉庫/供給処理（金属灰）
+    "公共":         "diorite",               # 官公庁/文教（白御影風）
+    "農業施設":     "oak_planks",            # 農林漁業用（木）
+    "ランドマーク": "white_concrete",        # 城・高いLOD2建物（白漆喰）
 }
 BUILDING_ROOF_BY_TYPE = {
     "普通建物":     "gray_concrete",
@@ -370,7 +381,48 @@ BUILDING_ROOF_BY_TYPE = {
     "高層建物":     "light_gray_concrete",
     "普通無壁舎":   "gray_concrete",
     "堅ろう無壁舎": "gray_concrete",
+    "商業ビル":     "light_gray_concrete",
+    "宿泊":         "light_gray_concrete",
+    "マンション":   "gray_concrete",
+    "住宅":         "gray_concrete",
+    "木造住宅":     "deepslate",
+    "工場":         "gray_concrete",
+    "倉庫":         "gray_concrete",
+    "公共":         "gray_concrete",
+    "農業施設":     "deepslate",
+    "ランドマーク": "deepslate",
 }
+# 寄棟風の勾配屋根にする用途（戸建・木造）。ビル/工場/倉庫/マンションは陸屋根のまま
+HIP_ROOF_TYPES = ("普通建物", "住宅", "木造住宅", "農業施設")
+
+
+def _rasterize_lod2_roof(roof3d, patch_bbox_latlon, grid_h, grid_w, x0, y0, x1, y1):
+    """PLATEAU LOD2 の屋根ポリゴン群を block-grid にラスタ化し、各セルの屋根上面の標高 z を返す。
+    各セル = そのセルを覆うポリゴンの平面 z の最大値（=最上面=屋根）。覆われないセルは NaN。
+    壁（grid 投影が直線=退化）はスキップ。城など複雑な屋根形状をそのまま高さに反映できる。"""
+    import matplotlib.path as mpath
+    sz = np.full((y1 - y0, x1 - x0), np.nan, dtype=np.float64)
+    gx, gy = np.meshgrid(np.arange(x0, x1) + 0.5, np.arange(y0, y1) + 0.5)
+    gp = np.column_stack([gx.ravel(), gy.ravel()])
+    for poly in roof3d:
+        if len(poly) < 3:
+            continue
+        P = np.array([_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, grid_h, grid_w)
+                      for la, lo, _ in poly], dtype=np.float64)
+        if (P[:, 0].max() - P[:, 0].min()) < 1e-6 or (P[:, 1].max() - P[:, 1].min()) < 1e-6:
+            continue   # 壁（直線投影）はスキップ
+        z = np.array([zz for _, _, zz in poly], dtype=np.float64)
+        try:
+            A = np.column_stack([P[:, 0], P[:, 1], np.ones(len(P))])
+            coef, *_ = np.linalg.lstsq(A, z, rcond=None)
+        except Exception:
+            continue
+        inside = mpath.Path(P).contains_points(gp).reshape(gy.shape)
+        if not inside.any():
+            continue
+        zest = coef[0] * gx + coef[1] * gy + coef[2]
+        sz = np.where(inside & (np.isnan(sz) | (zest > sz)), zest, sz)
+    return sz
 DEFAULT_WALL_KEY = "white_concrete"
 DEFAULT_ROOF_KEY = "gray_concrete"
 
@@ -428,7 +480,8 @@ def build_building_maps(
         if not ins.any():
             continue
         tp = b.get("tags", {}).get("fgd_type", "")
-        floor = float(b.get("tags", {}).get("height_m", 6.0)) * type_floor_frac
+        _hm = b.get("tags", {}).get("height_m")
+        floor = float(_hm if _hm is not None else 6.0) * type_floor_frac
         h = floor
         if dsm_h_block is not None:
             vals = dsm_h_block[y0:y1, x0:x1][ins]
@@ -440,7 +493,16 @@ def build_building_maps(
         # 屋根形状: 普通建物(住宅)は寄棟風の勾配屋根(縁=壁top, 内側ほど高い)。
         # 堅ろう建物(RC)・無壁舎(倉庫)は陸屋根(フラット)のまま。
         sub_h = hmap[y0:y1, x0:x1]
-        if roof_slope > 0 and tp == "普通建物" and ins.sum() >= 4:
+        roof3d = b.get("roof3d")
+        if roof3d:
+            # PLATEAU LOD2: 屋根面を per-cell でラスタ化し、城などの屋根形状をそのまま高さに反映
+            sz = _rasterize_lod2_roof(roof3d, patch_bbox_latlon, grid_h, grid_w, x0, y0, x1, y1)
+            bz = float(min(zz for p in roof3d for (_, _, zz) in p))
+            cov = np.isfinite(sz) & ins
+            sub_h[ins] = h
+            if cov.any():
+                sub_h[cov] = np.maximum(sz[cov] - bz, min_h_m).astype(np.float32)
+        elif roof_slope > 0 and tp in HIP_ROOF_TYPES and ins.sum() >= 4:
             d = distance_transform_edt(ins).astype(np.float32)   # 縁からの内側距離(block)
             rise = np.minimum(np.clip(d - 1.0, 0, None) * roof_slope, roof_cap)
             sub_h[ins] = h + rise[ins]                            # 重なりは後勝ち
