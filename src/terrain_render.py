@@ -379,6 +379,37 @@ def build_road_material_grid(roads, patch_bbox_latlon, grid_h, grid_w,
     return grid
 
 
+# 施策(農地筆): MAFF 筆ポリゴン land_type → 地表材質。田=mud(湿った泥)/畑=coarse_dirt(耕地)。
+FARM_BLOCK = {100: "mud", 200: "coarse_dirt"}
+
+
+def build_farm_material_grid(plots, patch_bbox_latlon, grid_h, grid_w, *, default="coarse_dirt"):
+    """MAFF 筆ポリゴン（load_farmplots の戻り値）を per-cell の地表材質キーでラスタ化
+    （object 配列, None=非農地）。各筆を bbox にクロップして高速に塗る。"""
+    import matplotlib.path as mpath
+    grid = np.full((grid_h, grid_w), None, dtype=object)
+    for p in plots:
+        coords = p.get("coords") or []
+        if len(coords) < 4:
+            continue
+        xs = []; zs = []
+        for la, lo in coords:
+            x, z = _lonlat_to_grid_xy(la, lo, patch_bbox_latlon, grid_h, grid_w)
+            xs.append(x); zs.append(z)
+        x0 = max(0, int(np.floor(min(xs)))); x1 = min(grid_w, int(np.ceil(max(xs))) + 1)
+        z0 = max(0, int(np.floor(min(zs)))); z1 = min(grid_h, int(np.ceil(max(zs))) + 1)
+        if x1 <= x0 or z1 <= z0:
+            continue
+        path = mpath.Path(np.column_stack([xs, zs]))
+        gx, gz = np.meshgrid(np.arange(x0, x1), np.arange(z0, z1))
+        inside = path.contains_points(np.column_stack([gx.ravel(), gz.ravel()])).reshape(z1 - z0, x1 - x0)
+        if inside.any():
+            block = FARM_BLOCK.get(p.get("land_type"), default)
+            sub = grid[z0:z1, x0:x1]
+            sub[inside] = block
+    return grid
+
+
 # FG-GML type → 壁/屋根ブロック（屋根は ortho 無効時 or 集約不能時の fallback）。
 # 木造住宅=白壁 / RC=コンクリ灰 / 無壁舎(倉庫・車庫)=石 で見た目を3分化。
 BUILDING_WALL_BY_TYPE = {
@@ -756,6 +787,7 @@ def dem_to_blocks_enhanced(
     road_major_mask: np.ndarray | None = None,
     road_minor_block: str = "gravel",
     road_material_grid: np.ndarray | None = None,
+    farm_material_grid: np.ndarray | None = None,
     water_mask: np.ndarray | None = None,
     water_block: str = "water",
     evac_facilities: list | None = None,
@@ -893,6 +925,12 @@ def dem_to_blocks_enhanced(
         surf_block[(cover_ds == 40) & land_esa] = "coarse_dirt"  # cropland 田畑(耕地)
         surf_block[(cover_ds == 30) & land_esa] = "grass"        # grassland 草地
         surf_block[(cover_ds == 80) & land_esa] = "water"        # 内陸水面
+
+    # 農地筆(MAFF): 田=mud / 畑=coarse_dirt。一般地表・ESA より優先、海岸/道路/水より下。
+    if farm_material_grid is not None and farm_material_grid.shape == surf_block.shape:
+        land_farm = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
+        fsel = land_farm & (farm_material_grid != None)   # noqa: E711  object配列の非None
+        surf_block[fsel] = farm_material_grid[fsel]
 
     # 海岸: ortho 地表でも海岸線(dist_shore 小・低地)を砂浜/礫浜/護岸に（海岸ののっぺり解消）
     if dist_shore is not None and dist_shore.shape == surf_block.shape:
