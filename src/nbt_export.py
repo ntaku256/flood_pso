@@ -343,6 +343,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   surface_ortho: bool = False,
                   ortho_zoom: int = 18,
                   ortho_saturation: float = 1.4,
+                  material_ground: bool = True,
                   building_height_m: float = 6.0,
                   building_height_grid: np.ndarray | None = None,
                   tree_height_grid: np.ndarray | None = None,
@@ -595,6 +596,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
 
         # OSM 取得 + ブロック grid 上の建物・道路 mask を事前生成
         building_mask = road_mask = water_mask = road_major_mask = None
+        road_material_grid = None
         building_height_block = None   # P1: per-building 集約のフラット高さ（FG-GML 経路）
         building_id_grid = None        # P2: 建物ごとの整数ラベル
         building_wall_keys = None      # P2: 建物 id → 壁ブロックキー
@@ -654,6 +656,11 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_mask = bm_f if building_mask is None else (building_mask | bm_f)
             road_mask = rm_f if road_mask is None else (road_mask | rm_f)
             road_major_mask = rmaj_f if road_major_mask is None else (road_major_mask | rmaj_f)
+            # 施策5: FG-GML 道路種別 → 路面材質グリッド（_roads がある fgd 経路のみ）
+            if _roads:
+                from terrain_render import build_road_material_grid
+                road_material_grid = build_road_material_grid(
+                    _roads, patch_bbox_latlon, nz_g, nx_g, h_res)
             # FG-GML 水域(WA/WStrA: 河川・池) → 地表を水面に。fgd_wa_xml はカンマ区切り複数可
             if fgd_wa_xml:
                 from fgd_vector import load_water
@@ -750,11 +757,13 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_roof_keys=building_roof_keys,
             color_building_roofs=surface_ortho,
             surface_grid_override=surface_override,
+            material_classify=material_ground,
             bridges=bridges_render,
             evac_facilities=evac_render,
             patch_bbox_latlon=patch_bbox_latlon,
             water_mask=water_mask,
             road_major_mask=road_major_mask,
+            road_material_grid=road_material_grid,
         )
     elif terrain_quality == "legacy":
         print(f"Converting to blocks [legacy] "
