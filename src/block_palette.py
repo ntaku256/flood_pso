@@ -53,6 +53,19 @@ BLOCKS: dict[str, tuple[str, tuple[int, int, int], str]] = {
     "bedrock":           ("minecraft:bedrock", (85, 85, 85), "opaque"),
     "prismarine":        ("minecraft:prismarine", (99, 156, 151), "opaque"),
 
+    # ── 建物内部（窓・照明）。地表オルソ色マッチには使わない（_NON_MATCH で除外） ──
+    "glass":             ("minecraft:glass", (200, 224, 233), "opaque"),
+    "glowstone":         ("minecraft:glowstone", (255, 226, 142), "opaque"),
+
+    # ── 凡例(地下データ層)用の色付きガラス。地表オルソ色マッチには使わない（_NON_MATCH 除外） ──
+    "white_stained_glass":      ("minecraft:white_stained_glass", (236, 240, 240), "opaque"),
+    "red_stained_glass":        ("minecraft:red_stained_glass", (165, 46, 38), "opaque"),
+    "orange_stained_glass":     ("minecraft:orange_stained_glass", (216, 118, 33), "opaque"),
+    "light_blue_stained_glass": ("minecraft:light_blue_stained_glass", (88, 158, 210), "opaque"),
+    "blue_stained_glass":       ("minecraft:blue_stained_glass", (44, 60, 140), "opaque"),
+    "green_stained_glass":      ("minecraft:green_stained_glass", (84, 109, 28), "opaque"),
+    "black_stained_glass":      ("minecraft:black_stained_glass", (25, 22, 22), "opaque"),
+
     # ── 木材・原木・葉 ──
     "oak_planks":        ("minecraft:oak_planks", (162, 131, 79), "opaque"),
     "spruce_planks":     ("minecraft:spruce_planks", (114, 84, 48), "opaque"),
@@ -128,7 +141,10 @@ PALETTE_KEYS: list[str] = list(BLOCKS.keys())
 
 # カラーマッチに使うアンカー（opaque のみ。air/water/ice は除外）
 # 発光等のマーカー専用ブロックは地表オルソ色マッチのアンカーから除外
-_NON_MATCH = {"sea_lantern"}
+_NON_MATCH = {"sea_lantern", "glass", "glowstone",
+              "white_stained_glass", "red_stained_glass", "orange_stained_glass",
+              "light_blue_stained_glass", "blue_stained_glass",
+              "green_stained_glass", "black_stained_glass"}
 MATCH_KEYS: list[str] = [k for k, (_, _, role) in BLOCKS.items()
                          if role == "opaque" and k not in _NON_MATCH]
 

@@ -395,6 +395,33 @@ BUILDING_ROOF_BY_TYPE = {
 # 寄棟風の勾配屋根にする用途（戸建・木造）。ビル/工場/倉庫/マンションは陸屋根のまま
 HIP_ROOF_TYPES = ("普通建物", "住宅", "木造住宅", "農業施設")
 
+# 建物スタイル（窓の量・内部構造を変える）: house=戸建(窓少なめ) / building=ビル(窓多め) / factory=工場・倉庫
+_FACTORY_TYPES = ("普通無壁舎", "堅ろう無壁舎", "工場", "倉庫", "農業施設")
+_BUILDING_TYPES = ("堅ろう建物", "高層建物", "商業ビル", "マンション", "宿泊", "公共", "ランドマーク")
+
+
+def building_style_for_type(tp: str) -> str:
+    if tp in _FACTORY_TYPES:
+        return "factory"
+    if tp in _BUILDING_TYPES:
+        return "building"
+    return "house"   # 普通建物 / 住宅 / 木造住宅 / 不明
+
+
+def _is_window(style: str, r: int, fh: int, run: int) -> bool:
+    """周壁セルが窓(ガラス)になるか。r=階内の高さ位置(0=床ライン), fh=階高,
+    run=壁が走る向きの座標。窓は3マスおき＝窓と窓の間に最低2マスの壁を必ず残す。
+    家=各階に窓 / ビル=全階に連窓 / 工場=高所のハイサイド窓。"""
+    if r <= 0 or r >= fh:                       # 床/天井ラインには窓を置かない
+        return False
+    if run % 3 != 0:                            # 横方向は3マスおき（窓の間に最低2マスの壁）
+        return False
+    if style == "building":
+        return True                             # 全階に窓
+    if style == "factory":
+        return r in (fh - 2, fh - 3)            # 高所のハイサイド窓
+    return r in (1, 2)                          # 戸建: 各階に窓
+
 
 def _rasterize_lod2_roof(roof3d, patch_bbox_latlon, grid_h, grid_w, x0, y0, x1, y1):
     """PLATEAU LOD2 の屋根ポリゴン群を block-grid にラスタ化し、各セルの屋根上面の標高 z を返す。
@@ -455,6 +482,7 @@ def build_building_maps(
     idmap = np.full((grid_h, grid_w), -1, dtype=np.int32)
     wall_keys: list[str] = []
     roof_keys: list[str] = []
+    style_keys: list[str] = []
     bid = 0
     for b in buildings:
         ext = b.get("coords")
@@ -511,9 +539,10 @@ def build_building_maps(
         sub_i = idmap[y0:y1, x0:x1]; sub_i[ins] = bid
         wall_keys.append(BUILDING_WALL_BY_TYPE.get(tp, DEFAULT_WALL_KEY))
         roof_keys.append(BUILDING_ROOF_BY_TYPE.get(tp, DEFAULT_ROOF_KEY))
+        style_keys.append(building_style_for_type(tp))
         bid += 1
     return {"mask": mask, "height": hmap, "id": idmap,
-            "wall_keys": wall_keys, "roof_keys": roof_keys}
+            "wall_keys": wall_keys, "roof_keys": roof_keys, "style_keys": style_keys}
 
 
 def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
@@ -721,9 +750,13 @@ def dem_to_blocks_enhanced(
     roof_color_tol: float = 55.0,
     color_building_roofs: bool = False,
     wall_block: str = "white_concrete",
-    window_block: str = "gray_concrete",
+    window_block: str = "glass",
     floor_height: int = 5,
     floor_block: str = "light_gray_concrete",
+    interior_light: str = "sea_lantern",
+    building_style_keys: list | None = None,
+    hollow_buildings: bool = True,
+    legend_layer: bool = False,
     surface_grid_override: np.ndarray | None = None,
     bridges: list | None = None,
     patch_bbox_latlon: tuple | None = None,
@@ -816,17 +849,21 @@ def dem_to_blocks_enhanced(
     scale_land = v_exag_land / v_res_land
     scale_sea  = v_exag_sea  / v_res_land
 
-    # 陸地表 y（最低 1）
+    # 凡例3層(地下データ層)を有効化すると、底に凡例用の空間を空けるため世界全体を _lift 持ち上げる。
+    LEGEND_YS = (0, 2, 4)        # 地下データ層の高さ: y=0 土地利用 / y=2 洪水 / y=4 樹木（間隔をあけて）
+    _lift = (LEGEND_YS[-1] + 2) if legend_layer else 0   # 地形/構造物の最低 y（凡例の上に空気1段）
+
+    # 陸地表 y（最低 1）。凡例有効時は _lift 持ち上げ
     elev_land = np.where(np.isnan(dem_ds), 0.0, dem_ds)
-    y_surf_land = np.maximum(1, (elev_land * scale_land).astype(int))
+    y_surf_land = np.maximum(1, (elev_land * scale_land).astype(int)) + _lift
     # 海面 y（sea_level + 1 が水面ブロック）。地盤柱の起点として使う海底 y は sea - depth
-    y_sea_surface = max(1, int((sea_level_m + 1.0) * scale_sea))
+    y_sea_surface = max(1, int((sea_level_m + 1.0) * scale_sea)) + _lift
     y_sea_floor   = (np.maximum(0.0, sea_level_m - ocean_depth) * scale_sea).astype(int)
-    y_sea_floor   = np.maximum(0, y_sea_floor)
+    y_sea_floor   = np.maximum(0, y_sea_floor) + _lift
 
     # 浸水深 → 浸水水柱の天井（陸セルのみ）
     y_flood_top = np.where(idn_ds > flood_threshold,
-                           ((elev_land + idn_ds) * scale_land).astype(int),
+                           ((elev_land + idn_ds) * scale_land).astype(int) + _lift,
                            y_surf_land)
 
     # ─── 5) 地表ブロック決定 ───
@@ -884,7 +921,7 @@ def dem_to_blocks_enhanced(
         surf_block[water_mask & land_for_water] = water_block
 
     valid_elevs = dem_ds[~np.isnan(dem_ds)]
-    max_elev_y = int(valid_elevs.max() * scale_land) if len(valid_elevs) > 0 else 1
+    max_elev_y = (int(valid_elevs.max() * scale_land) if len(valid_elevs) > 0 else 1) + _lift
     max_y = min(max(max_elev_y + 5, y_sea_surface + 2), 500)
 
     # ─── 6) ブロック生成（numpy ベクトルで append） ───
@@ -902,15 +939,15 @@ def dem_to_blocks_enhanced(
             "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(floor_y), nbtlib.Int(bz_v)]),
             "state": block_id(floor_kind),
         }))
-        # 海底直下に少しの stone 地盤
-        base_y = max(0, floor_y - 3)
+        # 海底直下に少しの stone 地盤（凡例層より下には伸ばさない＝_lift で下限）
+        base_y = max(_lift, floor_y - 3)
         for dy in range(base_y, floor_y):
             blocks.append(nbtlib.Compound({
                 "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(dy), nbtlib.Int(bz_v)]),
                 "state": block_id("stone"),
             }))
         # 一番下に土台層（各柱の最下の1個下＝地形の起伏に沿う。海底の砂/砂利が浮かないよう支える）
-        if base_y - 1 >= 0:
+        if base_y - 1 >= _lift:
             blocks.append(nbtlib.Compound({
                 "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(base_y - 1), nbtlib.Int(bz_v)]),
                 "state": block_id("deepslate"),
@@ -927,8 +964,8 @@ def dem_to_blocks_enhanced(
     for j, i_ in land_idx.tolist():
         bx_v = int(BX[j, i_]); bz_v = int(BZ[j, i_])
         y_top = int(y_surf_land[j, i_])
-        # 地盤柱
-        for dy in range(max(0, y_top - deep_ground), y_top):
+        # 地盤柱（凡例層より下には伸ばさない＝_lift で下限）
+        for dy in range(max(_lift, y_top - deep_ground), y_top):
             blocks.append(nbtlib.Compound({
                 "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(dy), nbtlib.Int(bz_v)]),
                 "state": block_id("stone"),
@@ -958,6 +995,54 @@ def dem_to_blocks_enhanced(
     if building_mask is not None and building_mask.shape == dem_ds.shape:
         default_bh = max(2, int(round(building_height_m * scale_land)))
         fh = max(2, int(floor_height))
+        # --- 空洞化の事前計算: 周壁/角/ドア + 棟ごとの軒高（寄棟の屋根裏が筒抜けになるのを塞ぐ） ---
+        # 各セルの建物高さ[block]（屋根勾配で内側が高い）
+        if bh_ds is not None:
+            _bbg = np.clip(np.round(bh_ds * scale_land), 2, 60)
+            bh_blocks_grid = np.where(np.isfinite(bh_ds), _bbg, default_bh).astype(np.int32)
+        else:
+            bh_blocks_grid = np.full(building_mask.shape, default_bh, dtype=np.int32)
+        eave_blocks_by_bid: dict = {}
+        base_y_arr = None
+        if hollow_buildings and building_id is not None:
+            _pad = np.pad(building_id, 1, constant_values=-2)
+            _c = _pad[1:-1, 1:-1]
+            _diff_y = (_pad[:-2, 1:-1] != _c) | (_pad[2:, 1:-1] != _c)
+            _diff_x = (_pad[1:-1, :-2] != _c) | (_pad[1:-1, 2:] != _c)
+            wall_cell = building_mask & (_diff_x | _diff_y)      # 外周＝壁
+            corner_cell = building_mask & _diff_x & _diff_y       # 角＝窓を置かず柱に
+            wall_x = building_mask & _diff_x & ~_diff_y           # E/W面（壁はz方向に走る）
+            wall_y = building_mask & _diff_y & ~_diff_x           # N/S面（壁はx方向に走る）
+            # 棟ごとの軒高 = 周壁セルの最小高さ。これより上は中実の屋根にして屋根裏の筒抜けを塞ぐ
+            for _j, _i in np.argwhere(wall_cell).tolist():
+                _b = int(building_id[_j, _i]); _v = int(bh_blocks_grid[_j, _i])
+                if _b not in eave_blocks_by_bid or _v < eave_blocks_by_bid[_b]:
+                    eave_blocks_by_bid[_b] = _v
+            # 棟ごとの基準地盤 = footprint 内の最高 y_surf_land。平らな床に載せ、傾斜地の段差を基礎で埋める
+            _maxid = int(building_id.max())
+            if _maxid >= 0:
+                base_y_arr = np.zeros(_maxid + 1, dtype=np.int32)
+                _bs = building_mask & land_mask & (building_id >= 0)
+                np.maximum.at(base_y_arr, building_id[_bs], y_surf_land[_bs].astype(np.int32))
+            # ドア: 内側(空洞)を持つ棟だけ、可能なら道路側の周壁に1枚
+            _has_interior = set(building_id[building_mask & ~wall_cell].tolist())
+            door_cell = np.zeros_like(building_mask)              # 1棟1枚の出入口
+            _seen: set = set()
+            _passes = []
+            if road_mask is not None and road_mask.shape == building_mask.shape:
+                _passes.append(binary_dilation(road_mask) & wall_cell & ~corner_cell)
+            _passes.append(wall_cell & ~corner_cell)
+            for _m in _passes:
+                for _j, _i in np.argwhere(_m).tolist():
+                    _b = int(building_id[_j, _i])
+                    if _b in _has_interior and _b not in _seen:
+                        _seen.add(_b); door_cell[_j, _i] = True
+        else:
+            wall_cell = building_mask
+            corner_cell = np.zeros_like(building_mask)
+            wall_x = np.zeros_like(building_mask)
+            wall_y = np.zeros_like(building_mask)
+            door_cell = np.zeros_like(building_mask)
         # P2: 屋根を1棟の代表色に寄せる。ただし単色だと不自然なので、代表色から
         #     RGB 距離 roof_color_tol 以内（=同系統の濃淡）はセルの色を残し、外れ色
         #     （木の緑・隣家の別色など speckle）だけ代表色へスナップする。
@@ -986,16 +1071,15 @@ def dem_to_blocks_enhanced(
         for j, i_ in b_idx.tolist():
             bx_v = int(BX[j, i_]); bz_v = int(BZ[j, i_])
             y_top = int(y_surf_land[j, i_])
-            # DSM 物体高 → ブロック数（2..60 にクランプ）。無ければ既定高さ。
-            if bh_ds is not None and np.isfinite(bh_ds[j, i_]):
-                bh_blocks = int(round(float(bh_ds[j, i_]) * scale_land))
-                bh_blocks = max(2, min(bh_blocks, 60))
-            else:
-                bh_blocks = default_bh
-            top_y = y_top + bh_blocks
+            bh_blocks = int(bh_blocks_grid[j, i_])
+            bid_c = int(building_id[j, i_]) if building_id is not None else -1
+            # 棟を平らな基準面に載せる（傾斜地でも段差なし＝壁/屋根の筒抜けを防ぐ）
+            y_base = (int(base_y_arr[bid_c]) if (base_y_arr is not None and 0 <= bid_c < len(base_y_arr))
+                      else y_top)
+            top_y = y_base + bh_blocks
+            ceil_y = y_base + int(eave_blocks_by_bid.get(bid_c, bh_blocks))   # 軒高（上は中実の屋根）
             if top_y > b_max_y:
                 b_max_y = top_y
-            bid_c = int(building_id[j, i_]) if building_id is not None else -1
             if roof_dom_rgb is not None and 0 <= bid_c < len(roof_by_id):
                 # color_building_roofs 経路: 同系統の濃淡は残し、外れ色だけ代表色へ
                 cell_k = surf_block[j, i_]
@@ -1020,16 +1104,45 @@ def dem_to_blocks_enhanced(
                 roof_kind = "andesite"
             elif roof_kind == "sand":
                 roof_kind = "sandstone"
-            for fy in range(y_top + 1, top_y + 1):
-                r = (fy - y_top - 1) % fh    # 階内位置 0..fh-1 (0=床スラブ, 壁4+床1=5/階)
+            style = (building_style_keys[bid_c]
+                     if (building_style_keys is not None and 0 <= bid_c < len(building_style_keys))
+                     else "house")
+            is_wall = bool(wall_cell[j, i_])
+            is_corner = bool(corner_cell[j, i_])
+            is_door = bool(door_cell[j, i_])
+            light_here = (bx_v % 5 == 2) and (bz_v % 5 == 2)   # 疎な内側格子に照明
+            attic = hollow_buildings and (ceil_y < top_y)        # 寄棟で軒より上に屋根裏がある棟
+            # 基礎: 地盤(y_top)から基準面(y_base)まで壁材で充填（傾斜地の段差を塞ぐ）
+            for fy in range(y_top + 1, y_base + 1):
+                blocks.append(nbtlib.Compound({
+                    "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(fy), nbtlib.Int(bz_v)]),
+                    "state": block_id(wall_kind),
+                }))
+            for fy in range(y_base + 1, top_y + 1):
+                rel = fy - (y_base + 1)
+                r = rel % fh                       # 階内位置 0..fh-1（0=床スラブ位置）
+                is_slab = (r == 0 and fy != y_base + 1)
                 if fy == top_y:
-                    kind = roof_kind                              # 屋根
-                elif r == 0 and fy != y_top + 1:
-                    kind = floor_block                           # 各階の床スラブ(1階地面は除く)
-                elif r == 2 and fy < top_y - 1:
-                    kind = window_block                          # 窓帯(階の中段)
+                    kind = roof_kind                                      # 屋根面（全 footprint）
+                elif attic and fy > ceil_y:
+                    kind = roof_kind                                      # 軒より上＝屋根裏を中実化(筒抜け防止)
+                elif is_slab or (attic and fy == ceil_y):
+                    # 各階の床 / 軒の天井（全 footprint）。疎な内側格子は天井灯
+                    kind = interior_light if (not is_wall and light_here) else floor_block
+                elif not hollow_buildings:
+                    kind = window_block if (r == 2 and fy < top_y - 1) else wall_kind  # 旧ソリッド
+                elif is_wall:
+                    if is_door and fy <= y_base + 2:
+                        continue                                         # 出入口（接地2マス開口）
+                    _run = bz_v if wall_x[j, i_] else bx_v                # 壁の走る向きに沿って窓を間引く
+                    kind = (window_block if (not is_corner and _is_window(style, r, fh, _run))
+                            else wall_kind)                              # ガラス窓 or 壁
                 else:
-                    kind = wall_kind                             # 壁
+                    # 内側＝空洞。平屋根の最上階だけ屋根下に灯を吊る
+                    if light_here and fy == top_y - 1:
+                        kind = interior_light
+                    else:
+                        continue
                 blocks.append(nbtlib.Compound({
                     "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(fy), nbtlib.Int(bz_v)]),
                     "state": block_id(kind),
@@ -1048,9 +1161,12 @@ def dem_to_blocks_enhanced(
 
     # --- 樹木（LiDAR class3 由来）。建物・道路・水域・海(land_mask)には立てない。
     #     tree_mode: "canopy"=セル毎に幹+葉(密な森) / "sparse"=間引いた個別樹木(球状樹冠) ---
+    tree_cells = None                                # 凡例レイヤ用に「木のセル」を保持
     if tree_ds is not None and tree_ds.shape == dem_ds.shape:
-        no_tree = (building_mask.copy() if building_mask is not None
-                   else np.zeros(dem_ds.shape, dtype=bool))
+        # 建物＋軒(8近傍1ます外周)を樹木禁止に（軒/角の張り出しに葉がめり込むのを防ぐ＝壁優先）
+        _bld_dil = (binary_dilation(building_mask, structure=np.ones((3, 3), bool), iterations=1)
+                    if building_mask is not None else np.zeros(dem_ds.shape, dtype=bool))
+        no_tree = _bld_dil.copy()
         if road_mask is not None and road_mask.shape == dem_ds.shape:
             no_tree |= road_mask
         if water_mask is not None and water_mask.shape == dem_ds.shape:
@@ -1068,10 +1184,13 @@ def dem_to_blocks_enhanced(
                     green |= (surf_block == key)
         if green.any():
             cand &= binary_dilation(green, iterations=5)
+        tree_cells = cand
         t_max_y = 0
 
         def _putt(ix, iy, iz, key):
             if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
+                if _bld_dil[iz, ix]:
+                    return                                   # 壁優先: 建物・軒には樹木(葉/幹)を置かない
                 blocks.append(nbtlib.Compound({
                     "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(int(ix)), nbtlib.Int(int(iy)), nbtlib.Int(int(iz))]),
                     "state": block_id(key)}))
@@ -1173,5 +1292,54 @@ def dem_to_blocks_enhanced(
                     "state": block_id("sea_lantern"),
                 }))
             max_y = max(max_y, y0 + EVAC_H + 2)
+
+    # --- 地下データ層: 土地利用の解釈を色付きガラスで表面化（最後に置いて後勝ちで露出）。光源なし。---
+    #     重なる洪水・樹木は層を分けて別の高さに置く（コマンドで各層を独立に読み取れる）。間隔をあけて配置:
+    #       y=0 土地利用ベース（建物/道路/海/河川/橋/地表）  y=2 洪水  y=4 樹木。地形は _lift で上に退避。
+    if legend_layer:
+        WHITE = "white_stained_glass"
+
+        def _emit(layer_y, grid, full):
+            """grid(object 配列, None=置かない) を y=layer_y に敷く。full=Trueは全セル。"""
+            it = (np.argwhere(grid != None).tolist() if not full          # noqa: E711
+                  else ((j, i_) for j in range(nz) for i_ in range(nx)))
+            for j, i_ in it:
+                k = grid[j, i_]
+                if k is None:
+                    continue
+                blocks.append(nbtlib.Compound({
+                    "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(int(i_)), nbtlib.Int(int(layer_y)), nbtlib.Int(int(j))]),
+                    "state": block_id(k)}))
+
+        # y=0 土地利用ベース（全セル。洪水・樹木は含めない）
+        base = np.full((nz, nx), WHITE, dtype=object)            # 既定=地表(白)
+        if road_mask is not None and road_mask.shape == (nz, nx):
+            base[road_mask] = "black_stained_glass"
+        if water_mask is not None and water_mask.shape == (nz, nx):
+            base[water_mask & ~sea_mask] = "light_blue_stained_glass"   # 河川/池
+        base[sea_mask] = "blue_stained_glass"
+        if building_mask is not None and building_mask.shape == (nz, nx):
+            base[building_mask] = "red_stained_glass"
+        if bridges and patch_bbox_latlon is not None:
+            _bm = np.zeros((nz, nx), dtype=bool)
+            for _b in bridges:
+                _c = _b.get("coords")
+                if not _c or len(_c) < 2:
+                    continue
+                _buf = max(1.0, (float(_b.get("width_m") or 5.5) / max(h_res_block, 0.1)) / 2.0)
+                _bm |= polyline_buffer_mask_from_latlon(_c, patch_bbox_latlon, nz, nx, buffer_cells=_buf)
+            base[_bm] = "orange_stained_glass"
+        _emit(LEGEND_YS[0], base, full=True)
+
+        # 洪水（全セル: 浸水=水色 / 非浸水=白）。全敷きで地形ブロックを上書きし純粋な二値マップに
+        flood_grid = np.full((nz, nx), WHITE, dtype=object)
+        flood_grid[(idn_ds > flood_threshold) & ~sea_mask] = "light_blue_stained_glass"
+        _emit(LEGEND_YS[1], flood_grid, full=True)
+
+        # 樹木（全セル: 木=緑 / それ以外=白）
+        tree_grid = np.full((nz, nx), WHITE, dtype=object)
+        if tree_cells is not None and tree_cells.shape == (nz, nx):
+            tree_grid[tree_cells] = "green_stained_glass"
+        _emit(LEGEND_YS[2], tree_grid, full=True)
 
     return blocks, [nx, max_y + 1, nz]

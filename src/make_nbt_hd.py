@@ -146,6 +146,13 @@ def main():
                     help="建物の高さ [m]（DSM が無いとき/--no-building-heights 時の一律値）")
     ap.add_argument("--no-building-heights", action="store_true",
                     help="和歌山 LiDAR DSM(_org) からの建物実高さ推定を使わず一律高さにする")
+    ap.add_argument("--solid-buildings", dest="hollow_buildings", action="store_false",
+                    help="建物を空洞化せず中身を詰めた旧来のソリッド建物にする（既定は空洞＝"
+                         "ガラス窓・階ごとの床・内部照明・出入口つき）")
+    ap.add_argument("--legend-layer", action="store_true",
+                    help="地下に土地利用の解釈を色付きガラスで層化して埋め込む（光源なし、コマンド応用向け）。"
+                         "重なる洪水・樹木は間隔をあけて別の高さに分離（地形は上に退避）：y=0土地利用(建物=赤/"
+                         "道路=黒/海=青/河川=水色/橋=橙/地表=白), y=2洪水(浸水=水色), y=4樹木(緑)")
     ap.add_argument("--no-flood-barrier", action="store_true",
                     help="洪水計算で建物を浸水バリアにしない（従来どおり地形のみで浸水）")
     ap.add_argument("--trees", action="store_true",
@@ -427,6 +434,8 @@ def main():
         if args.use_osm: tsuffix += "_osm"
         if args.use_fgd: tsuffix += "_fgd"
         if args.surface_ortho: tsuffix += "_ortho"
+        if not args.hollow_buildings: tsuffix += "_solid"
+        if args.legend_layer: tsuffix += "_legend"
         usuffix = f"_{args.tag_suffix}" if args.tag_suffix else ""
         base_name = (f"gobo_hd_K{K}{suffix}_seed{args.seed}_{args.preset}_"
                      f"{tag}{tsuffix}{qsuffix}{usuffix}")
@@ -507,6 +516,8 @@ def main():
                 tellus_sea_level_y=args.tellus_sea_level_y,
                 bridges_json=(args.bridges_json or None),
                 evac_xml=(args.evac_xml if args.evac else None),
+                hollow_buildings=args.hollow_buildings,
+                legend_layer=args.legend_layer,
             )
 
             # 既定で Litematica (.litematic) も併せて出力（redtact / Litematica mod 用）

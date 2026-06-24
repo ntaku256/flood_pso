@@ -351,7 +351,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   tellus_world_scale: float = 1.0,
                   tellus_sea_level_y: int = 0,
                   bridges_json: str | None = None,
-                  evac_xml: str | None = None):
+                  evac_xml: str | None = None,
+                  hollow_buildings: bool = True,
+                  legend_layer: bool = False):
     """
     DEMと浸水マップの指定範囲をMinecraft NBT Structureに変換する。
 
@@ -599,6 +601,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         building_id_grid = None        # P2: 建物ごとの整数ラベル
         building_wall_keys = None      # P2: 建物 id → 壁ブロックキー
         building_roof_keys = None      # P2: 建物 id → 屋根ブロックキー(fallback)
+        building_style_keys = None     # 建物 id → スタイル(house/building/factory)
         if use_osm:
             from tellus_data import fetch_osm_buildings_roads
             osm = fetch_osm_buildings_roads(
@@ -674,6 +677,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_id_grid = bmaps["id"]
             building_wall_keys = bmaps["wall_keys"]
             building_roof_keys = bmaps["roof_keys"]
+            building_style_keys = bmaps.get("style_keys")
             _bh_in = building_height_block[np.isfinite(building_height_block)]
             _med = float(np.median(_bh_in)) if _bh_in.size else 0.0
             _src = "plateau/osm" if building_list is not None else "fgd"
@@ -748,6 +752,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_id=building_id_grid,
             building_wall_keys=building_wall_keys,
             building_roof_keys=building_roof_keys,
+            building_style_keys=building_style_keys,
+            hollow_buildings=hollow_buildings,
+            legend_layer=legend_layer,
             color_building_roofs=surface_ortho,
             surface_grid_override=surface_override,
             bridges=bridges_render,
