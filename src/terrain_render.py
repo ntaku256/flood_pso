@@ -849,9 +849,10 @@ def dem_to_blocks_enhanced(
     scale_land = v_exag_land / v_res_land
     scale_sea  = v_exag_sea  / v_res_land
 
-    # 凡例3層(地下データ層)を有効化すると、底に凡例用の空間を空けるため世界全体を _lift 持ち上げる。
+    # 世界全体を _lift 持ち上げ、最下段(y=_lift-1)に土台層を敷く（砂/砂利がブロック更新で落ちないよう支える）。
+    # 凡例3層(地下データ層)有効時はさらに底に凡例用の空間も空ける。
     LEGEND_YS = (0, 2, 4)        # 地下データ層の高さ: y=0 土地利用 / y=2 洪水 / y=4 樹木（間隔をあけて）
-    _lift = (LEGEND_YS[-1] + 2) if legend_layer else 0   # 地形/構造物の最低 y（凡例の上に空気1段）
+    _lift = (LEGEND_YS[-1] + 2) if legend_layer else 1   # 地形/構造物の最低 y。y=_lift-1 が土台層
 
     # 陸地表 y（最低 1）。凡例有効時は _lift 持ち上げ
     elev_land = np.where(np.isnan(dem_ds), 0.0, dem_ds)
@@ -1099,11 +1100,9 @@ def dem_to_blocks_enhanced(
                 wall_kind = building_wall_keys[bid_c]             # type 別の壁
             else:
                 wall_kind = wall_block
-            # 屋根に砂利/砂が来ると重力で落ちるので落ちない石に置換（軒も同じ roof_kind）
-            if roof_kind == "gravel":
-                roof_kind = "andesite"
-            elif roof_kind == "sand":
-                roof_kind = "sandstone"
+            # 屋根/軒に重力ブロック(砂利/砂/赤砂)が来ると落ちるので、非重力の同系色へ置換
+            roof_kind = {"gravel": "andesite", "sand": "sandstone",
+                         "red_sand": "orange_terracotta"}.get(roof_kind, roof_kind)
             style = (building_style_keys[bid_c]
                      if (building_style_keys is not None and 0 <= bid_c < len(building_style_keys))
                      else "house")
@@ -1292,6 +1291,17 @@ def dem_to_blocks_enhanced(
                     "state": block_id("sea_lantern"),
                 }))
             max_y = max(max_y, y0 + EVAC_H + 2)
+
+    # --- 土台層: 全セルの y=_lift-1 に1段（海底の砂/砂利等がブロック更新で落ちないよう下から支える）---
+    #     deepslate（割れる）なので、これより下の凡例層は掘って到達できる。
+    _found_y = _lift - 1
+    if _found_y >= 0:
+        for j in range(nz):
+            for i_ in range(nx):
+                blocks.append(nbtlib.Compound({
+                    "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(int(i_)), nbtlib.Int(int(_found_y)), nbtlib.Int(int(j))]),
+                    "state": block_id("deepslate"),
+                }))
 
     # --- 地下データ層: 土地利用の解釈を色付きガラスで表面化（最後に置いて後勝ちで露出）。光源なし。---
     #     重なる洪水・樹木は層を分けて別の高さに置く（コマンドで各層を独立に読み取れる）。間隔をあけて配置:
