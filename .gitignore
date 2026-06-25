@@ -29,3 +29,7 @@ data_cache/
 
 # nbt_preview.py のパース結果キャッシュ（npz, 再生成可能）
 results/nbt_preview/.cache/
+
+# 生成済み世界バイナリ（NBT/litematic, 再生成可能・大容量）
+results/nbt/hd/
+results/nbt/tellus_preview/
