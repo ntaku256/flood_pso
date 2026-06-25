@@ -69,7 +69,8 @@ def load_wakayama_dem(grd_path: str, res_m: float = 1.0,
                       cache: bool = True, fill_gaps: bool = True,
                       verbose: bool = True,
                       exclude_classes: tuple | None = None,
-                      keep_classes: tuple | None = None) -> dict:
+                      keep_classes: tuple | None = None,
+                      postprocess: bool | None = None) -> dict:
     """
     和歌山県点群（グラウンド推奨）を res_m[m] の緯度経度グリッド DEM にして
     dem_parser 互換 dict を返す。
@@ -79,14 +80,23 @@ def load_wakayama_dem(grd_path: str, res_m: float = 1.0,
     exclude_classes : org（DSM, 5列）でこの LiDAR 分類コードの点を除外してからグリッド化。
       例 (3,) で植生（低木）を除いた「地面＋建物」DSM になり、建物高さの樹木混入を防ぐ。
       grd（地形, 4列）には class 列が無いので指定しないこと。除外版は別キャッシュに保存。
+
+    postprocess : True で DEM 後処理（外れ値除去→スパイク修復→反復平均 NaN 補間,
+      dem_postprocess.postprocess_dem）を適用。従来の _fill_nan_nearest（最近傍コピー）
+      を置き換え、方向性アーティファクトを解消する。None なら環境変数
+      FLOOD_PSO_DEM_POSTPROCESS（既定 on）に従う。後処理の有無で別キャッシュ（_pp 付き）。
     """
     # grd_path はカンマ区切りで複数図郭を mosaic 可（範囲がタイル境界を跨ぐとき）
     paths = [p.strip() for p in str(grd_path).split(",") if p.strip()]
     multi = len(paths) > 1
+    from dem_postprocess import postprocess_enabled, postprocess_dem
+    if postprocess is None:
+        postprocess = postprocess_enabled()
     exc = tuple(sorted(set(int(c) for c in exclude_classes))) if exclude_classes else ()
     kep = tuple(sorted(set(int(c) for c in keep_classes))) if keep_classes else ()
     tag = ("_exc" + "".join(str(c) for c in exc)) if exc else ""
     tag += ("_keep" + "".join(str(c) for c in kep)) if kep else ""
+    tag += "_pp" if postprocess else ""  # 後処理版は別キャッシュ
     if multi:
         stems = "+".join(sorted(Path(p).stem for p in paths))
         cache_path = Path(paths[0]).parent / f"{stems}.grid{res_m:g}m{tag}.npz"
@@ -147,7 +157,10 @@ def load_wakayama_dem(grd_path: str, res_m: float = 1.0,
     dem[cnt.reshape(H, W) == 0] = np.nan
 
     n_gap = int(np.isnan(dem).sum())
-    if fill_gaps:
+    if postprocess:
+        # arnis postprocess.rs 移植: 外れ値除去→スパイク修復→反復平均 NaN 補間
+        dem = postprocess_dem(dem, verbose=verbose)
+    elif fill_gaps:
         dem = _fill_nan_nearest(dem)
 
     if verbose:

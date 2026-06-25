@@ -75,9 +75,14 @@ def parse_tile(xml_path: str) -> dict:
     }
 
 
-def mosaic_tiles(dem_dir: str, pattern: str = "*.xml") -> dict:
+def mosaic_tiles(dem_dir: str, pattern: str = "*.xml",
+                 postprocess: bool | None = None) -> dict:
     """
     指定ディレクトリ内の全DEM GMLタイルをモザイク合成する。
+
+    postprocess: True で DEM 後処理（外れ値除去→継ぎ目スパイク修復→NaN 補間,
+      dem_postprocess.postprocess_dem）を適用してから返す。None なら環境変数
+      FLOOD_PSO_DEM_POSTPROCESS（既定 on）に従う。0/false で無効化。
     Returns:
         {
           'dem': np.ndarray shape (H, W) 標高[m]
@@ -124,6 +129,15 @@ def mosaic_tiles(dem_dir: str, pattern: str = "*.xml") -> dict:
 
     print(f"Mosaic shape: {mosaic.shape}, lat [{glob_lat_min:.5f}, {glob_lat_max:.5f}], lon [{glob_lon_min:.5f}, {glob_lon_max:.5f}]")
     print(f"Valid cells: {np.sum(~np.isnan(mosaic))}/{mosaic.size}")
+
+    # DEM 後処理（arnis postprocess.rs 移植）: 継ぎ目スパイク修復→内部 NaN 補間。
+    # fill_skip_border=True で海/データ外（縁連結の大域 NaN）は埋めず残す（下流の
+    # 海陸分離を保つ）。外れ値除去(IQR)は山頂を削るため既定 off（postprocess_dem 参照）。
+    from dem_postprocess import postprocess_enabled, postprocess_dem
+    if postprocess is None:
+        postprocess = postprocess_enabled()
+    if postprocess:
+        mosaic = postprocess_dem(mosaic, fill_skip_border=True, verbose=True)
 
     return {
         "dem": mosaic,
