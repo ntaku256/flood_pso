@@ -28,6 +28,38 @@ _ANCHOR_KEYS = np.array(MATCH_KEYS, dtype=object)
 _ANCHOR_RGB = np.array([_key_rgb(k) for k in MATCH_KEYS], dtype=np.float32)  # (M,3)
 
 
+# --- Oklab 知覚色空間（arnis src/colors.rs:114-152 移植） ---
+# sRGB→linear→LMS→Oklab。RGB ユークリッドより人間の知覚距離に一致するので、
+# 「道路の灰／畑の緑」がスペクトル的に遠いブロックへ飛ぶ誤マッチを抑える。
+_OKLAB_M1 = np.array([
+    [0.4122214708, 0.5363325363, 0.0514459929],
+    [0.2119034982, 0.6806995451, 0.1073969566],
+    [0.0883024619, 0.2817188376, 0.6299787005],
+], dtype=np.float32)
+_OKLAB_M2 = np.array([
+    [0.2104542553,  0.7936177850, -0.0040720468],
+    [1.9779984951, -2.4285922050,  0.4505937099],
+    [0.0259040371,  0.7827717662, -0.8086757660],
+], dtype=np.float32)
+
+
+def _srgb_to_linear(c: np.ndarray) -> np.ndarray:
+    """sRGB 0..255 → linear 0..1（arnis srgb_to_linear）。"""
+    c = c.astype(np.float32) / 255.0
+    return np.where(c <= 0.04045, c / 12.92,
+                    np.power((c + 0.055) / 1.055, 2.4)).astype(np.float32)
+
+
+def rgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
+    """(..., 3) sRGB(0..255) → (..., 3) Oklab（arnis rgb_to_oklab のベクトル化）。"""
+    lin = _srgb_to_linear(np.asarray(rgb))
+    lms = np.cbrt(lin @ _OKLAB_M1.T)
+    return (lms @ _OKLAB_M2.T).astype(np.float32)
+
+
+_ANCHOR_OKLAB = rgb_to_oklab(_ANCHOR_RGB)  # (M,3) アンカーの Oklab（起動時前計算）
+
+
 def enhance_rgb(rgb: np.ndarray, *, saturation: float = 1.35,
                 low_pct: float = 2.0, high_pct: float = 98.0,
                 scale_cap: float = 1.5) -> np.ndarray:
@@ -65,17 +97,19 @@ def classify_rgb_to_palette(rgb: np.ndarray) -> np.ndarray:
     """
     rgb: (H, W, 3) uint8 → object 配列 (H, W) のパレットキー。
 
-    ~80 単色バニラブロックへの**最近傍カラーマッチ**（RGB ユークリッド）。
+    ~80 単色バニラブロックへの**最近傍カラーマッチ**（Oklab 知覚距離, arnis 移植）。
     写真の色をそのままブロックへ写像するので、地表が写真モザイクになる。
     水/氷は洪水・海レイヤが別途生成するためアンカーから除外している。
+    RGB ユークリッドより知覚一致が高く、道路/畑の微妙な色の取り違えを抑える。
+    アンカーをまたぐ (P×M) 行列は作らず、アンカー毎ループで省メモリ。
     """
     h, w, _ = rgb.shape
-    px = rgb.reshape(-1, 3).astype(np.float32)         # (P,3)
-    best = np.full(px.shape[0], np.inf, dtype=np.float32)
-    idx = np.zeros(px.shape[0], dtype=np.int32)
-    for j in range(_ANCHOR_RGB.shape[0]):
-        a = _ANCHOR_RGB[j]
-        d = (px[:, 0] - a[0]) ** 2 + (px[:, 1] - a[1]) ** 2 + (px[:, 2] - a[2]) ** 2
+    lab = rgb_to_oklab(rgb.reshape(-1, 3))             # (P,3) Oklab
+    best = np.full(lab.shape[0], np.inf, dtype=np.float32)
+    idx = np.zeros(lab.shape[0], dtype=np.int32)
+    for j in range(_ANCHOR_OKLAB.shape[0]):
+        a = _ANCHOR_OKLAB[j]
+        d = (lab[:, 0] - a[0]) ** 2 + (lab[:, 1] - a[1]) ** 2 + (lab[:, 2] - a[2]) ** 2
         m = d < best
         best[m] = d[m]
         idx[m] = j

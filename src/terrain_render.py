@@ -95,12 +95,22 @@ def cliff_aware_smooth(
 # 海岸線・海域
 # ─────────────────────────────────────────────────────────────
 
-def make_sea_mask(dem: np.ndarray, sea_level_m: float = 0.0) -> np.ndarray:
+def make_sea_mask(dem: np.ndarray, sea_level_m: float = 0.0,
+                  smooth_sigma: float = 0.0) -> np.ndarray:
     """
     海域マスク：NaN（NoData）または `dem <= sea_level_m` のセル。
     `Tellus.OceanClassification.isOcean` の簡易版（land mask が無いので NaN を ocean hint として扱う）。
+
+    smooth_sigma>0 で、二値マスクを σ ガウシアンで平滑化し 0.5 アイソラインで再二値化
+    （arnis land_cover.rs:104 compute_water_blend_smooth 移植）。海岸線の 1 セルの
+    ギザギザ（角張り）を曲線化する。σ は小さめ推奨（1.0〜1.5）。大きいと小島/入り江が消える。
     """
-    return np.isnan(dem) | (np.where(np.isnan(dem), 0.0, dem) <= sea_level_m)
+    raw = np.isnan(dem) | (np.where(np.isnan(dem), 0.0, dem) <= sea_level_m)
+    if smooth_sigma and smooth_sigma > 0.0:
+        from scipy.ndimage import gaussian_filter
+        blurred = gaussian_filter(raw.astype(np.float32), sigma=float(smooth_sigma))
+        return blurred >= 0.5
+    return raw
 
 
 def distance_to_shore(land_mask: np.ndarray, h_res_m: float) -> np.ndarray:
@@ -732,6 +742,7 @@ def dem_to_blocks_enhanced(
     v_exag_sea:  float = 0.5,
     sea_level_m: float = 0.0,
     ocean_max_depth_m: float = 8.0,
+    sea_smooth_sigma: float = 1.0,
     smooth_sigma_cells: float = 1.0,
     cliff_threshold_m_per_m: float = 0.4,
     deep_ground: int = 8,
@@ -774,7 +785,10 @@ def dem_to_blocks_enhanced(
       2. ダウンサンプル後に **海/陸を sea_level で分離**
       3. 海セルは **海岸からの距離で段階的水深**、海底に砂/砂利
       4. 地表ブロックは **slope/convexity/海岸距離** で sand/gravel/stone/grass を判定
-      5. 地盤柱は `deep_ground` ブロック（既定 8、従来 3）
+      5. 地盤柱は **可変アンダーフィル**（arnis 移植）：8近傍の最低地表 Y まで
+         stone で埋め、深さは `deep_ground` を上限にクランプ。平地は 2 ブロックで
+         済みブロック数が激減し、崖面は隣接セルの底まで埋めて見える穴を塞ぐ。
+         （従来は全セル一律 `deep_ground` 本＝地下 stone を無駄に増やしていた）
 
     Returns: (blocks_list, [nx, max_y+1, nz])
     """
@@ -824,7 +838,7 @@ def dem_to_blocks_enhanced(
             tree_ds = np.nanmean(tp, axis=(1, 3))
 
     # ─── 3) 海/陸マスク + 地形特徴量（ダウンサンプル後の解像度で計算） ───
-    sea_mask  = make_sea_mask(dem_ds, sea_level_m)
+    sea_mask  = make_sea_mask(dem_ds, sea_level_m, smooth_sigma=sea_smooth_sigma)
     land_mask = ~sea_mask
 
     h_res_block_m = h_res_block
@@ -960,13 +974,22 @@ def dem_to_blocks_enhanced(
                 "state": block_id("water"),
             }))
 
-    # --- 陸セル：deep_ground ブロックの stone 地盤柱 + 地表 ---
+    # --- 陸セル：可変アンダーフィル(arnis ground_generation.rs:716-758 移植) + 地表 ---
+    # 固定 deep_ground 本ではなく、8近傍の最低地表 Y までを stone で埋める。平地は
+    # neigh_min≈y_top → 2 ブロックで済みブロック数が激減し、崖面は隣接セルの底まで
+    # 埋めて見える穴を塞ぐ。深さは [2, deep_ground] にクランプ（従来より常に少ない）。
+    from scipy.ndimage import minimum_filter as _min_filter
+    _yfm = np.where(land_mask, y_surf_land.astype(np.float32), np.float32(1e9))
+    _neigh_min = _min_filter(_yfm, size=3, mode="nearest")
+    _under_depth = np.clip(
+        y_surf_land.astype(np.int32) - _neigh_min.astype(np.int32) + 1,
+        2, int(max(2, deep_ground))).astype(np.int32)
     land_idx = np.argwhere(land_mask)
     for j, i_ in land_idx.tolist():
         bx_v = int(BX[j, i_]); bz_v = int(BZ[j, i_])
         y_top = int(y_surf_land[j, i_])
-        # 地盤柱（凡例層より下には伸ばさない＝_lift で下限）
-        for dy in range(max(_lift, y_top - deep_ground), y_top):
+        # 地盤柱（凡例層より下には伸ばさない＝_lift で下限。深さは近傍最低Yまで可変）
+        for dy in range(max(_lift, y_top - int(_under_depth[j, i_])), y_top):
             blocks.append(nbtlib.Compound({
                 "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(dy), nbtlib.Int(bz_v)]),
                 "state": block_id("stone"),
