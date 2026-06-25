@@ -91,7 +91,10 @@ def load_wakayama_dem(grd_path: str, res_m: float = 1.0,
     multi = len(paths) > 1
     from dem_postprocess import postprocess_enabled, postprocess_dem
     if postprocess is None:
-        postprocess = postprocess_enabled()
+        # クラスフィルタ付き（建物高さ DSM=exclude / 樹冠=keep）は、建物/樹冠の
+        # 鋭い高さ特徴こそ測定対象なので MAD 異常修復で削らないよう既定 off。
+        # 地形（grd, フィルタ無し）のみ既定 on。明示指定があればそれを優先。
+        postprocess = postprocess_enabled() and not (exclude_classes or keep_classes)
     exc = tuple(sorted(set(int(c) for c in exclude_classes))) if exclude_classes else ()
     kep = tuple(sorted(set(int(c) for c in keep_classes))) if keep_classes else ()
     tag = ("_exc" + "".join(str(c) for c in exc)) if exc else ""
