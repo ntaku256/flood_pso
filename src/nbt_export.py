@@ -274,42 +274,109 @@ def build_meta_compound(meta: dict) -> nbtlib.Compound:
     return nbtlib.Compound(out)
 
 
-def write_nbt_structure(blocks: list, size: list, out_path: str,
-                        meta: dict | None = None):
+def _finalize_meta(meta: dict | None):
+    """flood_pso_meta 用の最終 dict を nbtlib.Compound 化（両書き出し経路で共有）。"""
+    if meta is None:
+        return None
+    full_meta = dict(meta)
+    full_meta.setdefault("schema_version", 1)
+    full_meta.setdefault("generator", "flood_pso/nbt_export.py")
+    full_meta.setdefault("timestamp_utc",
+                         _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z")
+    full_meta.setdefault("git_revision", _git_revision())
+    return build_meta_compound(full_meta)
+
+
+# 1 ボクセル = Compound{pos:List<Int>[x,y,z], state:Int} の NBT ペイロード(固定36byte)。
+# 可変部は x(11..15) y(15..19) z(19..23) state(31..35) の big-endian int32 のみ。
+_VOXEL_TMPL = (b"\x09\x00\x03pos\x03\x00\x00\x00\x03" + b"\x00" * 12
+               + b"\x03\x00\x05state" + b"\x00" * 4 + b"\x00")
+assert len(_VOXEL_TMPL) == 36
+
+
+def _write_nbt_dense(arr: np.ndarray, size: list, out_path,
+                     meta_compound=None) -> int:
+    """密3D配列 ``arr[y,z,x]``（uint16, 0=air, 値=palette index）を Structure NBT へ
+    **ストリーミング書き出し**する（施策③）。
+
+    非air ボクセルを numpy でベクトル encode し gzip ストリームへ直書きするため、
+    中間 nbtlib.Compound 群を一切作らず、メモリは密配列＋数百MBのバッファに収まる
+    （docs/06 の 8-12GB 問題の根治）。出力は標準 NBT バイナリで、既存の nbtlib／
+    nbt_preview._parse_fast の双方で読め、従来 write_nbt_structure と等価。
+    返り値: 書き込んだ非air ブロック数。
     """
-    Minecraft Structure NBT 形式でファイルを書き出す。
-    Minecraft 1.17+ の Structure Block 形式。
-
-    meta が与えられたら ``flood_pso_meta`` キーとして埋め込む（任意のkey-value辞書）。
-    """
-    palette_list = nbtlib.List[nbtlib.Compound]([PALETTE[k] for k in PALETTE_LIST_KEYS])
-    blocks_list  = nbtlib.List[nbtlib.Compound](blocks)
-    size_list    = nbtlib.List[nbtlib.Int]([nbtlib.Int(s) for s in size])
-
-    root = {
-        "DataVersion": nbtlib.Int(4671),   # Minecraft 1.21.4相当
-        "author":      nbtlib.String("flood_pso"),
-        "size":        size_list,
-        "palette":     palette_list,
-        "blocks":      blocks_list,
-        "entities":    nbtlib.List[nbtlib.Compound]([]),
-    }
-
-    if meta is not None:
-        full_meta = dict(meta)
-        full_meta.setdefault("schema_version", 1)
-        full_meta.setdefault("generator", "flood_pso/nbt_export.py")
-        full_meta.setdefault("timestamp_utc",
-                             _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z")
-        full_meta.setdefault("git_revision", _git_revision())
-        root["flood_pso_meta"] = build_meta_compound(full_meta)
-
-    nbt_file = nbtlib.File(nbtlib.Compound(root))
+    ys, zs, xs = np.nonzero(arr)            # air(=0) を除く非air(Y,Z,X 昇順)
+    states = arr[ys, zs, xs]
+    n = int(xs.shape[0])
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    nbt_file.save(str(out_path), gzipped=True)
+
+    def _named(tag_id: int, name: bytes) -> bytes:
+        return bytes([tag_id]) + struct.pack(">H", len(name)) + name
+
+    rec = np.frombuffer(_VOXEL_TMPL, dtype=np.uint8)
+    with gzip.open(str(out_path), "wb") as f:
+        f.write(b"\x0a\x00\x00")                                   # root TAG_Compound, name ""
+        f.write(_named(3, b"DataVersion") + struct.pack(">i", 4671))
+        au = b"flood_pso"
+        f.write(_named(8, b"author") + struct.pack(">H", len(au)) + au)
+        f.write(_named(9, b"size") + b"\x03" + struct.pack(">i", 3)
+                + struct.pack(">iii", int(size[0]), int(size[1]), int(size[2])))
+        f.write(_named(9, b"palette") + b"\x0a" + struct.pack(">i", len(PALETTE_LIST_KEYS)))
+        for k in PALETTE_LIST_KEYS:
+            PALETTE[k].write(f)                                    # compound payload+end
+        f.write(_named(9, b"blocks") + b"\x0a" + struct.pack(">i", n))
+        CH = 2_000_000
+        for s0 in range(0, n, CH):
+            s1 = min(n, s0 + CH); m = s1 - s0
+            buf = np.broadcast_to(rec, (m, 36)).copy()
+            buf[:, 11:15] = xs[s0:s1].astype(">i4").view(np.uint8).reshape(-1, 4)
+            buf[:, 15:19] = ys[s0:s1].astype(">i4").view(np.uint8).reshape(-1, 4)
+            buf[:, 19:23] = zs[s0:s1].astype(">i4").view(np.uint8).reshape(-1, 4)
+            buf[:, 31:35] = states[s0:s1].astype(">i4").view(np.uint8).reshape(-1, 4)
+            f.write(buf.tobytes())
+        f.write(_named(9, b"entities") + b"\x0a" + struct.pack(">i", 0))   # 空 List<Compound>
+        if meta_compound is not None:
+            f.write(_named(10, b"flood_pso_meta"))
+            meta_compound.write(f)
+        f.write(b"\x00")                                           # root TAG_End
+    return n
+
+
+def write_nbt_structure(blocks, size: list, out_path: str,
+                        meta: dict | None = None):
+    """
+    Minecraft Structure NBT 形式（1.17+ Structure Block）でファイルを書き出す。
+
+    blocks が **np.ndarray**（密3D配列 ``arr[y,z,x]``, 0=air）なら _write_nbt_dense で
+    ストリーミング省メモリ書き出し（施策③）。**list[Compound]**（legacy）なら従来の
+    nbtlib 直列化。meta が与えられたら ``flood_pso_meta`` を埋め込む。
+    """
+    meta_compound = _finalize_meta(meta)
+    out_path = Path(out_path)
+
+    if isinstance(blocks, np.ndarray):
+        n = _write_nbt_dense(blocks, size, out_path, meta_compound)
+    else:
+        palette_list = nbtlib.List[nbtlib.Compound]([PALETTE[k] for k in PALETTE_LIST_KEYS])
+        blocks_list  = nbtlib.List[nbtlib.Compound](blocks)
+        size_list    = nbtlib.List[nbtlib.Int]([nbtlib.Int(s) for s in size])
+        root = {
+            "DataVersion": nbtlib.Int(4671),   # Minecraft 1.21.4相当
+            "author":      nbtlib.String("flood_pso"),
+            "size":        size_list,
+            "palette":     palette_list,
+            "blocks":      blocks_list,
+            "entities":    nbtlib.List[nbtlib.Compound]([]),
+        }
+        if meta_compound is not None:
+            root["flood_pso_meta"] = meta_compound
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        nbtlib.File(nbtlib.Compound(root)).save(str(out_path), gzipped=True)
+        n = len(blocks)
+
     size_mb = out_path.stat().st_size / 1e6
-    print(f"Saved: {out_path} ({size_mb:.1f} MB, {len(blocks):,} blocks)"
+    print(f"Saved: {out_path} ({size_mb:.1f} MB, {n:,} blocks)"
           + (" [+meta]" if meta is not None else ""))
 
 
@@ -770,7 +837,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                                       v_res=v_res, v_exag=v_exag)
     else:
         raise ValueError(f"unknown terrain_quality: {terrain_quality} (use 'enhanced' or 'legacy')")
-    print(f"Structure size: {size[0]} x {size[1]} x {size[2]} blocks ({len(blocks):,} block entries)")
+    n_entries = int(np.count_nonzero(blocks)) if isinstance(blocks, np.ndarray) else len(blocks)
+    print(f"Structure size: {size[0]} x {size[1]} x {size[2]} blocks ({n_entries:,} block entries)")
 
     # メタデータに描画範囲・解像度情報を補足
     full_meta = None
@@ -784,7 +852,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         full_meta.setdefault("v_res_m_per_block", float(v_res))
         full_meta.setdefault("v_exag", float(v_exag))
         full_meta.setdefault("structure_size_xyz", [int(size[0]), int(size[1]), int(size[2])])
-        full_meta.setdefault("n_block_entries", int(len(blocks)))
+        full_meta.setdefault("n_block_entries", int(n_entries))
         full_meta.setdefault("terrain_quality", str(terrain_quality))
         full_meta.setdefault("terrain_source", str(terrain_source))
         if terrain_source == "mapzen":

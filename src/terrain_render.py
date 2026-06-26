@@ -30,6 +30,40 @@ import nbtlib
 from nbt_export import block_id
 
 
+class _DenseBlockSink:
+    """`blocks.append(Compound)` インターフェースを保ったまま、各 Compound の
+    pos/state を密3D配列 ``arr[y,z,x]``（uint16, 0=air, 値=palette index）へ書き込む
+    シム（施策③: {pos,state}個別Compound列挙 → 密numpy配列）。
+
+    16 箇所の append サイトを**無改変**で密配列化できる。座標は既存 Compound から
+    取り出すので x↔z 取り違えが原理的に起きず、重なりは後勝ち（代入の上書き）で
+    自然に再現される。Compound は append のたびに即捨てされ保持しないため、
+    数千万ボクセルでもメモリは密配列分に収まる（8-12GB 問題の根治）。
+    範囲外/上限超の書き込みは捨てる（litematic の valid フィルタと等価な境界クランプ）。
+    """
+    __slots__ = ("nx", "nz", "arr", "max_y")
+
+    def __init__(self, nx: int, nz: int, y_cap: int = 501):
+        self.nx = int(nx)
+        self.nz = int(nz)
+        self.arr = np.zeros((int(y_cap), int(nz), int(nx)), dtype=np.uint16)
+        self.max_y = 0
+
+    def append(self, compound) -> None:
+        p = compound["pos"]
+        x = int(p[0]); y = int(p[1]); z = int(p[2])
+        if 0 <= x < self.nx and 0 <= z < self.nz and 0 <= y < self.arr.shape[0]:
+            self.arr[y, z, x] = int(compound["state"])
+            if y > self.max_y:
+                self.max_y = y
+
+    def array(self, height: int) -> np.ndarray:
+        """size の Y（=max_y+1）まで切り詰めた密配列 (Y,Z,X) を返す。copy を返すので
+        呼び出し後に y_cap 分の大きい内部バッファは解放できる（書き出し時メモリ削減）。"""
+        h = max(1, min(int(height), self.arr.shape[0]))
+        return self.arr[:h].copy()
+
+
 # ─────────────────────────────────────────────────────────────
 # DEM 由来の地形特徴量
 # ─────────────────────────────────────────────────────────────
@@ -939,9 +973,9 @@ def dem_to_blocks_enhanced(
     max_elev_y = (int(valid_elevs.max() * scale_land) if len(valid_elevs) > 0 else 1) + _lift
     max_y = min(max(max_elev_y + 5, y_sea_surface + 2), 500)
 
-    # ─── 6) ブロック生成（numpy ベクトルで append） ───
+    # ─── 6) ブロック生成（施策③: append を密配列シムへ。後勝ちは上書きで自然再現） ───
     BZ, BX = np.meshgrid(np.arange(nz), np.arange(nx), indexing="ij")
-    blocks: list = []
+    blocks = _DenseBlockSink(nx, nz, y_cap=501)
 
     # --- 海セル：海底 stone/sand 柱 + 水柱 ---
     sea_idx = np.argwhere(sea_mask)
@@ -1375,4 +1409,4 @@ def dem_to_blocks_enhanced(
             tree_grid[tree_cells] = "green_stained_glass"
         _emit(LEGEND_YS[2], tree_grid, full=True)
 
-    return blocks, [nx, max_y + 1, nz]
+    return blocks.array(max_y + 1), [nx, max_y + 1, nz]
