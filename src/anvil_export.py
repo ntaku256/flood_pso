@@ -191,6 +191,39 @@ def _open_region(path: Path) -> R.RegionFile:
 # level.dat（最小・void フラットで MC が地形を上書きしないように）
 # ─────────────────────────────────────────────────────────────
 
+def _clone_level_from_template(template: Path, out_path: Path, level_name: str, spawn_xyz):
+    """既存の正規ワールドの level.dat を雛形にして LevelName/spawn を差し替え、Player を除去。
+    実機が作った level.dat（Version/DataPacks/game_rules 等が全て揃う）を流用するので、
+    『サポートされていないバージョン』警告が出ない。雛形の generator(地表生成)は維持。"""
+    lv = N.NBTFile(str(template))
+    D = lv["Data"]
+    # LevelName
+    if "LevelName" in D:
+        D["LevelName"].value = level_name
+    else:
+        D.tags.append(_named(N.TAG_String(level_name), "LevelName"))
+    sx, sy, sz = (int(spawn_xyz[0]), int(spawn_xyz[1]), int(spawn_xyz[2]))
+    # 1.21 系: Data.spawn{pos:[x,y,z], dimension,...}
+    if "spawn" in D:
+        pos = D["spawn"]["pos"]
+        try:
+            if hasattr(pos, "tags") and len(pos.tags) >= 3:        # TAG_List
+                pos[0].value, pos[1].value, pos[2].value = sx, sy, sz
+            else:                                                  # TAG_Int_Array 等
+                pos.value = [sx, sy, sz]
+        except Exception:
+            pass
+    # 旧式 SpawnX/Y/Z も併記（読む実装向け）
+    for nm, v in (("SpawnX", sx), ("SpawnY", sy), ("SpawnZ", sz)):
+        if nm in D:
+            D[nm].value = v
+        else:
+            D.tags.append(_named(N.TAG_Int(v), nm))
+    # Player を除去（実機が新規プレイヤーを world spawn に作る＝生成地形にスポーン）
+    D.tags = [t for t in D.tags if t.name != "Player"]
+    lv.write_file(str(out_path))
+
+
 def _write_level_dat(path: Path, level_name: str, spawn_xyz, data_version: int):
     root = N.NBTFile()
     root.name = ""
@@ -243,6 +276,7 @@ def write_anvil_world(dense: np.ndarray, size, out_dir: str | Path, *,
                       level_name: str = "flood_pso",
                       data_version: int = DATA_VERSION,
                       write_level: bool = True,
+                      level_template: str | None = None,
                       verbose: bool = True) -> dict:
     """密ブロック配列を Anvil world として out_dir/ に書き出す。
 
@@ -307,8 +341,15 @@ def write_anvil_world(dense: np.ndarray, size, out_dir: str | Path, *,
             pass
 
     if write_level:
-        spawn = (x_offset + nx // 2, int(ny + 2), z_offset + nz // 2)
-        _write_level_dat(out_dir / "level.dat", level_name, spawn, data_version)
+        spawn = (x_offset + nx // 2, int(ny + 8), z_offset + nz // 2)
+        if level_template and Path(level_template).exists():
+            _clone_level_from_template(Path(level_template), out_dir / "level.dat",
+                                       level_name, spawn)
+            if verbose:
+                print(f"  [anvil] level.dat は雛形 {Path(level_template).name} から複製"
+                      f"（バージョン警告回避, spawn={spawn}）")
+        else:
+            _write_level_dat(out_dir / "level.dat", level_name, spawn, data_version)
 
     if verbose:
         print(f"[anvil] world '{out_dir.name}': +{n_chunks} chunks / {len(regions)} regions  "

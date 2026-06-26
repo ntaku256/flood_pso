@@ -146,6 +146,10 @@ def main():
                     help="施策⑤: native Anvil world(.mca)も出力するワールドディレクトリ。"
                          "整列タイル(--tiles, gsi/wakayama)は全タイルを1ワールドへ実座標で配置・"
                          "境界はmergeで密着。Tellus非依存で歩けるワールドになる（要 NBT パッケージ）。")
+    ap.add_argument("--anvil-level-template", type=str, default=None,
+                    help="施策⑤: level.dat の雛形にする既存の正規ワールドの level.dat。"
+                         "実機が作った世界を流用し LevelName/spawn だけ差し替えるので、MC で"
+                         "『サポートされていないバージョン』警告が出ない。未指定なら自前生成。")
     ap.add_argument("--building-height", type=float, default=6.0,
                     help="建物の高さ [m]（DSM が無いとき/--no-building-heights 時の一律値）")
     ap.add_argument("--no-building-heights", action="store_true",
@@ -606,6 +610,7 @@ def main():
                 anvil_offset=anvil_off,
                 anvil_merge=anvil_merge,
                 anvil_level_name=anvil_lname,
+                anvil_level_template=args.anvil_level_template,
             )
 
             # 既定で Litematica (.litematic) も併せて出力（redtact / Litematica mod 用）
