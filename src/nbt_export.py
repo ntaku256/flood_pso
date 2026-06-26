@@ -420,7 +420,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   bridges_json: str | None = None,
                   evac_xml: str | None = None,
                   hollow_buildings: bool = True,
-                  legend_layer: bool = False):
+                  legend_layer: bool = False,
+                  tile_crop: tuple | None = None):
     """
     DEMと浸水マップの指定範囲をMinecraft NBT Structureに変換する。
 
@@ -607,18 +608,25 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             float(dem_info_render["lon_max"]),
         )
     else:
-        # 中心ピクセル
-        row_c = round((lat_max - lat_center) / res_lat)
-        col_c = round((lon_center - lon_min) / res_lon)
+        if tile_crop is not None:
+            # 施策④: 呼び出し側(make_nbt_hd)が全域を整数でタイル分割した DEMセル範囲を
+            # そのまま使う（タイル毎の独立丸めを排し、隣接タイルが境界セルを共有して密着）。
+            tr0, tr1, tc0, tc1 = tile_crop
+            r0 = max(0, int(tr0)); r1 = min(dem.shape[0], int(tr1))
+            c0 = max(0, int(tc0)); c1 = min(dem.shape[1], int(tc1))
+        else:
+            # 中心ピクセル
+            row_c = round((lat_max - lat_center) / res_lat)
+            col_c = round((lon_center - lon_min) / res_lon)
 
-        # エリアを DEMセル数で計算
-        half_rows = int((depth_m / 2) * lat_per_m / res_lat)
-        half_cols = int((width_m / 2) * lon_per_m / res_lon)
+            # エリアを DEMセル数で計算
+            half_rows = int((depth_m / 2) * lat_per_m / res_lat)
+            half_cols = int((width_m / 2) * lon_per_m / res_lon)
 
-        r0 = max(0, row_c - half_rows)
-        r1 = min(dem.shape[0], row_c + half_rows)
-        c0 = max(0, col_c - half_cols)
-        c1 = min(dem.shape[1], col_c + half_cols)
+            r0 = max(0, row_c - half_rows)
+            r1 = min(dem.shape[0], row_c + half_rows)
+            c0 = max(0, col_c - half_cols)
+            c1 = min(dem.shape[1], col_c + half_cols)
 
         dem_patch = dem[r0:r1, c0:c1]
         idn_patch = inundation_render[r0:r1, c0:c1]

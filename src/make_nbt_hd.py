@@ -329,7 +329,7 @@ def main():
             print(f"  [osm-bld] 建物 {len(building_list)} 棟（OSM footprint + LiDAR高さ）")
 
     # ── タイル分割（--tiles）: 全域を重なりなく COLS×ROWS に割り、各タイルを個別に書き出す。
-    #    DEM/inundation は全域で1回だけ計算し、export_to_nbt が中心+幅でクロップする（省メモリ）。
+    #    DEM/inundation は全域で1回だけ計算し、export_to_nbt がクロップする（省メモリ）。
     if args.tiles:
         _s = args.tiles.lower().replace(" ", "")
         n_cols, n_rows = (int(v) for v in _s.split("x")) if "x" in _s else (int(_s), 1)
@@ -338,24 +338,60 @@ def main():
     import math as _m2
     _lon_per_m = 1.0 / (111320.0 * _m2.cos(_m2.radians(lat_c)))
     _lat_per_m = 1.0 / 111320.0
-    _tw, _td = width_m / n_cols, depth_m / n_rows
-    tile_specs = []  # (ttag, tile_lat_c, tile_lon_c, tile_w, tile_d)
-    for ri in range(n_rows):
-        for ci in range(n_cols):
-            t_lon = lon_c + (ci - (n_cols - 1) / 2.0) * _tw * _lon_per_m  # col0=西
-            t_lat = lat_c + ((n_rows - 1) / 2.0 - ri) * _td * _lat_per_m  # row0=北
-            if n_cols == 1 and n_rows == 1:
-                ttag = ""
-            elif n_rows == 1:
-                ttag = f"_c{ci}"
-            elif n_cols == 1:
-                ttag = f"_r{ri}"
-            else:
-                ttag = f"_r{ri}c{ci}"
-            tile_specs.append((ttag, t_lat, t_lon, _tw, _td))
-    if args.tiles:
-        print(f"  tiles={n_cols}×{n_rows}  各 {_tw:.0f}×{_td:.0f}m  "
-              f"(~{int(_tw/h_res)}×{int(_td/h_res)} blocks/tile)")
+
+    def _ttag(ci, ri):
+        if n_cols == 1 and n_rows == 1:
+            return ""
+        if n_rows == 1:
+            return f"_c{ci}"
+        if n_cols == 1:
+            return f"_r{ri}"
+        return f"_r{ri}c{ci}"
+
+    # 施策④: gsi/wakayama かつ複数タイル時は、全域 DEM セル範囲を1回だけ算出して整数で
+    # タイル分割する（export_to_nbt の中心+幅クロップだとタイル毎に独立丸めされ、境界セルが
+    # 一致せず 1セルの隙間/重複が出る＝旧 4×752 vs 全域 3014 の 6セル欠損の原因）。整数分割は
+    # 隣接タイルが境界セルを共有し合計==全域。各タイルに DEM セル範囲 tile_crop を直接渡す。
+    # mapzen（別グリッド fetch）や単一タイルは従来どおり tile_crop=None。
+    _aligned = bool(args.tiles) and args.terrain_source == "gsi" and (n_cols * n_rows > 1)
+    tile_specs = []  # (ttag, t_lat, t_lon, t_w, t_d, tile_crop)
+    if _aligned:
+        _res_lat = dem_info["res_lat"]; _res_lon = dem_info["res_lon"]
+        _lat_max = dem_info["lat_max"]; _lon_min = dem_info["lon_min"]
+        _H, _W = dem_info["dem"].shape
+        _g_row = round((_lat_max - lat_c) / _res_lat)
+        _g_col = round((lon_c - _lon_min) / _res_lon)
+        _g_hr = int((depth_m / 2) * _lat_per_m / _res_lat)
+        _g_hc = int((width_m / 2) * _lon_per_m / _res_lon)
+        _R0 = max(0, _g_row - _g_hr); _R1 = min(_H, _g_row + _g_hr)
+        _C0 = max(0, _g_col - _g_hc); _C1 = min(_W, _g_col + _g_hc)
+
+        def _edges(a, b, n):
+            return [a + round(i * (b - a) / n) for i in range(n + 1)]
+        _rb = _edges(_R0, _R1, n_rows)
+        _cb = _edges(_C0, _C1, n_cols)
+        for ri in range(n_rows):
+            for ci in range(n_cols):
+                rr0, rr1 = _rb[ri], _rb[ri + 1]
+                cc0, cc1 = _cb[ci], _cb[ci + 1]
+                t_lat = _lat_max - 0.5 * (rr0 + rr1) * _res_lat   # セル範囲の中心緯度
+                t_lon = _lon_min + 0.5 * (cc0 + cc1) * _res_lon
+                t_w = (cc1 - cc0) * _res_lon / _lon_per_m
+                t_d = (rr1 - rr0) * _res_lat / _lat_per_m
+                tile_specs.append((_ttag(ci, ri), t_lat, t_lon, t_w, t_d,
+                                   (rr0, rr1, cc0, cc1)))
+        print(f"  tiles={n_cols}×{n_rows} [整列]  全域セル {_C1-_C0}×{_R1-_R0} を整数分割"
+              f"（col境界={_cb}, 合計==全域・隙間/重複なし）")
+    else:
+        _tw, _td = width_m / n_cols, depth_m / n_rows
+        for ri in range(n_rows):
+            for ci in range(n_cols):
+                t_lon = lon_c + (ci - (n_cols - 1) / 2.0) * _tw * _lon_per_m  # col0=西
+                t_lat = lat_c + ((n_rows - 1) / 2.0 - ri) * _td * _lat_per_m  # row0=北
+                tile_specs.append((_ttag(ci, ri), t_lat, t_lon, _tw, _td, None))
+        if args.tiles:
+            print(f"  tiles={n_cols}×{n_rows}  各 {_tw:.0f}×{_td:.0f}m  "
+                  f"(~{int(_tw/h_res)}×{int(_td/h_res)} blocks/tile)")
 
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
 
@@ -442,7 +478,7 @@ def main():
         eff_v_exag = args.v_exag if args.v_exag is not None else v_exag
 
         # タイルごとに書き出す（--tiles 未指定なら tile_specs は ttag="" の単一要素）。
-        for ttag, t_lat, t_lon, t_w, t_d in tile_specs:
+        for ttag, t_lat, t_lon, t_w, t_d, t_crop in tile_specs:
             out = OUT_DIR / f"{base_name}{ttag}.nbt"
             if ttag:
                 print(f"\n  -- tile {ttag}: center=({t_lat:.6f},{t_lon:.6f})  "
@@ -477,6 +513,9 @@ def main():
                 "h_res_m": float(h_res), "v_res_m": float(v_res),
                 "v_exag": float(eff_v_exag),
                 "tile": ttag or "full", "tile_grid": f"{n_cols}x{n_rows}",
+                # 施策④: 整列タイルの全域 DEM セル範囲 (r0,r1,c0,c1)。隣接タイルが境界
+                # セルを共有し合計==全域。edge-to-edge 配置の決定的オフセット計算に使う。
+                "tile_crop_cells": [int(v) for v in t_crop] if t_crop else None,
                 "ref_doc": "flood_pso/docs/05_ベンチマーク結果.md",
             }
             if ks > 0:
@@ -518,6 +557,7 @@ def main():
                 evac_xml=(args.evac_xml if args.evac else None),
                 hollow_buildings=args.hollow_buildings,
                 legend_layer=args.legend_layer,
+                tile_crop=t_crop,
             )
 
             # 既定で Litematica (.litematic) も併せて出力（redtact / Litematica mod 用）
