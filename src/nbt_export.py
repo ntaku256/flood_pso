@@ -595,6 +595,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
     res_lon = dem_info_render["res_lon"]
     bh_patch = None   # 建物高さ[m] パッチ（DSM 由来, 任意）
     tree_patch = None  # 樹冠高[m] パッチ（LiDAR class3 由来, 任意）
+    _tile_core = None  # 施策④halo: (top,left,core_rows,core_cols) ブロック単位の切り戻し窓
 
     if terrain_source == "tellus_world":
         # tellus_world では fetch_grid 段階で既に target bbox を切り出してあるので
@@ -614,6 +615,21 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             tr0, tr1, tc0, tc1 = tile_crop
             r0 = max(0, int(tr0)); r1 = min(dem.shape[0], int(tr1))
             c0 = max(0, int(tc0)); c1 = min(dem.shape[1], int(tc1))
+            # 施策④halo: 継ぎ目で建物/道路のエッジ効果（寄棟屋根の distance_transform、
+            # 壁周のラスタ縁、道路バッファの打ち切り）がグリッド端に誤って出るのを防ぐため、
+            # クロップを halo セル分広げてレンダし、出力ブロック配列をコアに切り戻す。
+            # リサンプル無し（factor=1, ブロック=DEMセル 1:1）かつ enhanced 時のみ厳密に
+            # 切り戻せるので適用（=wakayama LiDAR タイル運用）。それ以外は halo=0 で従来どおり。
+            _hrd0 = res_lat / lat_per_m
+            _no_resample = (not (h_res > 0 and h_res < _hrd0 * 0.95)
+                            and max(1, round(h_res / _hrd0)) == 1)
+            _halo = 16 if (_no_resample and terrain_quality == "enhanced") else 0
+            if _halo > 0:
+                er0 = max(0, r0 - _halo); er1 = min(dem.shape[0], r1 + _halo)
+                ec0 = max(0, c0 - _halo); ec1 = min(dem.shape[1], c1 + _halo)
+                # 切り戻し窓（拡張パッチ内のコア位置, factor=1 なのでブロック=セル）
+                _tile_core = (r0 - er0, c0 - ec0, r1 - r0, c1 - c0)
+                r0, r1, c0, c1 = er0, er1, ec0, ec1
         else:
             # 中心ピクセル
             row_c = round((lat_max - lat_center) / res_lat)
@@ -845,6 +861,17 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                                       v_res=v_res, v_exag=v_exag)
     else:
         raise ValueError(f"unknown terrain_quality: {terrain_quality} (use 'enhanced' or 'legacy')")
+
+    # 施策④halo: 拡張パッチでレンダした密ブロック配列を、コア [c0,c1)×[r0,r1) に切り戻す。
+    # 軸順は (Y, Z, X)=(高さ, 南北, 東西)。size=[nx, ny, nz]。Y は絶対標高基準で不変。
+    # これで建物/道路/橋のエッジ効果は halo 域に出て破棄され、隣接タイルのコアが密着する。
+    if _tile_core is not None and isinstance(blocks, np.ndarray):
+        _top, _left, _crz, _crx = _tile_core
+        blocks = np.ascontiguousarray(blocks[:, _top:_top + _crz, _left:_left + _crx])
+        size = [int(_crx), int(size[1]), int(_crz)]
+        print(f"  [halo] 拡張パッチ {dem_patch.shape[1]}×{dem_patch.shape[0]} → "
+              f"コア {_crx}×{_crz} に切り戻し（継ぎ目のエッジ効果を破棄）")
+
     n_entries = int(np.count_nonzero(blocks)) if isinstance(blocks, np.ndarray) else len(blocks)
     print(f"Structure size: {size[0]} x {size[1]} x {size[2]} blocks ({n_entries:,} block entries)")
 
