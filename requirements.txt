@@ -6,5 +6,6 @@ Pillow
 opencv-python
 pyswarms
 nbtlib
+NBT
 pyproj
 pandas

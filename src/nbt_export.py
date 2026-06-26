@@ -421,7 +421,11 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   evac_xml: str | None = None,
                   hollow_buildings: bool = True,
                   legend_layer: bool = False,
-                  tile_crop: tuple | None = None):
+                  tile_crop: tuple | None = None,
+                  anvil_out: str | None = None,
+                  anvil_offset: tuple | None = None,
+                  anvil_merge: bool = False,
+                  anvil_level_name: str = "flood_pso"):
     """
     DEMと浸水マップの指定範囲をMinecraft NBT Structureに変換する。
 
@@ -916,4 +920,15 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             full_meta.setdefault("deep_ground", int(deep_ground))
 
     write_nbt_structure(blocks, size, out_path, meta=full_meta)
+
+    # 施策⑤: native Anvil world(.mca)も出力（密配列のときのみ＝enhanced）。
+    if anvil_out is not None:
+        if isinstance(blocks, np.ndarray):
+            from anvil_export import write_anvil_world
+            ox, oz = (int(anvil_offset[0]), int(anvil_offset[1])) if anvil_offset else (0, 0)
+            write_anvil_world(blocks, size, anvil_out, x_offset=ox, z_offset=oz,
+                              merge=bool(anvil_merge), level_name=anvil_level_name)
+        else:
+            print("  [anvil] スキップ: dense 配列でない（terrain_quality=enhanced が必要）")
+
     return size, len(blocks)

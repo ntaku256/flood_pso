@@ -142,6 +142,10 @@ def main():
                     help="空中写真の彩度ブースト（自動レベル後。1=彩度補正なし, 1.4既定, 2+で過飽和）")
     ap.add_argument("--no-litematic", action="store_true",
                     help="既定で併せて出力する .litematic を抑止（.nbt のみ）")
+    ap.add_argument("--anvil-world", type=str, default=None,
+                    help="施策⑤: native Anvil world(.mca)も出力するワールドディレクトリ。"
+                         "整列タイル(--tiles, gsi/wakayama)は全タイルを1ワールドへ実座標で配置・"
+                         "境界はmergeで密着。Tellus非依存で歩けるワールドになる（要 NBT パッケージ）。")
     ap.add_argument("--building-height", type=float, default=6.0,
                     help="建物の高さ [m]（DSM が無いとき/--no-building-heights 時の一律値）")
     ap.add_argument("--no-building-heights", action="store_true",
@@ -355,6 +359,7 @@ def main():
     # mapzen（別グリッド fetch）や単一タイルは従来どおり tile_crop=None。
     _aligned = bool(args.tiles) and args.terrain_source == "gsi" and (n_cols * n_rows > 1)
     tile_specs = []  # (ttag, t_lat, t_lon, t_w, t_d, tile_crop)
+    _anvil_origin_rc = None  # 施策⑤: 整列タイルを1 Anvil world へ配置する際の world 原点 (R0,C0)
     if _aligned:
         _res_lat = dem_info["res_lat"]; _res_lon = dem_info["res_lon"]
         _lat_max = dem_info["lat_max"]; _lon_min = dem_info["lon_min"]
@@ -365,6 +370,7 @@ def main():
         _g_hc = int((width_m / 2) * _lon_per_m / _res_lon)
         _R0 = max(0, _g_row - _g_hr); _R1 = min(_H, _g_row + _g_hr)
         _C0 = max(0, _g_col - _g_hc); _C1 = min(_W, _g_col + _g_hc)
+        _anvil_origin_rc = (_R0, _C0)   # 全タイル共通の world 原点（タイル offset の基準）
 
         def _edges(a, b, n):
             return [a + round(i * (b - a) / n) for i in range(n + 1)]
@@ -524,6 +530,22 @@ def main():
                 meta["sigma_levels_m"] = [0.0, 0.5, 1.0, 2.0, 4.0]  # flood_sim と整合
                 if r["sigma_map"] is not None:
                     meta["sigma_map"] = r["sigma_map"]   # ndarray → Float List + _shape
+
+            # 施策⑤: native Anvil world 出力パラメータをタイルごとに決める。
+            #   整列タイル → 全タイルを1ワールドへ実 offset で配置・境界 merge（御坊全域 walkable）。
+            #   非整列の複数タイル → ttag 別サブワールド（重なり破綻を避ける）。単一 → そのまま。
+            anvil_out = anvil_off = None; anvil_merge = False; anvil_lname = base_name
+            if args.anvil_world:
+                if t_crop is not None and _anvil_origin_rc is not None:
+                    anvil_out = args.anvil_world
+                    anvil_off = (int(t_crop[2] - _anvil_origin_rc[1]),   # x = col - C0
+                                 int(t_crop[0] - _anvil_origin_rc[0]))   # z = row - R0
+                    anvil_merge = True
+                elif ttag:
+                    anvil_out = str(Path(args.anvil_world) / ttag.lstrip("_"))
+                    anvil_lname = f"{base_name}{ttag}"
+                else:
+                    anvil_out = args.anvil_world
             export_to_nbt(
                 dem_info, inundation,
                 lat_center=t_lat, lon_center=t_lon,
@@ -558,6 +580,10 @@ def main():
                 hollow_buildings=args.hollow_buildings,
                 legend_layer=args.legend_layer,
                 tile_crop=t_crop,
+                anvil_out=anvil_out,
+                anvil_offset=anvil_off,
+                anvil_merge=anvil_merge,
+                anvil_level_name=anvil_lname,
             )
 
             # 既定で Litematica (.litematic) も併せて出力（redtact / Litematica mod 用）
