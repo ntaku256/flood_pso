@@ -600,6 +600,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
     bh_patch = None   # 建物高さ[m] パッチ（DSM 由来, 任意）
     tree_patch = None  # 樹冠高[m] パッチ（LiDAR class3 由来, 任意）
     _tile_core = None  # 施策④halo: (top,left,core_rows,core_cols) ブロック単位の切り戻し窓
+    r0 = c0 = 0        # パッチの DEM セル原点（軸6-2 ディザの世界座標基準。tellus 経路は 0）
 
     if terrain_source == "tellus_world":
         # tellus_world では fetch_grid 段階で既に target bbox を切り出してあるので
@@ -857,6 +858,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             patch_bbox_latlon=patch_bbox_latlon,
             water_mask=water_mask,
             road_major_mask=road_major_mask,
+            cell_offset=(c0, r0),   # 軸6-2: 地表ディザの世界座標基準（タイル間整合）
         )
     elif terrain_quality == "legacy":
         print(f"Converting to blocks [legacy] "

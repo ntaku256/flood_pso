@@ -240,6 +240,54 @@ def classify_surface_block(
     return "grass"
 
 
+# ── 軸6-2: 決定論的座標ハッシュによる地表ディザ混合 ──
+# 1クラス=1ブロックの単調地表を、世界座標ハッシュで重み付きブロック混合に散らし、
+# 岩肌/礫/耕地に自然な斑（テクスチャ感）を与える。乱数でなく座標ハッシュなので
+# タイル分割しても同じ世界セルは常に同じブロック＝litematic/Anvil 再現性を保つ。
+def coord_hash01(gx: np.ndarray, gz: np.ndarray) -> np.ndarray:
+    """世界ブロック座標 (gx, gz) → 決定論的 [0,1) ノイズ（splitmix64 系, ベクトル化）。
+    小さい構造化座標(隣接整数)でも均一になるよう avalanche の強い finalizer を使い、
+    よく撹拌された高ビット側を採用する。"""
+    x = (np.asarray(gx, dtype=np.int64) & 0xFFFFFFFF).astype(np.uint64)
+    z = (np.asarray(gz, dtype=np.int64) & 0xFFFFFFFF).astype(np.uint64)
+    h = x * np.uint64(0x9E3779B97F4A7C15)
+    h = h ^ (z * np.uint64(0xC2B2AE3D27D4EB4F))
+    h = h ^ (h >> np.uint64(30)); h = h * np.uint64(0xBF58476D1CE4E5B9)
+    h = h ^ (h >> np.uint64(27)); h = h * np.uint64(0x94D049BB133111EB)
+    h = h ^ (h >> np.uint64(31))
+    return (h >> np.uint64(40)).astype(np.float64) / float(1 << 24)   # 高24ビット
+
+# クラス → [(ブロックキー, 重み), ...]（重みは正規化される）。全キーは block_palette に実在。
+SURFACE_DITHER = {
+    "stone":       [("stone", 0.55), ("andesite", 0.16), ("cobblestone", 0.12),
+                    ("tuff", 0.09), ("gravel", 0.08)],
+    "gravel":      [("gravel", 0.68), ("coarse_dirt", 0.16), ("stone", 0.10),
+                    ("cobblestone", 0.06)],
+    "coarse_dirt": [("coarse_dirt", 0.76), ("dirt", 0.16), ("rooted_dirt", 0.08)],
+}
+
+
+def apply_surface_dither(surf_block: np.ndarray, cell_offset: tuple) -> None:
+    """surf_block(class文字列 grid, nz×nx) を世界座標ハッシュで in-place にディザ混合。
+    cell_offset=(gx0, gz0) はこのパッチ左上の世界ブロック座標（タイル間整合の基準）。"""
+    nz, nx = surf_block.shape
+    gx0, gz0 = int(cell_offset[0]), int(cell_offset[1])
+    gx = gx0 + np.arange(nx, dtype=np.int64)[None, :]
+    gz = gz0 + np.arange(nz, dtype=np.int64)[:, None]
+    h = coord_hash01(np.broadcast_to(gx, (nz, nx)), np.broadcast_to(gz, (nz, nx)))
+    orig = surf_block.copy()   # クラス膜は元配列から取る（ディザ出力="gravel"等を後段が再ディザしない）
+    for cls, mix in SURFACE_DITHER.items():
+        m = (orig == cls)
+        if not m.any():
+            continue
+        keys = [k for k, _ in mix]
+        ws = np.array([w for _, w in mix], dtype=np.float64)
+        cum = np.cumsum(ws) / ws.sum()
+        idx = np.clip(np.searchsorted(cum, h, side="right"), 0, len(keys) - 1)
+        for ki, k in enumerate(keys):
+            surf_block[m & (idx == ki)] = k
+
+
 def classify_surface_block_grid(
     dem_ds: np.ndarray,
     slope_ds: np.ndarray,
@@ -811,6 +859,8 @@ def dem_to_blocks_enhanced(
     water_mask: np.ndarray | None = None,
     water_block: str = "water",
     evac_facilities: list | None = None,
+    cell_offset: tuple = (0, 0),
+    dither_surface: bool = True,
 ) -> tuple[list, list[int]]:
     """
     `nbt_export.dem_to_blocks` の置き換え。Tellus 風の改善 5 点を適用：
@@ -968,6 +1018,11 @@ def dem_to_blocks_enhanced(
     if water_mask is not None and water_mask.shape == surf_block.shape:
         land_for_water = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
         surf_block[water_mask & land_for_water] = water_block
+
+    # 軸6-2: 単調な岩/礫/耕地クラスを世界座標ハッシュで重み付き混合にディザ（道路/水域/砂浜
+    # など意図的な上書きの後に適用し、それらは混ぜない）。cell_offset で世界座標に整合。
+    if dither_surface:
+        apply_surface_dither(surf_block, cell_offset)
 
     valid_elevs = dem_ds[~np.isnan(dem_ds)]
     max_elev_y = (int(valid_elevs.max() * scale_land) if len(valid_elevs) > 0 else 1) + _lift
