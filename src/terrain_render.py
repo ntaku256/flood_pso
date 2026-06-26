@@ -722,6 +722,8 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                 ys.append(int(y_surf_land[j, i]))
         return int(np.median(ys)) if ys else terrain_y(*end_pt)
 
+    # ── 軸7-1: 各橋の幾何を前計算（pts/seg/total/baseline/has_water/min_deck） ──
+    infos = []
     for b in bridges:
         pts = [_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, nz, nx) for la, lo in b["coords"]]
         rc = b.get("road_class", "normal")
@@ -731,6 +733,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         for (x0, z0), (x1, z1) in zip(pts, pts[1:]):
             L = math.hypot(x1 - x0, z1 - z0); seg.append(L); total += L
         if total < 2.0:
+            infos.append(None)
             continue
         startS = end_base(pts[0], pts[1] if len(pts) > 1 else pts[0])
         endS = end_base(pts[-1], pts[-2] if len(pts) > 1 else pts[-1])
@@ -747,6 +750,73 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
             if has_water:
                 break
         min_deck = (int(y_sea_surface) + clear_full) if has_water else -1.0e9
+        infos.append(dict(pts=pts, seg=seg, total=total, startS=startS, endS=endS,
+                          rise_full=rise_full, clear_full=clear_full, has_water=has_water,
+                          min_deck=min_deck, half_w=half_w, rc=rc, layer=layer,
+                          name=(b.get("name") or "").strip()))
+
+    # ── 軸7-1: UnionFind で橋wayをグルーピング（①端点共有+同layer ②同一の非空name）──
+    parent = list(range(len(infos)))
+    def _find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]; a = parent[a]
+        return a
+    ENDPOINT_TOL = max(2.0, 3.0 / max(h_res_block_m, 0.1))   # ~3m 以内の端点共有を連結とみなす
+    for i in range(len(infos)):
+        if infos[i] is None:
+            continue
+        ei = (infos[i]["pts"][0], infos[i]["pts"][-1])
+        for j in range(i + 1, len(infos)):
+            if infos[j] is None:
+                continue
+            same_name = bool(infos[i]["name"]) and infos[i]["name"] == infos[j]["name"]
+            share = False
+            if infos[i]["layer"] == infos[j]["layer"]:
+                for pa in ei:
+                    for pb in (infos[j]["pts"][0], infos[j]["pts"][-1]):
+                        if math.hypot(pa[0] - pb[0], pa[1] - pb[1]) <= ENDPOINT_TOL:
+                            share = True
+            if same_name or share:
+                ra, rb = _find(i), _find(j)
+                if ra != rb:
+                    parent[ra] = rb
+
+    # ── 軸7-2: グループ単位で平坦判定。端点地形差(dip) < 4block の多way橋だけ共有フラット
+    #    デッキ(=最高バンク/水面+clearance)に統一。dip 大（自然な谷/起伏）なら per-way のまま
+    #    地形に沿わせる。これで分割 way の継ぎ目段差を消しつつ、谷で浮く不自然さも防ぐ。──
+    from collections import defaultdict as _dd
+    groups = _dd(list)
+    for i in range(len(infos)):
+        if infos[i] is not None:
+            groups[_find(i)].append(i)
+    DIP_THR = 4.0 * scale_land
+    for _g, members in groups.items():
+        if len(members) < 2:
+            continue
+        ebs = []
+        for i in members:
+            ebs += [infos[i]["startS"], infos[i]["endS"]]
+        if max(ebs) - min(ebs) >= DIP_THR:
+            continue                                  # 谷/起伏 → 地形追従（per-way 維持）
+        hw = any(infos[i]["has_water"] for i in members)
+        g_min_deck = (max(int(y_sea_surface) + infos[i]["clear_full"] for i in members)
+                      if hw else -1.0e9)
+        g_deck = max(ebs)
+        if hw:
+            g_deck = max(g_deck, g_min_deck)
+        for i in members:                             # 共有フラットデッキに上書き
+            infos[i]["startS"] = g_deck
+            infos[i]["endS"] = g_deck
+            infos[i]["min_deck"] = g_min_deck
+
+    # ── レンダリング（本体は従来どおり。設定は infos から、グループは上書き済み）──
+    for info in infos:
+        if info is None:
+            continue
+        pts = info["pts"]; seg = info["seg"]; total = info["total"]
+        startS = info["startS"]; endS = info["endS"]
+        rise_full = info["rise_full"]; min_deck = info["min_deck"]
+        half_w = info["half_w"]; rc = info["rc"]
         pier_step = max(4.0, PIER_SPACING_M / max(h_res_block_m, 0.1))
         next_pier = pier_step
         s_acc = 0.0
