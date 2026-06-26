@@ -229,13 +229,35 @@ def main():
         print("Loading DEM (5m, full resolution)...")
         dem_info = mosaic_tiles(DEM_DIR)
     dem = dem_info["dem"]
+    # 軸4-3: FGD 河川/水域(WA/WStrA)ポリゴンを水源にする（矩形 bbox より高精度＝損失精度↑）。
+    #   範囲外/未配置でポリゴンが空なら make_river_source 内で矩形 bbox にフォールバック。
+    _Hd, _Wd = dem.shape
+    _b_lat_max = dem_info["lat_max"]; _b_lon_min = dem_info["lon_min"]
+    _b_lat_min = _b_lat_max - _Hd * dem_info["res_lat"]
+    _b_lon_max = _b_lon_min + _Wd * dem_info["res_lon"]
+    _wpolys = None
+    if args.fgd_wa:
+        try:
+            from fgd_vector import load_water
+            _wpolys = []
+            for wx in str(args.fgd_wa).split(","):
+                wx = wx.strip()
+                if wx and Path(wx).exists():
+                    _wpolys += load_water(wx, lat_min=_b_lat_min, lat_max=_b_lat_max,
+                                          lon_min=_b_lon_min, lon_max=_b_lon_max)
+            _wpolys = _wpolys or None
+        except Exception as _e:
+            print(f"  [fgd-water-source] 読込失敗→矩形bboxにfallback: {_e}")
+            _wpolys = None
     source = make_river_source(
         dem,
         lat_max=dem_info["lat_max"], res_lat=dem_info["res_lat"],
         lon_min=dem_info["lon_min"], res_lon=dem_info["res_lon"],
         river_bbox=RIVER_BBOX, elev_max=RIVER_ELEV_MAX,
+        water_polygons=_wpolys,
     )
-    print(f"  DEM={dem.shape}  src cells={int(np.sum(source))}")
+    print(f"  DEM={dem.shape}  src cells={int(np.sum(source))} "
+          f"[水源={'FGD河川/水域ポリゴン '+str(len(_wpolys))+'面' if _wpolys else '矩形bbox'}]")
 
     # 建物高さグリッド（DSM 由来）：和歌山 LiDAR の _org（DSM）があれば DSM-DEM を建物実高に使う。
     building_height_grid = None
