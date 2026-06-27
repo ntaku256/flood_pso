@@ -129,10 +129,13 @@ def colorize(surf: np.ndarray) -> np.ndarray:
 
 
 def ortho_surface_grid(dst_meta: dict, zoom: int = 18, saturation: float = 1.4,
-                       cache_dir=None, verbose: bool = True) -> np.ndarray:
+                       cache_dir=None, verbose: bool = True,
+                       layer: str = "seamlessphoto", return_rgb: bool = False):
     """
     dst_meta の経緯度グリッドに揃えた地表ブロックキー配列 (H,W) を返す。
     saturation>0 のとき enhance_rgb（WB+彩度）でかぶりを補正してからマッチ。
+    layer: GSI 写真レイヤ（seamlessphoto=最新シームレス / ort=整備済オルソ＝高精細）。
+    return_rgb=True なら (surf, rgb_dst) を返す（rgb_dst=補正後オルソ RGB grid (H,W,3)、駐車場の車検出等に使う）。
 
     dst_meta: {'lat_min','lat_max','lon_min','lon_max','res_lat','res_lon','shape':(H,W)}
     """
@@ -142,7 +145,7 @@ def ortho_surface_grid(dst_meta: dict, zoom: int = 18, saturation: float = 1.4,
     ortho = fetch_gsi_ortho(
         lat_min=dst_meta["lat_min"], lat_max=dst_meta["lat_max"],
         lon_min=dst_meta["lon_min"], lon_max=dst_meta["lon_max"],
-        zoom=zoom, cache_dir=cache_dir or DEFAULT_CACHE_DIR, verbose=verbose,
+        zoom=zoom, cache_dir=cache_dir or DEFAULT_CACHE_DIR, verbose=verbose, layer=layer,
     )
     rgb_src = ortho["rgb"]
     dst = {**dst_meta, "dem": np.zeros((H, W), dtype=np.float32)}
@@ -155,5 +158,5 @@ def ortho_surface_grid(dst_meta: dict, zoom: int = 18, saturation: float = 1.4,
     if verbose:
         keys, cnts = np.unique(surf.astype(str), return_counts=True)
         dist = ", ".join(f"{k}={c}" for k, c in sorted(zip(keys, cnts), key=lambda t: -t[1]))
-        print(f"[ortho] surface classes ({H}×{W}): {dist}")
-    return surf
+        print(f"[ortho:{layer}] surface classes ({H}×{W}): {dist}")
+    return (surf, rgb_dst) if return_rgb else surf

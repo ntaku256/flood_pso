@@ -403,6 +403,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   use_esa: bool = False,
                   use_osm: bool = False,
                   use_fgd: bool = False,
+                  road_curb_use_osm: bool = True,   # 道路境界線の交差点偽枠線をOSM回廊で抑制(既定ON)
                   fgd_bld_xml: str | None = None,
                   fgd_rdedg_xml: str | None = None,
                   fgd_wa_xml: str | None = None,
@@ -410,6 +411,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   surface_ortho: bool = False,
                   ortho_zoom: int = 18,
                   ortho_saturation: float = 1.4,
+                  ortho_layer: str = "seamlessphoto",
                   building_height_m: float = 6.0,
                   building_height_grid: np.ndarray | None = None,
                   tree_height_grid: np.ndarray | None = None,
@@ -418,6 +420,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   tellus_world_scale: float = 1.0,
                   tellus_sea_level_y: int = 0,
                   bridges_json: str | None = None,
+                  power_json: str | None = None,
+                  parking_json: str | None = None,
                   evac_xml: str | None = None,
                   hollow_buildings: bool = True,
                   legend_layer: bool = False,
@@ -784,6 +788,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
 
         # 地表色を空中写真から（最優先の surface_grid_override に流す）
         surface_override = tellus_surface_grid
+        ortho_rgb = None
         if surface_ortho:
             from ortho_surface import ortho_surface_grid
             ph, pw = dem_patch.shape
@@ -794,8 +799,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 "res_lon": (patch_bbox_latlon[3] - patch_bbox_latlon[2]) / pw,
                 "shape": (ph, pw),
             }
-            surface_override = ortho_surface_grid(dst_meta, zoom=ortho_zoom,
-                                                  saturation=ortho_saturation)
+            surface_override, ortho_rgb = ortho_surface_grid(
+                dst_meta, zoom=ortho_zoom, saturation=ortho_saturation,
+                layer=ortho_layer, return_rgb=True)
 
         # OSM 橋（bridge=yes + layer）を読み、patch 範囲に交差するものを立体化対象に
         bridges_render = None
@@ -810,6 +816,29 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   + (f"（例: {', '.join(b['name'] for b in bridges_render if b['name'])[:60]}）"
                      if any(b['name'] for b in bridges_render) else ""))
 
+        # OSM 送電線/鉄塔（power=line/tower）を patch 範囲で読む
+        power_lines = power_towers = None
+        if power_json:
+            from power_osm import load_power
+            _pw = load_power(
+                power_json,
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+            )
+            power_lines, power_towers = _pw["lines"], _pw["towers"]
+            print(f"  [power] OSM 送電線 {len(power_lines)} 本 / 鉄塔・電柱 {len(power_towers)} 基を配置")
+
+        # OSM 駐車場（amenity=parking）を patch 範囲で読む
+        parking_render = None
+        if parking_json:
+            from parking_osm import load_parking
+            parking_render = load_parking(
+                parking_json,
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+            )
+            print(f"  [parking] OSM 駐車場 {len(parking_render)} 面を地表に配置")
+
         evac_render = None
         if evac_xml:
             from ksj_evac import load_evac_facilities
@@ -818,6 +847,30 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
                 lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
             )
+
+        # 道路境界線(curb)の交差点偽枠線対策: OSM道路センターラインを塗りつぶし回廊にした mask を
+        # 用意して dem_to_blocks_enhanced に渡す（centerline は交差点を連続して貫くので「同一道路」
+        # 判定に使える）。オフライン等で取得失敗時は None=極小穴埋めのみにフォールバック。
+        road_curb_osm_mask = None
+        if road_mask is not None and road_curb_use_osm:
+            try:
+                from tellus_data import fetch_osm_buildings_roads as _fetch_osm
+                _osm_c = _fetch_osm(
+                    lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                    lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                    verbose=False,
+                )
+                _factor = max(1, round(h_res / h_res_dem))
+                _nzg = dem_patch.shape[0] // _factor
+                _nxg = dem_patch.shape[1] // _factor
+                _, road_curb_osm_mask, _ = build_osm_masks(
+                    _osm_c, patch_bbox_latlon, grid_h=_nzg, grid_w=_nxg, h_res_block_m=h_res,
+                )
+                print(f"  [road-curb] OSM道路回廊 {int(road_curb_osm_mask.sum())} cells "
+                      f"(roads={_osm_c.get('n_roads')}) → 交差点の偽枠線を抑制")
+            except Exception as _e:
+                print(f"  [road-curb] OSM回廊取得不可 ({_e}); 極小穴埋めのみで対応")
+                road_curb_osm_mask = None
 
         print(f"Converting to blocks [enhanced] "
               f"(h_res={h_res}m/block, v_res={v_res}m/block, "
@@ -855,10 +908,15 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             color_building_roofs=surface_ortho,
             surface_grid_override=surface_override,
             bridges=bridges_render,
+            powerlines=power_lines,
+            power_towers=power_towers,
+            parkings=parking_render,
+            ortho_rgb=ortho_rgb,
             evac_facilities=evac_render,
             patch_bbox_latlon=patch_bbox_latlon,
             water_mask=water_mask,
             road_major_mask=road_major_mask,
+            road_curb_osm_mask=road_curb_osm_mask,
             cell_offset=(c0, r0),   # 軸6-2: 地表ディザの世界座標基準（タイル間整合）
         )
     elif terrain_quality == "legacy":

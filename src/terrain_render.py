@@ -637,6 +637,116 @@ def build_building_maps(
             "wall_keys": wall_keys, "roof_keys": roof_keys, "style_keys": style_keys}
 
 
+def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
+                     y_surf_land, sea_mask, scale_land,
+                     wire_key="iron_bars", pylon_key="iron_bars") -> int:
+    """OSM 送電線（power=line/minor_line）+ 鉄塔/電柱（power=tower/pole）を立体化。
+
+    - 電線: voltage → 基準高さ(実m×scale_land)。径間（頂点間）ごとにカテナリ（垂れ）で
+      iron_bars 架線。両端の鉄塔頂を結ぶ直線から sag を引いて配置。
+    - 鉄塔: 線の各頂点（=実鉄塔位置）に iron_bars ラティス柱+頂部クロスアーム。
+      power=tower/pole の単独ノードも柱（tower=高,pole=低）として立てる（頂点と重複時は省略）。
+    返り値: 置いた最大 y（max_y 更新用）。FG-GML に電力設備が無いため OSM を入力に使う。
+    """
+    import math
+    seen: set = set()
+    ymax = [0]
+
+    def put(ix, iy, iz, key):
+        if not (0 <= ix < nx and 0 <= iz < nz) or iy < 0 or iy > 500:
+            return
+        k = (ix, iy, iz)
+        if k in seen:
+            return
+        seen.add(k)
+        if iy > ymax[0]:
+            ymax[0] = iy
+        blocks.append(nbtlib.Compound({
+            "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(iy), nbtlib.Int(iz)]),
+            "state": block_id(key),
+        }))
+
+    def ground_y(x, z):
+        i, j = int(round(x)), int(round(z))
+        if 0 <= j < nz and 0 <= i < nx and np.isfinite(y_surf_land[j, i]):
+            return int(y_surf_land[j, i])
+        return None
+
+    def base_h_m(volt):
+        if volt >= 500000:
+            return 50.0
+        if volt >= 220000:
+            return 40.0
+        if volt >= 110000:
+            return 30.0
+        if volt >= 60000:
+            return 22.0
+        if volt > 0:
+            return 14.0
+        return 12.0
+
+    def pylon(ix, iz, gy, top, arm):
+        for fy in range(gy + 1, top + 1):
+            put(ix, fy, iz, pylon_key)
+        if arm:                                   # 頂部クロスアーム（鉄塔シルエット）
+            for d in (-2, -1, 1, 2):
+                put(ix + d, top, iz, pylon_key)
+                put(ix, top, iz + d, pylon_key)
+
+    pylon_cells: set = set()
+
+    # ── 送電線 + 線頂点の鉄塔 ──
+    for L in (lines or []):
+        pts = [_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, nz, nx) for la, lo in L["coords"]]
+        bh = int(round(base_h_m(int(L.get("voltage", 0))) * scale_land))
+        # 各頂点（実鉄塔位置）に柱
+        vert_top = {}
+        for (x, z) in pts:
+            ix, iz = int(round(x)), int(round(z))
+            gy = ground_y(x, z)
+            if gy is None:
+                continue
+            vert_top[(ix, iz)] = gy + bh
+            if (ix, iz) not in pylon_cells:
+                pylon_cells.add((ix, iz))
+                pylon(ix, iz, gy, gy + bh, arm=(bh >= 18))
+        # 径間ごとに架線（カテナリ）。両端鉄塔頂を線形補間し sag を引く
+        for (x0, z0), (x1, z1) in zip(pts, pts[1:]):
+            g0, g1 = ground_y(x0, z0), ground_y(x1, z1)
+            if g0 is None or g1 is None:
+                continue
+            dist = math.hypot(x1 - x0, z1 - z0)
+            n = int(dist) + 1
+            max_sag = min(max(dist / 15.0, 1.0), 6.0)
+            for t in range(n + 1):
+                f = t / n if n > 0 else 0.0
+                xi, zi = x0 + (x1 - x0) * f, z0 + (z1 - z0) * f
+                gy = ground_y(xi, zi)
+                if gy is None:
+                    continue
+                top = (g0 + bh) * (1.0 - f) + (g1 + bh) * f       # 両端鉄塔頂の直線
+                wy = int(round(top - 4.0 * max_sag * f * (1.0 - f)))
+                if wy <= gy:
+                    wy = gy + 1
+                put(int(round(xi)), wy, int(round(zi)), wire_key)
+
+    # ── 単独ノード（線頂点に無い鉄塔/電柱） ──
+    for tw in (towers or []):
+        x, z = _lonlat_to_grid_xy(tw["lat"], tw["lon"], patch_bbox_latlon, nz, nx)
+        ix, iz = int(round(x)), int(round(z))
+        if (ix, iz) in pylon_cells:
+            continue
+        gy = ground_y(x, z)
+        if gy is None:
+            continue
+        pylon_cells.add((ix, iz))
+        is_tower = tw.get("kind") == "tower"
+        h_m = 30.0 if is_tower else 10.0
+        pylon(ix, iz, gy, gy + int(round(h_m * scale_land)), arm=is_tower)
+
+    return ymax[0]
+
+
 def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                       y_surf_land, sea_mask, y_sea_surface, y_sea_floor,
                       scale_land, h_res_block_m, surf_block=None,
@@ -922,10 +1032,21 @@ def dem_to_blocks_enhanced(
     legend_layer: bool = False,
     surface_grid_override: np.ndarray | None = None,
     bridges: list | None = None,
+    powerlines: list | None = None,
+    power_towers: list | None = None,
+    parkings: list | None = None,
+    ortho_rgb: np.ndarray | None = None,
     patch_bbox_latlon: tuple | None = None,
     road_block: str = "andesite",
     road_major_mask: np.ndarray | None = None,
     road_minor_block: str = "gravel",
+    # 道路の「一番外側」に引く 1 ブロック境界線（普通=灰色コンクリ / 小路=青緑テラコッタ）
+    road_edge_major_block: str = "gray_concrete",
+    road_edge_minor_block: str = "cyan_terracotta",
+    road_edge_close_iter: int = 9,
+    road_edge_hole_fill_cells: int = 800,         # closing 残穴のうち極小穴(交差点ダイヤ)を埋める閾値
+    road_curb_osm_mask: np.ndarray | None = None,  # OSM道路センターライン塗りつぶし回廊(交差点判定用)
+    road_under_building: bool = True,             # 道路が端から端まで横断する建物(連絡通路)の1Fを抜いて通す
     water_mask: np.ndarray | None = None,
     water_block: str = "water",
     evac_facilities: list | None = None,
@@ -1077,12 +1198,80 @@ def dem_to_blocks_enhanced(
         surf_block[beach & gentle] = "sand"                  # 砂浜（最近・緩斜面）
         surf_block[beach & ~gentle] = "stone"                # 護岸/磯（最近・急斜面）
 
-    # 道路を地表に上書き（陸セルのみ）。細道=road_minor_block(砂利)、幹線=road_block(舗装)
+    # 駐車場(OSM amenity=parking)を先に描く。道路をこの後に上書きすることで「領域競合=道路優先」
+    # （駐車場は粒度が粗いので、駐車場内でも道路の安山岩/砂利を生成する）。オルソ有=写真アスファルト色を
+    # 残し行ベースライン/境界を合成、無=black_concrete。車は立体化せず色のみ。
+    _parking_cars = []
+    parking_area = None
+    parking_boundary = None
+    _road_filled = None                  # closing済みの塗り潰し道路(連絡通路の貫通判定/1F削り用)
+    _pk_boundary_key = "gray_concrete"   # 駐車場境界線の色（render_parking の boundary_key と一致）
+    if parkings and patch_bbox_latlon is not None:
+        from parking_render import render_parking
+        # ortho_rgb を surf_block 解像度(nz,nx)へ整合（surface_grid_override と同じ factor 間引き）
+        _orgb = ortho_rgb
+        if _orgb is not None and _orgb.shape[:2] != (nz, nx):
+            if _orgb.shape[:2] == dem_patch.shape:
+                _orgb = _orgb[:nz * factor, :nx * factor].reshape(
+                    nz, factor, nx, factor, 3)[:, factor // 2, :, factor // 2]
+            else:
+                _orgb = None
+        land_for_pk = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
+        _parking_cars, parking_area, parking_boundary = render_parking(
+            parkings, patch_bbox_latlon, nz, nx,
+            surf_block=surf_block, y_surf_land=y_surf_land, land_mask=land_for_pk,
+            ortho_rgb=_orgb, h_res_block_m=h_res_block, boundary_key=_pk_boundary_key,
+        )
+
+    # 道路を地表に上書き（陸セルのみ）。RdEdg=道路縁バッファなので「左右2本の帯＋中央オルソ」。
+    # 細道=road_minor_block(砂利)、幹線=road_block(andesite舗装)。駐車場の後＝道路優先。
     if road_mask is not None and road_mask.shape == surf_block.shape:
         land_for_road = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
         surf_block[road_mask & land_for_road] = road_minor_block
         if road_major_mask is not None and road_major_mask.shape == surf_block.shape:
             surf_block[road_major_mask & land_for_road] = road_block
+
+        # ── 道路の「一番外側」に 1 ブロックの境界線（curb）を引く ──
+        #   道路中央(オルソ)の細い隙間だけ closing で埋めて左右の帯を一体化 → その外周 1 セル。
+        #   中央は埋めず line セルにのみ描くので、オルソ路面はそのまま残る。
+        #   色: 普通道路(幹線)=road_edge_major_block / 小路=road_edge_minor_block。
+        from scipy.ndimage import (binary_closing as _bclose, binary_erosion as _berode,
+                                   binary_fill_holes as _bfill, label as _blabel)
+        it = max(1, int(road_edge_close_iter))
+        band = _bclose(road_mask, iterations=it, border_value=0)
+        # 交差点の偽枠線対策: closing が広い道路の交差点中心に残す「閉じ穴(ダイヤ)」の外周が
+        #   道路を横切る余分な線になる。閉じ穴のうち ①OSM道路センターライン回廊の上にある穴
+        #   (=交差点で連続する同一道路) ②極小穴 だけを埋め、実街区の内側境界は残す。
+        holes = _bfill(band) & ~band
+        if holes.any():
+            hlab, hn = _blabel(holes)
+            hsz = np.bincount(hlab.ravel())
+            osm_c = (road_curb_osm_mask if (road_curb_osm_mask is not None
+                     and road_curb_osm_mask.shape == band.shape) else None)
+            thr = max(0, int(road_edge_hole_fill_cells))
+            for k in range(1, hn + 1):
+                hk = (hlab == k)
+                area = int(hsz[k])
+                on_road = (int((hk & osm_c).sum()) / max(area, 1)) if osm_c is not None else 0.0
+                if area < thr or on_road > 0.3:
+                    band |= hk
+        _road_filled = band                       # 連絡通路の貫通判定/1F削りに使う塗り潰し道路
+        edge_line = band & ~_berode(band) & land_for_road
+        # 駐車場領域内には curb を引かない（駐車場自身の境界線と二重になり見にくいため）。
+        if parking_area is not None and parking_area.shape == edge_line.shape:
+            edge_line = edge_line & ~parking_area
+        rmaj = (road_major_mask if (road_major_mask is not None
+                and road_major_mask.shape == surf_block.shape)
+                else np.zeros_like(road_mask))
+        near_major = binary_dilation(_bclose(rmaj, iterations=it, border_value=0), iterations=2)
+        line_minor = edge_line & ~near_major
+        line_major = edge_line & near_major
+        surf_block[line_minor] = road_edge_minor_block
+        surf_block[line_major] = road_edge_major_block
+
+    # 駐車場の境界線を道路の後に再描画して保護（道路優先で路面は道路だが、駐車場の縁取りは消さない）。
+    if parking_boundary is not None and parking_boundary.shape == surf_block.shape:
+        surf_block[parking_boundary] = _pk_boundary_key
 
     # FG-GML 水域(WA/WStrA: 河川・池等)を地表に水面として上書き（陸セルのみ。海は別途 sea_mask）
     if water_mask is not None and water_mask.shape == surf_block.shape:
@@ -1249,6 +1438,47 @@ def dem_to_blocks_enhanced(
                                 for k in roof_by_id]
         _tol2 = float(roof_color_tol) * float(roof_color_tol)
         from block_palette import BLOCKS as _BP2
+
+        # ── 連絡通路(渡り廊下)の検出と 1F 抜き ──
+        #   FGD道路バッファは広場/駐車場まで含み広大で、「道路がfootprintに重なる」だけでは普通の道路脇
+        #   建物まで誤検出する(9基準で検証済・分離不可)。実際の連絡通路は『2棟の建物を繋ぐ細長い渡り廊下を
+        #   道路が貫く』形状。そこで次の3条件で検出する:
+        #     (1) 細長い         : footprint座標のPCA主軸/副軸比 >= 2.2
+        #     (2) 橋渡し         : 膨張2セルで隣接する別建物が 2 種以上(行き止まり/単独棟を排除)
+        #     (3) 道路が貫く     : footprint ∩ 塗り潰し道路 >= 10 セル
+        #   検出した渡り廊下の footprint∩道路 の 1F を抜いて下を通れるようにする(上階は通路天井に残る)。
+        tunnel_cells = None
+        if (road_under_building and building_id is not None and _road_filled is not None
+                and _road_filled.shape == building_mask.shape):
+            from scipy.ndimage import binary_dilation as _tdil
+            tunnel_cells = np.zeros((nz, nx), bool)
+            road_in_bld = _road_filled & building_mask
+            _n_tunnel = 0
+            _bids = np.unique(building_id[(building_id >= 0) & building_mask])
+            for _b in _bids.tolist():
+                fp = (building_id == _b)
+                nfp = int(fp.sum())
+                if nfp < 12:
+                    continue
+                rib = road_in_bld & fp
+                if int(rib.sum()) < 10:
+                    continue                                  # 道路が貫いていない → 対象外
+                ys2, xs2 = np.where(fp)                        # (1) 細長さ = PCA主軸/副軸
+                pts = np.column_stack((ys2 - ys2.mean(), xs2 - xs2.mean())).astype(float)
+                ev = np.sort(np.linalg.eigvalsh(np.cov(pts.T)))[::-1]
+                pca = (ev[0] / max(float(ev[1]), 1e-6)) ** 0.5
+                if pca < 2.2:
+                    continue                                  # 細長くない(本体/道路脇の普通建物) → 対象外
+                nb = _tdil(fp, iterations=2) & ~fp            # (2) 2棟以上の別建物を橋渡しするか
+                neigh = np.unique(building_id[nb & (building_id >= 0)])
+                if int(neigh.size) < 2:
+                    continue                                  # 行き止まり/単独棟 → 対象外
+                tunnel_cells |= rib
+                _n_tunnel += 1
+            if _n_tunnel:
+                print(f"  [連絡通路] 渡り廊下(細長×2棟橋渡し×道路貫通)を {_n_tunnel}棟検出し1Fを抜いて通路化 "
+                      f"({int(tunnel_cells.sum())} cells)")
+
         b_idx = np.argwhere(building_mask & land_mask)
         b_max_y = 0
         for j, i_ in b_idx.tolist():
@@ -1293,13 +1523,19 @@ def dem_to_blocks_enhanced(
             is_door = bool(door_cell[j, i_])
             light_here = (bx_v % 5 == 2) and (bz_v % 5 == 2)   # 疎な内側格子に照明
             attic = hollow_buildings and (ceil_y < top_y)        # 寄棟で軒より上に屋根裏がある棟
-            # 基礎: 地盤(y_top)から基準面(y_base)まで壁材で充填（傾斜地の段差を塞ぐ）
-            for fy in range(y_top + 1, y_base + 1):
-                blocks.append(nbtlib.Compound({
-                    "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(fy), nbtlib.Int(bz_v)]),
-                    "state": block_id(wall_kind),
-                }))
+            # 連絡通路セル: この棟の下を道路がくぐる位置。1F(y_base+1..y_base+fh)を抜いて通路化する。
+            tunnel_here = bool(tunnel_cells[j, i_]) if tunnel_cells is not None else False
+            # 基礎: 地盤(y_top)から基準面(y_base)まで壁材で充填（傾斜地の段差を塞ぐ）。通路下は塞がない。
+            if not tunnel_here:
+                for fy in range(y_top + 1, y_base + 1):
+                    blocks.append(nbtlib.Compound({
+                        "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(fy), nbtlib.Int(bz_v)]),
+                        "state": block_id(wall_kind),
+                    }))
             for fy in range(y_base + 1, top_y + 1):
+                # 連絡通路: 1F分(y_base+fh まで)はブロックを置かず空ける。2Fの床スラブ以上は残し通路の天井に。
+                if tunnel_here and fy <= y_base + fh:
+                    continue
                 rel = fy - (y_base + 1)
                 r = rel % fh                       # 階内位置 0..fh-1（0=床スラブ位置）
                 is_slab = (r == 0 and fy != y_base + 1)
@@ -1449,6 +1685,22 @@ def dem_to_blocks_enhanced(
             surf_block=surf_block, y_flood_top=y_flood_top,
         )
         max_y = max(max_y, bridge_ymax + 2)
+
+    # --- 送電線・鉄塔（OSM power=line/tower）。橋の後に立体化 ---
+    if (powerlines or power_towers) and patch_bbox_latlon is not None:
+        power_ymax = add_power_blocks(
+            blocks, powerlines, power_towers, patch_bbox_latlon, nz, nx,
+            y_surf_land=y_surf_land, sea_mask=sea_mask, scale_land=scale_land,
+        )
+        max_y = max(max_y, power_ymax + 2)
+
+    # --- 駐車場の停車車両（オルソ検出）を 1 段持ち上げて配置 ---
+    for (ix, iy, iz, key) in _parking_cars:
+        if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
+            blocks.append(nbtlib.Compound({
+                "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(iy), nbtlib.Int(iz)]),
+                "state": block_id(key)}))
+            max_y = max(max_y, iy + 1)
 
     # --- 避難所マーカー（国土数値情報 P20）。地表から緑柱+発光で遠くから視認 ---
     if evac_facilities and patch_bbox_latlon is not None:

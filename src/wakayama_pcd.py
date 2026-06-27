@@ -95,6 +95,11 @@ def load_wakayama_dem(grd_path: str, res_m: float = 1.0,
         # 鋭い高さ特徴こそ測定対象なので MAD 異常修復で削らないよう既定 off。
         # 地形（grd, フィルタ無し）のみ既定 on。明示指定があればそれを優先。
         postprocess = postprocess_enabled() and not (exclude_classes or keep_classes)
+    if multi:
+        # 複数図郭は点群 concat（OOM）を避け、各図郭 npz を union 格子へ部分領域 reproject 合成。
+        return mosaic_wakayama(paths, res_m=res_m, cache=cache, verbose=verbose,
+                               exclude_classes=exclude_classes, keep_classes=keep_classes,
+                               postprocess=postprocess)
     exc = tuple(sorted(set(int(c) for c in exclude_classes))) if exclude_classes else ()
     kep = tuple(sorted(set(int(c) for c in keep_classes))) if keep_classes else ()
     tag = ("_exc" + "".join(str(c) for c in exc)) if exc else ""
@@ -188,6 +193,160 @@ def load_wakayama_dem(grd_path: str, res_m: float = 1.0,
         if verbose:
             print(f"[wakayama] cached {cache_path.name}")
     return info
+
+
+def mosaic_wakayama(paths, res_m: float = 1.0,
+                    exclude_classes: tuple | None = None,
+                    keep_classes: tuple | None = None,
+                    postprocess: bool | None = None,
+                    cache: bool = True, verbose: bool = True) -> dict:
+    """複数図郭を **各図郭の単一 npz キャッシュ経由**で union 緯度経度格子へ
+    部分領域ごと reproject 合成する。点群を全 concat しないので grd/org 18図郭でも
+    OOM しない（旧 load_wakayama_dem multi は点群 concat で 15GB 超→Killed）。
+
+    戻り値は load_wakayama_dem 互換 dict（dem + extent）。合成結果は combined npz に
+    キャッシュ（旧 multi と同じ命名規則）。被覆外（図郭間の欠タイル）は NaN=海/void。"""
+    from tellus_data import reproject_to_grid
+    from dem_postprocess import postprocess_enabled
+    paths = [str(p).strip() for p in (paths if isinstance(paths, (list, tuple))
+                                      else str(paths).split(",")) if str(p).strip()]
+    exc = tuple(sorted(set(int(c) for c in exclude_classes))) if exclude_classes else ()
+    kep = tuple(sorted(set(int(c) for c in keep_classes))) if keep_classes else ()
+    if postprocess is None:
+        postprocess = postprocess_enabled() and not (exc or kep)
+    tag = ("_exc" + "".join(str(c) for c in exc)) if exc else ""
+    tag += ("_keep" + "".join(str(c) for c in kep)) if kep else ""
+    tag += "_pp" if postprocess else ""
+    stems = "+".join(sorted(Path(p).stem for p in paths))
+    cache_path = Path(paths[0]).parent / f"{stems}.grid{res_m:g}m{tag}.npz"
+    if cache and cache_path.exists():
+        if verbose:
+            print(f"[wakayama] load mosaic cache {cache_path.name}")
+        z = np.load(cache_path)
+        return {k: (float(z[k]) if z[k].ndim == 0 else z[k]) for k in z.files}
+
+    # 各図郭を単一でグリッド化（npz キャッシュ利用、1図郭ずつ読む＝省メモリ）
+    infos = []
+    for p in paths:
+        infos.append(load_wakayama_dem(
+            p, res_m=res_m, cache=cache, verbose=verbose,
+            exclude_classes=exclude_classes, keep_classes=keep_classes,
+            postprocess=postprocess))
+    lat_min = min(i["lat_min"] for i in infos); lat_max = max(i["lat_max"] for i in infos)
+    lon_min = min(i["lon_min"] for i in infos); lon_max = max(i["lon_max"] for i in infos)
+    mid_lat = 0.5 * (lat_min + lat_max)
+    res_lat = res_m / M_PER_DEG_LAT
+    res_lon = res_m / (M_PER_DEG_LAT * np.cos(np.radians(mid_lat)))
+    H = int(round((lat_max - lat_min) / res_lat)) + 1
+    W = int(round((lon_max - lon_min) / res_lon)) + 1
+    full = np.full((H, W), np.nan, dtype=np.float32)
+    for fi in infos:
+        r0 = max(0, int(np.floor((lat_max - fi["lat_max"]) / res_lat)) - 1)
+        r1 = min(H, int(np.ceil((lat_max - fi["lat_min"]) / res_lat)) + 2)
+        c0 = max(0, int(np.floor((fi["lon_min"] - lon_min) / res_lon)) - 1)
+        c1 = min(W, int(np.ceil((fi["lon_max"] - lon_min) / res_lon)) + 2)
+        if r1 <= r0 or c1 <= c0:
+            continue
+        sub_meta = {"lat_max": lat_max - r0 * res_lat, "lon_min": lon_min + c0 * res_lon,
+                    "res_lat": res_lat, "res_lon": res_lon, "dem": full[r0:r1, c0:c1]}
+        sub = reproject_to_grid(fi["dem"], fi, sub_meta, fill_value=np.nan)
+        tgt = full[r0:r1, c0:c1]
+        m_sub = np.isfinite(sub); m_tgt = np.isfinite(tgt)
+        only = m_sub & ~m_tgt; both = m_sub & m_tgt
+        tgt[only] = sub[only]
+        tgt[both] = 0.5 * (tgt[both] + sub[both])   # 図郭重なりは平均ブレンド
+    if verbose:
+        v = full[np.isfinite(full)]
+        print(f"[wakayama] mosaic {len(infos)}図郭 → grid {full.shape} @ {res_m}m  "
+              f"lat[{lat_min:.5f},{lat_max:.5f}] lon[{lon_min:.5f},{lon_max:.5f}]  "
+              f"覆 {v.size:,}/{H*W:,} cells  Z[{v.min():.1f},{v.max():.1f}]m")
+    info = {"dem": full, "lat_min": lat_min, "lat_max": lat_max,
+            "lon_min": lon_min, "lon_max": lon_max,
+            "res_lat": res_lat, "res_lon": res_lon}
+    if cache:
+        np.savez_compressed(cache_path, dem=full,
+                            lat_min=lat_min, lat_max=lat_max,
+                            lon_min=lon_min, lon_max=lon_max,
+                            res_lat=res_lat, res_lon=res_lon)
+        if verbose:
+            print(f"[wakayama] cached mosaic {cache_path.name}")
+    return info
+
+
+def _cache_path_for(path: str, res_m: float,
+                    exclude_classes=None, keep_classes=None,
+                    postprocess: bool | None = None) -> Path:
+    """load_wakayama_dem と同じ規則で単一図郭の npz キャッシュパスを構成。"""
+    from dem_postprocess import postprocess_enabled
+    exc = tuple(sorted(set(int(c) for c in exclude_classes))) if exclude_classes else ()
+    kep = tuple(sorted(set(int(c) for c in keep_classes))) if keep_classes else ()
+    if postprocess is None:
+        postprocess = postprocess_enabled() and not (exc or kep)
+    tag = ("_exc" + "".join(str(c) for c in exc)) if exc else ""
+    tag += ("_keep" + "".join(str(c) for c in kep)) if kep else ""
+    tag += "_pp" if postprocess else ""
+    return Path(path).with_suffix(f".grid{res_m:g}m{tag}.npz")
+
+
+def dsm_onto_dem_grid(org_paths, dem_info: dict, res_m: float = 1.0,
+                      exclude_classes: tuple | None = None,
+                      keep_classes: tuple | None = None,
+                      verbose: bool = True) -> np.ndarray:
+    """複数 org 図郭を **各図郭の単一 npz キャッシュ経由**で dem_info の格子へ
+    部分領域ごと reproject 合成する。点群を全 concat しないので御坊全域(18図郭)でも
+    OOM しない（旧 load_wakayama_dem multi は点群 concat で ~16GB→OOM）。
+
+    戻り値: dem_info["dem"] と同形状の DSM 配列（float32, 被覆外は NaN）。
+    txt が消えていても npz キャッシュがあれば動く（load_wakayama_dem がキャッシュ優先）。"""
+    from tellus_data import reproject_to_grid
+    if isinstance(org_paths, (list, tuple)):
+        paths = [str(p).strip() for p in org_paths if str(p).strip()]
+    else:
+        paths = [p.strip() for p in str(org_paths).split(",") if p.strip()]
+    H, W = dem_info["dem"].shape
+    d_lat_max = dem_info["lat_max"]; d_lon_min = dem_info["lon_min"]
+    d_res_lat = dem_info["res_lat"]; d_res_lon = dem_info["res_lon"]
+    acc = np.full((H, W), np.nan, dtype=np.float32)
+    n_used = 0
+    for p in paths:
+        # npz キャッシュ or txt のどちらか無ければ skip（御坊全域で一部図郭欠でも継続）
+        npz = _cache_path_for(p, res_m, exclude_classes, keep_classes)
+        if not npz.exists() and not Path(p).exists():
+            if verbose:
+                print(f"[wakayama-mosaic] {Path(p).name}: npz/txt 無し→skip")
+            continue
+        fi = load_wakayama_dem(p, res_m=res_m, exclude_classes=exclude_classes,
+                               keep_classes=keep_classes, verbose=verbose)
+        # 図郭の dem 格子内 bbox（行=北→南, 列=西→東）。余白を取りクリップ。
+        r0 = max(0, int(np.floor((d_lat_max - fi["lat_max"]) / d_res_lat)) - 1)
+        r1 = min(H, int(np.ceil((d_lat_max - fi["lat_min"]) / d_res_lat)) + 2)
+        c0 = max(0, int(np.floor((fi["lon_min"] - d_lon_min) / d_res_lon)) - 1)
+        c1 = min(W, int(np.ceil((fi["lon_max"] - d_lon_min) / d_res_lon)) + 2)
+        if r1 <= r0 or c1 <= c0:
+            if verbose:
+                print(f"[wakayama-mosaic] {Path(p).name}: dem 範囲外→skip")
+            continue
+        sub_meta = {
+            "lat_max": d_lat_max - r0 * d_res_lat,
+            "lon_min": d_lon_min + c0 * d_res_lon,
+            "res_lat": d_res_lat, "res_lon": d_res_lon,
+            "dem": acc[r0:r1, c0:c1],   # 形状参照用
+        }
+        sub = reproject_to_grid(fi["dem"], fi, sub_meta, fill_value=np.nan)
+        tgt = acc[r0:r1, c0:c1]
+        m_sub = np.isfinite(sub); m_tgt = np.isfinite(tgt)
+        only = m_sub & ~m_tgt; both = m_sub & m_tgt
+        tgt[only] = sub[only]
+        tgt[both] = 0.5 * (tgt[both] + sub[both])   # 図郭重なりは平均
+        acc[r0:r1, c0:c1] = tgt
+        n_used += 1
+        if verbose:
+            print(f"[wakayama-mosaic] {Path(p).name} → dem[{r0}:{r1},{c0}:{c1}] "
+                  f"覆{int(m_sub.sum()):,}cells")
+    if verbose:
+        print(f"[wakayama-mosaic] {n_used}/{len(paths)} 図郭を dem 格子へ合成 "
+              f"(覆 {int(np.isfinite(acc).sum()):,}/{H*W:,} cells)")
+    return acc
 
 
 if __name__ == "__main__":

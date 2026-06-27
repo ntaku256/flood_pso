@@ -118,6 +118,9 @@ def main():
     ap.add_argument("--use-fgd", action="store_true",
                     help="国土地理院 FG-GML の建物(BldA)・道路(RdEdg)をローカルから取得して "
                          "地表に重ねる（建物=stone 立体、道路=gravel 上書き、API不要・高精度）")
+    ap.add_argument("--no-road-curb-osm", action="store_true",
+                    help="道路境界線の交差点偽枠線対策で OSM道路回廊を使うのを無効化"
+                         "（既定ON。オフライン時は自動で極小穴埋めのみにフォールバック）")
     ap.add_argument("--fgd-bld", default=DEFAULT_BLD_XML,
                     help="--use-fgd の建物 BldA GML パス。カンマ区切りで複数メッシュ可"
                          "（タイルが境界を跨ぐとき union, 例 503551,503561）")
@@ -140,6 +143,8 @@ def main():
                     help="空中写真タイル zoom（18≈0.6m/px, 17≈1.2m/px）")
     ap.add_argument("--ortho-saturation", type=float, default=1.4,
                     help="空中写真の彩度ブースト（自動レベル後。1=彩度補正なし, 1.4既定, 2+で過飽和）")
+    ap.add_argument("--ortho-layer", type=str, default="seamlessphoto",
+                    help="GSI 写真レイヤ: seamlessphoto=最新シームレス(既定) / ort=整備済オルソ(高精細・正射性高)")
     ap.add_argument("--no-litematic", action="store_true",
                     help="既定で併せて出力する .litematic を抑止（.nbt のみ）")
     ap.add_argument("--anvil-world", type=str, default=None,
@@ -176,6 +181,13 @@ def main():
                     help="OSM 橋(bridge=yes highway)の Overpass geom JSON。存在すれば道路が"
                          "水域を渡る箇所に桁+坂+橋脚を立体化（FG-GMLに橋情報が無いため）。"
                          "空文字で無効化")
+    ap.add_argument("--power-json", type=str, default="",
+                    help="OSM 送電線(power=line)+鉄塔/電柱(power=tower/pole)の Overpass geom JSON。"
+                         "指定すると voltage→高さの架線(iron_bars)+鉄塔ラティスを立体化。"
+                         "例: data_cache/osm/gobo_power_geom.json（FG-GMLに電力設備が無いため）")
+    ap.add_argument("--parking-json", type=str, default="",
+                    help="OSM 駐車場(amenity=parking)の Overpass geom JSON。指定すると地表を"
+                         "アスファルト舗装(black_concrete)+白線枠で上書き。例: data_cache/osm/gobo_parking_geom.json")
     ap.add_argument("--evac", action="store_true",
                     help="国土数値情報 P20 避難施設を緑柱+発光マーカーで配置（パーソナル防災ナビ用）")
     ap.add_argument("--evac-xml", type=str,
@@ -207,6 +219,10 @@ def main():
                          "DEM は1回だけロードしタイルごとに書き出すので省メモリ。")
     ap.add_argument("--tag-suffix", type=str, default="",
                     help="出力ファイル名の追加サフィックス（例: --tag-suffix amada）")
+    ap.add_argument("--reuse-inundation", type=str, default=None,
+                    help="洪水sim結果(inundation)の再利用キャッシュ DIR。御坊全域の sim は ~2h "
+                         "かかるため、樹木/建物モードだけ変えて再生成する際に DIR/inund_<method>_w*.npz "
+                         "を load/保存して sim をスキップ（dem 形状一致時のみ）。")
     args = ap.parse_args()
 
     suffix = f"_ks{args.ks}" if args.ks > 0 else ""
@@ -268,15 +284,19 @@ def main():
     if args.wakayama_grd and not args.no_building_heights:
         org_csv = args.wakayama_org if args.wakayama_org \
             else str(args.wakayama_grd).replace("_grd.txt", "_org.txt")
-        if Path(org_csv.split(",")[0].strip()).exists():
-            from wakayama_pcd import load_wakayama_dem
-            from tellus_data import reproject_to_grid
-            veg_classes = None if args.no_veg_filter else (3,)
-            print(f"Loading Wakayama LiDAR DSM (building heights)"
+        org_paths = [p.strip() for p in org_csv.split(",") if p.strip()]
+        from wakayama_pcd import dsm_onto_dem_grid, _cache_path_for
+        veg_classes = None if args.no_veg_filter else (3,)
+        # npz キャッシュ or txt がある図郭が1つでもあれば実行（御坊全域は org を全 concat せず
+        # 各図郭 npz を dem 格子へ部分領域 reproject 合成＝省メモリ・OOM 回避）。
+        _avail = [p for p in org_paths
+                  if _cache_path_for(p, lidar_res, exclude_classes=veg_classes).exists()
+                  or Path(p).exists()]
+        if _avail:
+            print(f"Loading Wakayama LiDAR DSM (building heights, {len(_avail)}図郭)"
                   + ("" if veg_classes is None else f"  [veg-filter: exclude class {veg_classes}]"))
-            dsm_info = load_wakayama_dem(org_csv, res_m=lidar_res,
-                                         exclude_classes=veg_classes)
-            dsm_on_dem = reproject_to_grid(dsm_info["dem"], dsm_info, dem_info, fill_value=np.nan)
+            dsm_on_dem = dsm_onto_dem_grid(org_paths, dem_info, res_m=lidar_res,
+                                           exclude_classes=veg_classes, verbose=True)
             building_height_grid = np.clip(dsm_on_dem - dem, 0, None).astype(np.float32)
             print(f"  obj-height: median={np.nanmedian(building_height_grid):.2f}m "
                   f"99%={np.nanpercentile(building_height_grid,99):.1f}m")
@@ -286,12 +306,14 @@ def main():
     if args.wakayama_grd and args.trees:
         org_csv = args.wakayama_org if args.wakayama_org \
             else str(args.wakayama_grd).replace("_grd.txt", "_org.txt")
-        if Path(org_csv.split(",")[0].strip()).exists():
-            from wakayama_pcd import load_wakayama_dem
-            from tellus_data import reproject_to_grid
-            print(f"Loading Wakayama LiDAR canopy (class3)")
-            canopy = load_wakayama_dem(org_csv, res_m=lidar_res, keep_classes=(3,))
-            canopy_on_dem = reproject_to_grid(canopy["dem"], canopy, dem_info, fill_value=np.nan)
+        org_paths = [p.strip() for p in org_csv.split(",") if p.strip()]
+        from wakayama_pcd import dsm_onto_dem_grid, _cache_path_for
+        _avail = [p for p in org_paths
+                  if _cache_path_for(p, lidar_res, keep_classes=(3,)).exists() or Path(p).exists()]
+        if _avail:
+            print(f"Loading Wakayama LiDAR canopy (class3, {len(_avail)}図郭)")
+            canopy_on_dem = dsm_onto_dem_grid(org_paths, dem_info, res_m=lidar_res,
+                                              keep_classes=(3,), verbose=True)
             tree_height_grid = np.clip(canopy_on_dem - dem, 0, None).astype(np.float32)
             n_tree = int(np.sum(tree_height_grid > 2.0))
             print(f"  canopy: median={np.nanmedian(tree_height_grid[tree_height_grid>0]):.1f}m "
@@ -478,21 +500,38 @@ def main():
         sm_note = f", sigma_map K_s={ks}" if r["sigma_map"] is not None else ""
         print(f"\n--- Generating NBT: {tag} "
               f"(water={r['water']:.3f}, IoU={r['iou']:.3f}{sm_note}) ---")
-        # 5m フル解像度 DEM 上でシミュレーションを再実行
-        if r["sigma_map"] is not None:
-            inundation = simulate_flood_hd(
-                dem_flood, source,
-                water_level_global=r["water"],
-                dh_map=r["dh"],
-                sigma_map=r["sigma_map"],
-            )
-        else:
-            inundation = simulate_flood_hd(
-                dem_flood, source,
-                water_level_global=r["water"],
-                dh_map=r["dh"],
-                sigma=SIGMA,
-            )
+        # 洪水sim再利用キャッシュ: 御坊全域(144Mグリッド)の sim は ~2h かかるため、
+        # --reuse-inundation DIR 指定時は DIR/inund_<method>.npz を load（dem 形状一致時のみ）。
+        # 無ければ sim 実行→保存。樹木/建物モード変更だけの再生成で 2h を省ける。
+        _inund_cache = None
+        if args.reuse_inundation:
+            _cd = Path(args.reuse_inundation); _cd.mkdir(parents=True, exist_ok=True)
+            _inund_cache = _cd / f"inund_{tag}_w{r['water']:.3f}.npz"
+        inundation = None
+        if _inund_cache is not None and _inund_cache.exists():
+            _z = np.load(_inund_cache)
+            if _z["inund"].shape == dem_flood.shape:
+                inundation = _z["inund"]
+                print(f"  [reuse-inundation] load {_inund_cache.name} {inundation.shape}")
+        if inundation is None:
+            # 5m フル解像度 DEM 上でシミュレーションを再実行
+            if r["sigma_map"] is not None:
+                inundation = simulate_flood_hd(
+                    dem_flood, source,
+                    water_level_global=r["water"],
+                    dh_map=r["dh"],
+                    sigma_map=r["sigma_map"],
+                )
+            else:
+                inundation = simulate_flood_hd(
+                    dem_flood, source,
+                    water_level_global=r["water"],
+                    dh_map=r["dh"],
+                    sigma=SIGMA,
+                )
+            if _inund_cache is not None:
+                np.savez_compressed(_inund_cache, inund=inundation.astype(np.float32))
+                print(f"  [reuse-inundation] saved {_inund_cache.name}")
         flooded = int(np.sum(inundation > 0.05))
         print(f"  full-res flooded cells: {flooded:,}")
 
@@ -587,6 +626,7 @@ def main():
                 use_esa=args.use_esa,
                 use_osm=args.use_osm,
                 use_fgd=args.use_fgd,
+                road_curb_use_osm=not args.no_road_curb_osm,
                 fgd_bld_xml=args.fgd_bld,
                 fgd_rdedg_xml=args.fgd_rdedg,
                 fgd_wa_xml=(args.fgd_wa or None),
@@ -594,6 +634,7 @@ def main():
                 surface_ortho=args.surface_ortho,
                 ortho_zoom=args.ortho_zoom,
                 ortho_saturation=args.ortho_saturation,
+                ortho_layer=args.ortho_layer,
                 building_height_m=args.building_height,
                 building_height_grid=building_height_grid,
                 tree_height_grid=tree_height_grid,
@@ -602,6 +643,8 @@ def main():
                 tellus_world_scale=args.tellus_world_scale,
                 tellus_sea_level_y=args.tellus_sea_level_y,
                 bridges_json=(args.bridges_json or None),
+                power_json=(args.power_json or None),
+                parking_json=(args.parking_json or None),
                 evac_xml=(args.evac_xml if args.evac else None),
                 hollow_buildings=args.hollow_buildings,
                 legend_layer=args.legend_layer,

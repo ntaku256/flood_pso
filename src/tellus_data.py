@@ -200,13 +200,18 @@ def fetch_mapzen_dem(
 # GSI シームレス空中写真（オルソ RGB）取得
 # ─────────────────────────────────────────────────────────────
 
+GSI_XYZ_BASE = "https://cyberjapandata.gsi.go.jp/xyz"   # {base}/{layer}/{z}/{x}/{y}.jpg
+
+
 def fetch_gsi_ortho_tile(z: int, x: int, y: int,
-                          cache_dir: Path = DEFAULT_CACHE_DIR) -> np.ndarray:
-    """1 タイル（256×256 RGB）を取得。キャッシュあれば使う。"""
-    tile_dir = cache_dir / "gsi_ortho" / str(z) / str(x)
+                          cache_dir: Path = DEFAULT_CACHE_DIR,
+                          layer: str = "seamlessphoto") -> np.ndarray:
+    """1 タイル（256×256 RGB）を取得。キャッシュあれば使う。
+    layer: GSI 写真レイヤ（seamlessphoto=最新シームレス / ort=整備済オルソ 等。共に jpg）。"""
+    tile_dir = cache_dir / "gsi_ortho" / layer / str(z) / str(x)
     tile_path = tile_dir / f"{y}.jpg"
     if not tile_path.exists():
-        url = f"{GSI_ORTHO_BASE_URL}/{z}/{x}/{y}.jpg"
+        url = f"{GSI_XYZ_BASE}/{layer}/{z}/{x}/{y}.jpg"
         data = _http_get_with_retry(url)
         tile_dir.mkdir(parents=True, exist_ok=True)
         tile_path.write_bytes(data)
@@ -220,9 +225,11 @@ def fetch_gsi_ortho(
     zoom: int = 18,
     cache_dir: Path = DEFAULT_CACHE_DIR,
     verbose: bool = True,
+    layer: str = "seamlessphoto",
 ) -> dict:
     """
     BBOX をカバーする GSI 空中写真タイルをモザイク化して RGB grid を返す。
+    layer: 写真レイヤ（seamlessphoto / ort 等）。
 
     Returns dict:
       'rgb'    : np.ndarray (H, W, 3) uint8
@@ -246,7 +253,7 @@ def fetch_gsi_ortho(
         print(f"[gsi_ortho] zoom={zoom}  tiles={len(tiles)}  → mosaic {H}×{W}")
     for i, (x, y) in enumerate(tiles, 1):
         try:
-            tile = fetch_gsi_ortho_tile(zoom, x, y, cache_dir=cache_dir)
+            tile = fetch_gsi_ortho_tile(zoom, x, y, cache_dir=cache_dir, layer=layer)
         except Exception as e:
             if verbose:
                 print(f"  [warn] ortho tile ({x},{y}) failed: {e}")
@@ -263,7 +270,7 @@ def fetch_gsi_ortho(
         "lon_min": nw_lon, "lon_max": se_lon,
         "res_lat": (nw_lat - se_lat) / H,
         "res_lon": (se_lon - nw_lon) / W,
-        "source": "gsi_seamlessphoto",
+        "source": f"gsi_{layer}",
         "zoom":   zoom,
     }
 
