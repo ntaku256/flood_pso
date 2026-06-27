@@ -28,24 +28,53 @@ from scipy.ndimage import label as nd_label, gaussian_filter, zoom as nd_zoom
 
 def make_river_source(dem: np.ndarray, lat_max: float, res_lat: float,
                       lon_min: float, res_lon: float,
-                      river_bbox: dict,
-                      elev_max: float = 5.0) -> np.ndarray:
+                      river_bbox: dict | None = None,
+                      elev_max: float = 5.0,
+                      water_polygons: list | None = None) -> np.ndarray:
     """
     日高川の河道に対応するセルを水源マスクとして返す。
-    river_bbox: {'lat_min','lat_max','lon_min','lon_max'}
-    elev_max  : 河道として認める最大標高 [m]
+
+    river_bbox     : {'lat_min','lat_max','lon_min','lon_max'}（矩形フォールバック）
+    elev_max       : 河道として認める最大標高 [m]
+    water_polygons : 施策(軸4-3) FGD 河川/水域ポリゴン [{"coords":[[lat,lon],...],
+                     "holes":[[[lat,lon],...],...]?}, ...]。指定時は矩形でなく**ポリゴンを
+                     even-odd scanline ラスタライズ**（穴=内環は subtract）して水源にする。
+                     ラスタ化が空なら river_bbox にフォールバック。水源精度=損失精度を底上げ。
     """
     H, W = dem.shape
-    rows = np.arange(H)
-    cols = np.arange(W)
-    lats = lat_max - rows * res_lat
-    lons = lon_min + cols * res_lon
+    source = None
 
-    lat_mask = (lats >= river_bbox["lat_min"]) & (lats <= river_bbox["lat_max"])
-    lon_mask = (lons >= river_bbox["lon_min"]) & (lons <= river_bbox["lon_max"])
+    if water_polygons:
+        # レンダ側(nbt_export)と同一のラスタライザで整合（matplotlib Path=even-odd）
+        from terrain_render import polygon_mask_from_latlon
+        patch_bbox = (lat_max - H * res_lat, lat_max, lon_min, lon_min + W * res_lon)
+        poly = np.zeros((H, W), dtype=bool)
+        for p in water_polygons:
+            coords = p.get("coords") if isinstance(p, dict) else p
+            if not coords or len(coords) < 3:
+                continue
+            pm = polygon_mask_from_latlon(coords, patch_bbox, H, W)
+            for hole in (p.get("holes") or []) if isinstance(p, dict) else []:
+                if len(hole) >= 3:                       # 内環(島)を引く
+                    pm &= ~polygon_mask_from_latlon(hole, patch_bbox, H, W)
+            poly |= pm
+        if poly.any():
+            source = poly
+        # ポリゴンが空（範囲外/未配置）なら下の矩形フォールバックへ
 
-    source = np.zeros_like(dem, dtype=bool)
-    source[np.ix_(lat_mask, lon_mask)] = True
+    if source is None and river_bbox is not None:
+        rows = np.arange(H)
+        cols = np.arange(W)
+        lats = lat_max - rows * res_lat
+        lons = lon_min + cols * res_lon
+        lat_mask = (lats >= river_bbox["lat_min"]) & (lats <= river_bbox["lat_max"])
+        lon_mask = (lons >= river_bbox["lon_min"]) & (lons <= river_bbox["lon_max"])
+        source = np.zeros_like(dem, dtype=bool)
+        source[np.ix_(lat_mask, lon_mask)] = True
+
+    if source is None:
+        return np.zeros_like(dem, dtype=bool)
+
     source = source & ~np.isnan(dem) & (dem <= elev_max)
     return source
 

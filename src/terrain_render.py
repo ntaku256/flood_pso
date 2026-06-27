@@ -30,6 +30,40 @@ import nbtlib
 from nbt_export import block_id
 
 
+class _DenseBlockSink:
+    """`blocks.append(Compound)` インターフェースを保ったまま、各 Compound の
+    pos/state を密3D配列 ``arr[y,z,x]``（uint16, 0=air, 値=palette index）へ書き込む
+    シム（施策③: {pos,state}個別Compound列挙 → 密numpy配列）。
+
+    16 箇所の append サイトを**無改変**で密配列化できる。座標は既存 Compound から
+    取り出すので x↔z 取り違えが原理的に起きず、重なりは後勝ち（代入の上書き）で
+    自然に再現される。Compound は append のたびに即捨てされ保持しないため、
+    数千万ボクセルでもメモリは密配列分に収まる（8-12GB 問題の根治）。
+    範囲外/上限超の書き込みは捨てる（litematic の valid フィルタと等価な境界クランプ）。
+    """
+    __slots__ = ("nx", "nz", "arr", "max_y")
+
+    def __init__(self, nx: int, nz: int, y_cap: int = 501):
+        self.nx = int(nx)
+        self.nz = int(nz)
+        self.arr = np.zeros((int(y_cap), int(nz), int(nx)), dtype=np.uint16)
+        self.max_y = 0
+
+    def append(self, compound) -> None:
+        p = compound["pos"]
+        x = int(p[0]); y = int(p[1]); z = int(p[2])
+        if 0 <= x < self.nx and 0 <= z < self.nz and 0 <= y < self.arr.shape[0]:
+            self.arr[y, z, x] = int(compound["state"])
+            if y > self.max_y:
+                self.max_y = y
+
+    def array(self, height: int) -> np.ndarray:
+        """size の Y（=max_y+1）まで切り詰めた密配列 (Y,Z,X) を返す。copy を返すので
+        呼び出し後に y_cap 分の大きい内部バッファは解放できる（書き出し時メモリ削減）。"""
+        h = max(1, min(int(height), self.arr.shape[0]))
+        return self.arr[:h].copy()
+
+
 # ─────────────────────────────────────────────────────────────
 # DEM 由来の地形特徴量
 # ─────────────────────────────────────────────────────────────
@@ -95,12 +129,22 @@ def cliff_aware_smooth(
 # 海岸線・海域
 # ─────────────────────────────────────────────────────────────
 
-def make_sea_mask(dem: np.ndarray, sea_level_m: float = 0.0) -> np.ndarray:
+def make_sea_mask(dem: np.ndarray, sea_level_m: float = 0.0,
+                  smooth_sigma: float = 0.0) -> np.ndarray:
     """
     海域マスク：NaN（NoData）または `dem <= sea_level_m` のセル。
     `Tellus.OceanClassification.isOcean` の簡易版（land mask が無いので NaN を ocean hint として扱う）。
+
+    smooth_sigma>0 で、二値マスクを σ ガウシアンで平滑化し 0.5 アイソラインで再二値化
+    （arnis land_cover.rs:104 compute_water_blend_smooth 移植）。海岸線の 1 セルの
+    ギザギザ（角張り）を曲線化する。σ は小さめ推奨（1.0〜1.5）。大きいと小島/入り江が消える。
     """
-    return np.isnan(dem) | (np.where(np.isnan(dem), 0.0, dem) <= sea_level_m)
+    raw = np.isnan(dem) | (np.where(np.isnan(dem), 0.0, dem) <= sea_level_m)
+    if smooth_sigma and smooth_sigma > 0.0:
+        from scipy.ndimage import gaussian_filter
+        blurred = gaussian_filter(raw.astype(np.float32), sigma=float(smooth_sigma))
+        return blurred >= 0.5
+    return raw
 
 
 def distance_to_shore(land_mask: np.ndarray, h_res_m: float) -> np.ndarray:
@@ -194,6 +238,54 @@ def classify_surface_block(
     if elev_m >= HIGHLAND_M and slope_m_per_m >= SLOPE_STEEP:
         return "stone"
     return "grass"
+
+
+# ── 軸6-2: 決定論的座標ハッシュによる地表ディザ混合 ──
+# 1クラス=1ブロックの単調地表を、世界座標ハッシュで重み付きブロック混合に散らし、
+# 岩肌/礫/耕地に自然な斑（テクスチャ感）を与える。乱数でなく座標ハッシュなので
+# タイル分割しても同じ世界セルは常に同じブロック＝litematic/Anvil 再現性を保つ。
+def coord_hash01(gx: np.ndarray, gz: np.ndarray) -> np.ndarray:
+    """世界ブロック座標 (gx, gz) → 決定論的 [0,1) ノイズ（splitmix64 系, ベクトル化）。
+    小さい構造化座標(隣接整数)でも均一になるよう avalanche の強い finalizer を使い、
+    よく撹拌された高ビット側を採用する。"""
+    x = (np.asarray(gx, dtype=np.int64) & 0xFFFFFFFF).astype(np.uint64)
+    z = (np.asarray(gz, dtype=np.int64) & 0xFFFFFFFF).astype(np.uint64)
+    h = x * np.uint64(0x9E3779B97F4A7C15)
+    h = h ^ (z * np.uint64(0xC2B2AE3D27D4EB4F))
+    h = h ^ (h >> np.uint64(30)); h = h * np.uint64(0xBF58476D1CE4E5B9)
+    h = h ^ (h >> np.uint64(27)); h = h * np.uint64(0x94D049BB133111EB)
+    h = h ^ (h >> np.uint64(31))
+    return (h >> np.uint64(40)).astype(np.float64) / float(1 << 24)   # 高24ビット
+
+# クラス → [(ブロックキー, 重み), ...]（重みは正規化される）。全キーは block_palette に実在。
+SURFACE_DITHER = {
+    "stone":       [("stone", 0.55), ("andesite", 0.16), ("cobblestone", 0.12),
+                    ("tuff", 0.09), ("gravel", 0.08)],
+    "gravel":      [("gravel", 0.68), ("coarse_dirt", 0.16), ("stone", 0.10),
+                    ("cobblestone", 0.06)],
+    "coarse_dirt": [("coarse_dirt", 0.76), ("dirt", 0.16), ("rooted_dirt", 0.08)],
+}
+
+
+def apply_surface_dither(surf_block: np.ndarray, cell_offset: tuple) -> None:
+    """surf_block(class文字列 grid, nz×nx) を世界座標ハッシュで in-place にディザ混合。
+    cell_offset=(gx0, gz0) はこのパッチ左上の世界ブロック座標（タイル間整合の基準）。"""
+    nz, nx = surf_block.shape
+    gx0, gz0 = int(cell_offset[0]), int(cell_offset[1])
+    gx = gx0 + np.arange(nx, dtype=np.int64)[None, :]
+    gz = gz0 + np.arange(nz, dtype=np.int64)[:, None]
+    h = coord_hash01(np.broadcast_to(gx, (nz, nx)), np.broadcast_to(gz, (nz, nx)))
+    orig = surf_block.copy()   # クラス膜は元配列から取る（ディザ出力="gravel"等を後段が再ディザしない）
+    for cls, mix in SURFACE_DITHER.items():
+        m = (orig == cls)
+        if not m.any():
+            continue
+        keys = [k for k, _ in mix]
+        ws = np.array([w for _, w in mix], dtype=np.float64)
+        cum = np.cumsum(ws) / ws.sum()
+        idx = np.clip(np.searchsorted(cum, h, side="right"), 0, len(keys) - 1)
+        for ki, k in enumerate(keys):
+            surf_block[m & (idx == ki)] = k
 
 
 def classify_surface_block_grid(
@@ -545,6 +637,116 @@ def build_building_maps(
             "wall_keys": wall_keys, "roof_keys": roof_keys, "style_keys": style_keys}
 
 
+def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
+                     y_surf_land, sea_mask, scale_land,
+                     wire_key="iron_bars", pylon_key="iron_bars") -> int:
+    """OSM 送電線（power=line/minor_line）+ 鉄塔/電柱（power=tower/pole）を立体化。
+
+    - 電線: voltage → 基準高さ(実m×scale_land)。径間（頂点間）ごとにカテナリ（垂れ）で
+      iron_bars 架線。両端の鉄塔頂を結ぶ直線から sag を引いて配置。
+    - 鉄塔: 線の各頂点（=実鉄塔位置）に iron_bars ラティス柱+頂部クロスアーム。
+      power=tower/pole の単独ノードも柱（tower=高,pole=低）として立てる（頂点と重複時は省略）。
+    返り値: 置いた最大 y（max_y 更新用）。FG-GML に電力設備が無いため OSM を入力に使う。
+    """
+    import math
+    seen: set = set()
+    ymax = [0]
+
+    def put(ix, iy, iz, key):
+        if not (0 <= ix < nx and 0 <= iz < nz) or iy < 0 or iy > 500:
+            return
+        k = (ix, iy, iz)
+        if k in seen:
+            return
+        seen.add(k)
+        if iy > ymax[0]:
+            ymax[0] = iy
+        blocks.append(nbtlib.Compound({
+            "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(iy), nbtlib.Int(iz)]),
+            "state": block_id(key),
+        }))
+
+    def ground_y(x, z):
+        i, j = int(round(x)), int(round(z))
+        if 0 <= j < nz and 0 <= i < nx and np.isfinite(y_surf_land[j, i]):
+            return int(y_surf_land[j, i])
+        return None
+
+    def base_h_m(volt):
+        if volt >= 500000:
+            return 50.0
+        if volt >= 220000:
+            return 40.0
+        if volt >= 110000:
+            return 30.0
+        if volt >= 60000:
+            return 22.0
+        if volt > 0:
+            return 14.0
+        return 12.0
+
+    def pylon(ix, iz, gy, top, arm):
+        for fy in range(gy + 1, top + 1):
+            put(ix, fy, iz, pylon_key)
+        if arm:                                   # 頂部クロスアーム（鉄塔シルエット）
+            for d in (-2, -1, 1, 2):
+                put(ix + d, top, iz, pylon_key)
+                put(ix, top, iz + d, pylon_key)
+
+    pylon_cells: set = set()
+
+    # ── 送電線 + 線頂点の鉄塔 ──
+    for L in (lines or []):
+        pts = [_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, nz, nx) for la, lo in L["coords"]]
+        bh = int(round(base_h_m(int(L.get("voltage", 0))) * scale_land))
+        # 各頂点（実鉄塔位置）に柱
+        vert_top = {}
+        for (x, z) in pts:
+            ix, iz = int(round(x)), int(round(z))
+            gy = ground_y(x, z)
+            if gy is None:
+                continue
+            vert_top[(ix, iz)] = gy + bh
+            if (ix, iz) not in pylon_cells:
+                pylon_cells.add((ix, iz))
+                pylon(ix, iz, gy, gy + bh, arm=(bh >= 18))
+        # 径間ごとに架線（カテナリ）。両端鉄塔頂を線形補間し sag を引く
+        for (x0, z0), (x1, z1) in zip(pts, pts[1:]):
+            g0, g1 = ground_y(x0, z0), ground_y(x1, z1)
+            if g0 is None or g1 is None:
+                continue
+            dist = math.hypot(x1 - x0, z1 - z0)
+            n = int(dist) + 1
+            max_sag = min(max(dist / 15.0, 1.0), 6.0)
+            for t in range(n + 1):
+                f = t / n if n > 0 else 0.0
+                xi, zi = x0 + (x1 - x0) * f, z0 + (z1 - z0) * f
+                gy = ground_y(xi, zi)
+                if gy is None:
+                    continue
+                top = (g0 + bh) * (1.0 - f) + (g1 + bh) * f       # 両端鉄塔頂の直線
+                wy = int(round(top - 4.0 * max_sag * f * (1.0 - f)))
+                if wy <= gy:
+                    wy = gy + 1
+                put(int(round(xi)), wy, int(round(zi)), wire_key)
+
+    # ── 単独ノード（線頂点に無い鉄塔/電柱） ──
+    for tw in (towers or []):
+        x, z = _lonlat_to_grid_xy(tw["lat"], tw["lon"], patch_bbox_latlon, nz, nx)
+        ix, iz = int(round(x)), int(round(z))
+        if (ix, iz) in pylon_cells:
+            continue
+        gy = ground_y(x, z)
+        if gy is None:
+            continue
+        pylon_cells.add((ix, iz))
+        is_tower = tw.get("kind") == "tower"
+        h_m = 30.0 if is_tower else 10.0
+        pylon(ix, iz, gy, gy + int(round(h_m * scale_land)), arm=is_tower)
+
+    return ymax[0]
+
+
 def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                       y_surf_land, sea_mask, y_sea_surface, y_sea_floor,
                       scale_land, h_res_block_m, surf_block=None,
@@ -630,6 +832,8 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                 ys.append(int(y_surf_land[j, i]))
         return int(np.median(ys)) if ys else terrain_y(*end_pt)
 
+    # ── 軸7-1: 各橋の幾何を前計算（pts/seg/total/baseline/has_water/min_deck） ──
+    infos = []
     for b in bridges:
         pts = [_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, nz, nx) for la, lo in b["coords"]]
         rc = b.get("road_class", "normal")
@@ -639,6 +843,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         for (x0, z0), (x1, z1) in zip(pts, pts[1:]):
             L = math.hypot(x1 - x0, z1 - z0); seg.append(L); total += L
         if total < 2.0:
+            infos.append(None)
             continue
         startS = end_base(pts[0], pts[1] if len(pts) > 1 else pts[0])
         endS = end_base(pts[-1], pts[-2] if len(pts) > 1 else pts[-1])
@@ -655,6 +860,73 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
             if has_water:
                 break
         min_deck = (int(y_sea_surface) + clear_full) if has_water else -1.0e9
+        infos.append(dict(pts=pts, seg=seg, total=total, startS=startS, endS=endS,
+                          rise_full=rise_full, clear_full=clear_full, has_water=has_water,
+                          min_deck=min_deck, half_w=half_w, rc=rc, layer=layer,
+                          name=(b.get("name") or "").strip()))
+
+    # ── 軸7-1: UnionFind で橋wayをグルーピング（①端点共有+同layer ②同一の非空name）──
+    parent = list(range(len(infos)))
+    def _find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]; a = parent[a]
+        return a
+    ENDPOINT_TOL = max(2.0, 3.0 / max(h_res_block_m, 0.1))   # ~3m 以内の端点共有を連結とみなす
+    for i in range(len(infos)):
+        if infos[i] is None:
+            continue
+        ei = (infos[i]["pts"][0], infos[i]["pts"][-1])
+        for j in range(i + 1, len(infos)):
+            if infos[j] is None:
+                continue
+            same_name = bool(infos[i]["name"]) and infos[i]["name"] == infos[j]["name"]
+            share = False
+            if infos[i]["layer"] == infos[j]["layer"]:
+                for pa in ei:
+                    for pb in (infos[j]["pts"][0], infos[j]["pts"][-1]):
+                        if math.hypot(pa[0] - pb[0], pa[1] - pb[1]) <= ENDPOINT_TOL:
+                            share = True
+            if same_name or share:
+                ra, rb = _find(i), _find(j)
+                if ra != rb:
+                    parent[ra] = rb
+
+    # ── 軸7-2: グループ単位で平坦判定。端点地形差(dip) < 4block の多way橋だけ共有フラット
+    #    デッキ(=最高バンク/水面+clearance)に統一。dip 大（自然な谷/起伏）なら per-way のまま
+    #    地形に沿わせる。これで分割 way の継ぎ目段差を消しつつ、谷で浮く不自然さも防ぐ。──
+    from collections import defaultdict as _dd
+    groups = _dd(list)
+    for i in range(len(infos)):
+        if infos[i] is not None:
+            groups[_find(i)].append(i)
+    DIP_THR = 4.0 * scale_land
+    for _g, members in groups.items():
+        if len(members) < 2:
+            continue
+        ebs = []
+        for i in members:
+            ebs += [infos[i]["startS"], infos[i]["endS"]]
+        if max(ebs) - min(ebs) >= DIP_THR:
+            continue                                  # 谷/起伏 → 地形追従（per-way 維持）
+        hw = any(infos[i]["has_water"] for i in members)
+        g_min_deck = (max(int(y_sea_surface) + infos[i]["clear_full"] for i in members)
+                      if hw else -1.0e9)
+        g_deck = max(ebs)
+        if hw:
+            g_deck = max(g_deck, g_min_deck)
+        for i in members:                             # 共有フラットデッキに上書き
+            infos[i]["startS"] = g_deck
+            infos[i]["endS"] = g_deck
+            infos[i]["min_deck"] = g_min_deck
+
+    # ── レンダリング（本体は従来どおり。設定は infos から、グループは上書き済み）──
+    for info in infos:
+        if info is None:
+            continue
+        pts = info["pts"]; seg = info["seg"]; total = info["total"]
+        startS = info["startS"]; endS = info["endS"]
+        rise_full = info["rise_full"]; min_deck = info["min_deck"]
+        half_w = info["half_w"]; rc = info["rc"]
         pier_step = max(4.0, PIER_SPACING_M / max(h_res_block_m, 0.1))
         next_pier = pier_step
         s_acc = 0.0
@@ -732,6 +1004,7 @@ def dem_to_blocks_enhanced(
     v_exag_sea:  float = 0.5,
     sea_level_m: float = 0.0,
     ocean_max_depth_m: float = 8.0,
+    sea_smooth_sigma: float = 1.0,
     smooth_sigma_cells: float = 1.0,
     cliff_threshold_m_per_m: float = 0.4,
     deep_ground: int = 8,
@@ -759,13 +1032,26 @@ def dem_to_blocks_enhanced(
     legend_layer: bool = False,
     surface_grid_override: np.ndarray | None = None,
     bridges: list | None = None,
+    powerlines: list | None = None,
+    power_towers: list | None = None,
+    parkings: list | None = None,
+    ortho_rgb: np.ndarray | None = None,
     patch_bbox_latlon: tuple | None = None,
     road_block: str = "andesite",
     road_major_mask: np.ndarray | None = None,
     road_minor_block: str = "gravel",
+    # 道路の「一番外側」に引く 1 ブロック境界線（普通=灰色コンクリ / 小路=青緑テラコッタ）
+    road_edge_major_block: str = "gray_concrete",
+    road_edge_minor_block: str = "cyan_terracotta",
+    road_edge_close_iter: int = 9,
+    road_edge_hole_fill_cells: int = 800,         # closing 残穴のうち極小穴(交差点ダイヤ)を埋める閾値
+    road_curb_osm_mask: np.ndarray | None = None,  # OSM道路センターライン塗りつぶし回廊(交差点判定用)
+    road_under_building: bool = True,             # 道路が端から端まで横断する建物(連絡通路)の1Fを抜いて通す
     water_mask: np.ndarray | None = None,
     water_block: str = "water",
     evac_facilities: list | None = None,
+    cell_offset: tuple = (0, 0),
+    dither_surface: bool = True,
 ) -> tuple[list, list[int]]:
     """
     `nbt_export.dem_to_blocks` の置き換え。Tellus 風の改善 5 点を適用：
@@ -774,7 +1060,10 @@ def dem_to_blocks_enhanced(
       2. ダウンサンプル後に **海/陸を sea_level で分離**
       3. 海セルは **海岸からの距離で段階的水深**、海底に砂/砂利
       4. 地表ブロックは **slope/convexity/海岸距離** で sand/gravel/stone/grass を判定
-      5. 地盤柱は `deep_ground` ブロック（既定 8、従来 3）
+      5. 地盤柱は **可変アンダーフィル**（arnis 移植）：8近傍の最低地表 Y まで
+         stone で埋め、深さは `deep_ground` を上限にクランプ。平地は 2 ブロックで
+         済みブロック数が激減し、崖面は隣接セルの底まで埋めて見える穴を塞ぐ。
+         （従来は全セル一律 `deep_ground` 本＝地下 stone を無駄に増やしていた）
 
     Returns: (blocks_list, [nx, max_y+1, nz])
     """
@@ -824,7 +1113,7 @@ def dem_to_blocks_enhanced(
             tree_ds = np.nanmean(tp, axis=(1, 3))
 
     # ─── 3) 海/陸マスク + 地形特徴量（ダウンサンプル後の解像度で計算） ───
-    sea_mask  = make_sea_mask(dem_ds, sea_level_m)
+    sea_mask  = make_sea_mask(dem_ds, sea_level_m, smooth_sigma=sea_smooth_sigma)
     land_mask = ~sea_mask
 
     h_res_block_m = h_res_block
@@ -909,25 +1198,98 @@ def dem_to_blocks_enhanced(
         surf_block[beach & gentle] = "sand"                  # 砂浜（最近・緩斜面）
         surf_block[beach & ~gentle] = "stone"                # 護岸/磯（最近・急斜面）
 
-    # 道路を地表に上書き（陸セルのみ）。細道=road_minor_block(砂利)、幹線=road_block(舗装)
+    # 駐車場(OSM amenity=parking)を先に描く。道路をこの後に上書きすることで「領域競合=道路優先」
+    # （駐車場は粒度が粗いので、駐車場内でも道路の安山岩/砂利を生成する）。オルソ有=写真アスファルト色を
+    # 残し行ベースライン/境界を合成、無=black_concrete。車は立体化せず色のみ。
+    _parking_cars = []
+    parking_area = None
+    parking_boundary = None
+    _road_filled = None                  # closing済みの塗り潰し道路(連絡通路の貫通判定/1F削り用)
+    _pk_boundary_key = "gray_concrete"   # 駐車場境界線の色（render_parking の boundary_key と一致）
+    if parkings and patch_bbox_latlon is not None:
+        from parking_render import render_parking
+        # ortho_rgb を surf_block 解像度(nz,nx)へ整合（surface_grid_override と同じ factor 間引き）
+        _orgb = ortho_rgb
+        if _orgb is not None and _orgb.shape[:2] != (nz, nx):
+            if _orgb.shape[:2] == dem_patch.shape:
+                _orgb = _orgb[:nz * factor, :nx * factor].reshape(
+                    nz, factor, nx, factor, 3)[:, factor // 2, :, factor // 2]
+            else:
+                _orgb = None
+        land_for_pk = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
+        _parking_cars, parking_area, parking_boundary = render_parking(
+            parkings, patch_bbox_latlon, nz, nx,
+            surf_block=surf_block, y_surf_land=y_surf_land, land_mask=land_for_pk,
+            ortho_rgb=_orgb, h_res_block_m=h_res_block, boundary_key=_pk_boundary_key,
+        )
+
+    # 道路を地表に上書き（陸セルのみ）。RdEdg=道路縁バッファなので「左右2本の帯＋中央オルソ」。
+    # 細道=road_minor_block(砂利)、幹線=road_block(andesite舗装)。駐車場の後＝道路優先。
     if road_mask is not None and road_mask.shape == surf_block.shape:
         land_for_road = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
         surf_block[road_mask & land_for_road] = road_minor_block
         if road_major_mask is not None and road_major_mask.shape == surf_block.shape:
             surf_block[road_major_mask & land_for_road] = road_block
 
+        # ── 道路の「一番外側」に 1 ブロックの境界線（curb）を引く ──
+        #   道路中央(オルソ)の細い隙間だけ closing で埋めて左右の帯を一体化 → その外周 1 セル。
+        #   中央は埋めず line セルにのみ描くので、オルソ路面はそのまま残る。
+        #   色: 普通道路(幹線)=road_edge_major_block / 小路=road_edge_minor_block。
+        from scipy.ndimage import (binary_closing as _bclose, binary_erosion as _berode,
+                                   binary_fill_holes as _bfill, label as _blabel)
+        it = max(1, int(road_edge_close_iter))
+        band = _bclose(road_mask, iterations=it, border_value=0)
+        # 交差点の偽枠線対策: closing が広い道路の交差点中心に残す「閉じ穴(ダイヤ)」の外周が
+        #   道路を横切る余分な線になる。閉じ穴のうち ①OSM道路センターライン回廊の上にある穴
+        #   (=交差点で連続する同一道路) ②極小穴 だけを埋め、実街区の内側境界は残す。
+        holes = _bfill(band) & ~band
+        if holes.any():
+            hlab, hn = _blabel(holes)
+            hsz = np.bincount(hlab.ravel())
+            osm_c = (road_curb_osm_mask if (road_curb_osm_mask is not None
+                     and road_curb_osm_mask.shape == band.shape) else None)
+            thr = max(0, int(road_edge_hole_fill_cells))
+            for k in range(1, hn + 1):
+                hk = (hlab == k)
+                area = int(hsz[k])
+                on_road = (int((hk & osm_c).sum()) / max(area, 1)) if osm_c is not None else 0.0
+                if area < thr or on_road > 0.3:
+                    band |= hk
+        _road_filled = band                       # 連絡通路の貫通判定/1F削りに使う塗り潰し道路
+        edge_line = band & ~_berode(band) & land_for_road
+        # 駐車場領域内には curb を引かない（駐車場自身の境界線と二重になり見にくいため）。
+        if parking_area is not None and parking_area.shape == edge_line.shape:
+            edge_line = edge_line & ~parking_area
+        rmaj = (road_major_mask if (road_major_mask is not None
+                and road_major_mask.shape == surf_block.shape)
+                else np.zeros_like(road_mask))
+        near_major = binary_dilation(_bclose(rmaj, iterations=it, border_value=0), iterations=2)
+        line_minor = edge_line & ~near_major
+        line_major = edge_line & near_major
+        surf_block[line_minor] = road_edge_minor_block
+        surf_block[line_major] = road_edge_major_block
+
+    # 駐車場の境界線を道路の後に再描画して保護（道路優先で路面は道路だが、駐車場の縁取りは消さない）。
+    if parking_boundary is not None and parking_boundary.shape == surf_block.shape:
+        surf_block[parking_boundary] = _pk_boundary_key
+
     # FG-GML 水域(WA/WStrA: 河川・池等)を地表に水面として上書き（陸セルのみ。海は別途 sea_mask）
     if water_mask is not None and water_mask.shape == surf_block.shape:
         land_for_water = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
         surf_block[water_mask & land_for_water] = water_block
 
+    # 軸6-2: 単調な岩/礫/耕地クラスを世界座標ハッシュで重み付き混合にディザ（道路/水域/砂浜
+    # など意図的な上書きの後に適用し、それらは混ぜない）。cell_offset で世界座標に整合。
+    if dither_surface:
+        apply_surface_dither(surf_block, cell_offset)
+
     valid_elevs = dem_ds[~np.isnan(dem_ds)]
     max_elev_y = (int(valid_elevs.max() * scale_land) if len(valid_elevs) > 0 else 1) + _lift
     max_y = min(max(max_elev_y + 5, y_sea_surface + 2), 500)
 
-    # ─── 6) ブロック生成（numpy ベクトルで append） ───
+    # ─── 6) ブロック生成（施策③: append を密配列シムへ。後勝ちは上書きで自然再現） ───
     BZ, BX = np.meshgrid(np.arange(nz), np.arange(nx), indexing="ij")
-    blocks: list = []
+    blocks = _DenseBlockSink(nx, nz, y_cap=501)
 
     # --- 海セル：海底 stone/sand 柱 + 水柱 ---
     sea_idx = np.argwhere(sea_mask)
@@ -960,13 +1322,22 @@ def dem_to_blocks_enhanced(
                 "state": block_id("water"),
             }))
 
-    # --- 陸セル：deep_ground ブロックの stone 地盤柱 + 地表 ---
+    # --- 陸セル：可変アンダーフィル(arnis ground_generation.rs:716-758 移植) + 地表 ---
+    # 固定 deep_ground 本ではなく、8近傍の最低地表 Y までを stone で埋める。平地は
+    # neigh_min≈y_top → 2 ブロックで済みブロック数が激減し、崖面は隣接セルの底まで
+    # 埋めて見える穴を塞ぐ。深さは [2, deep_ground] にクランプ（従来より常に少ない）。
+    from scipy.ndimage import minimum_filter as _min_filter
+    _yfm = np.where(land_mask, y_surf_land.astype(np.float32), np.float32(1e9))
+    _neigh_min = _min_filter(_yfm, size=3, mode="nearest")
+    _under_depth = np.clip(
+        y_surf_land.astype(np.int32) - _neigh_min.astype(np.int32) + 1,
+        2, int(max(2, deep_ground))).astype(np.int32)
     land_idx = np.argwhere(land_mask)
     for j, i_ in land_idx.tolist():
         bx_v = int(BX[j, i_]); bz_v = int(BZ[j, i_])
         y_top = int(y_surf_land[j, i_])
-        # 地盤柱（凡例層より下には伸ばさない＝_lift で下限）
-        for dy in range(max(_lift, y_top - deep_ground), y_top):
+        # 地盤柱（凡例層より下には伸ばさない＝_lift で下限。深さは近傍最低Yまで可変）
+        for dy in range(max(_lift, y_top - int(_under_depth[j, i_])), y_top):
             blocks.append(nbtlib.Compound({
                 "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(dy), nbtlib.Int(bz_v)]),
                 "state": block_id("stone"),
@@ -1067,6 +1438,47 @@ def dem_to_blocks_enhanced(
                                 for k in roof_by_id]
         _tol2 = float(roof_color_tol) * float(roof_color_tol)
         from block_palette import BLOCKS as _BP2
+
+        # ── 連絡通路(渡り廊下)の検出と 1F 抜き ──
+        #   FGD道路バッファは広場/駐車場まで含み広大で、「道路がfootprintに重なる」だけでは普通の道路脇
+        #   建物まで誤検出する(9基準で検証済・分離不可)。実際の連絡通路は『2棟の建物を繋ぐ細長い渡り廊下を
+        #   道路が貫く』形状。そこで次の3条件で検出する:
+        #     (1) 細長い         : footprint座標のPCA主軸/副軸比 >= 2.2
+        #     (2) 橋渡し         : 膨張2セルで隣接する別建物が 2 種以上(行き止まり/単独棟を排除)
+        #     (3) 道路が貫く     : footprint ∩ 塗り潰し道路 >= 10 セル
+        #   検出した渡り廊下の footprint∩道路 の 1F を抜いて下を通れるようにする(上階は通路天井に残る)。
+        tunnel_cells = None
+        if (road_under_building and building_id is not None and _road_filled is not None
+                and _road_filled.shape == building_mask.shape):
+            from scipy.ndimage import binary_dilation as _tdil
+            tunnel_cells = np.zeros((nz, nx), bool)
+            road_in_bld = _road_filled & building_mask
+            _n_tunnel = 0
+            _bids = np.unique(building_id[(building_id >= 0) & building_mask])
+            for _b in _bids.tolist():
+                fp = (building_id == _b)
+                nfp = int(fp.sum())
+                if nfp < 12:
+                    continue
+                rib = road_in_bld & fp
+                if int(rib.sum()) < 10:
+                    continue                                  # 道路が貫いていない → 対象外
+                ys2, xs2 = np.where(fp)                        # (1) 細長さ = PCA主軸/副軸
+                pts = np.column_stack((ys2 - ys2.mean(), xs2 - xs2.mean())).astype(float)
+                ev = np.sort(np.linalg.eigvalsh(np.cov(pts.T)))[::-1]
+                pca = (ev[0] / max(float(ev[1]), 1e-6)) ** 0.5
+                if pca < 2.2:
+                    continue                                  # 細長くない(本体/道路脇の普通建物) → 対象外
+                nb = _tdil(fp, iterations=2) & ~fp            # (2) 2棟以上の別建物を橋渡しするか
+                neigh = np.unique(building_id[nb & (building_id >= 0)])
+                if int(neigh.size) < 2:
+                    continue                                  # 行き止まり/単独棟 → 対象外
+                tunnel_cells |= rib
+                _n_tunnel += 1
+            if _n_tunnel:
+                print(f"  [連絡通路] 渡り廊下(細長×2棟橋渡し×道路貫通)を {_n_tunnel}棟検出し1Fを抜いて通路化 "
+                      f"({int(tunnel_cells.sum())} cells)")
+
         b_idx = np.argwhere(building_mask & land_mask)
         b_max_y = 0
         for j, i_ in b_idx.tolist():
@@ -1111,13 +1523,19 @@ def dem_to_blocks_enhanced(
             is_door = bool(door_cell[j, i_])
             light_here = (bx_v % 5 == 2) and (bz_v % 5 == 2)   # 疎な内側格子に照明
             attic = hollow_buildings and (ceil_y < top_y)        # 寄棟で軒より上に屋根裏がある棟
-            # 基礎: 地盤(y_top)から基準面(y_base)まで壁材で充填（傾斜地の段差を塞ぐ）
-            for fy in range(y_top + 1, y_base + 1):
-                blocks.append(nbtlib.Compound({
-                    "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(fy), nbtlib.Int(bz_v)]),
-                    "state": block_id(wall_kind),
-                }))
+            # 連絡通路セル: この棟の下を道路がくぐる位置。1F(y_base+1..y_base+fh)を抜いて通路化する。
+            tunnel_here = bool(tunnel_cells[j, i_]) if tunnel_cells is not None else False
+            # 基礎: 地盤(y_top)から基準面(y_base)まで壁材で充填（傾斜地の段差を塞ぐ）。通路下は塞がない。
+            if not tunnel_here:
+                for fy in range(y_top + 1, y_base + 1):
+                    blocks.append(nbtlib.Compound({
+                        "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(fy), nbtlib.Int(bz_v)]),
+                        "state": block_id(wall_kind),
+                    }))
             for fy in range(y_base + 1, top_y + 1):
+                # 連絡通路: 1F分(y_base+fh まで)はブロックを置かず空ける。2Fの床スラブ以上は残し通路の天井に。
+                if tunnel_here and fy <= y_base + fh:
+                    continue
                 rel = fy - (y_base + 1)
                 r = rel % fh                       # 階内位置 0..fh-1（0=床スラブ位置）
                 is_slab = (r == 0 and fy != y_base + 1)
@@ -1268,6 +1686,22 @@ def dem_to_blocks_enhanced(
         )
         max_y = max(max_y, bridge_ymax + 2)
 
+    # --- 送電線・鉄塔（OSM power=line/tower）。橋の後に立体化 ---
+    if (powerlines or power_towers) and patch_bbox_latlon is not None:
+        power_ymax = add_power_blocks(
+            blocks, powerlines, power_towers, patch_bbox_latlon, nz, nx,
+            y_surf_land=y_surf_land, sea_mask=sea_mask, scale_land=scale_land,
+        )
+        max_y = max(max_y, power_ymax + 2)
+
+    # --- 駐車場の停車車両（オルソ検出）を 1 段持ち上げて配置 ---
+    for (ix, iy, iz, key) in _parking_cars:
+        if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
+            blocks.append(nbtlib.Compound({
+                "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(iy), nbtlib.Int(iz)]),
+                "state": block_id(key)}))
+            max_y = max(max_y, iy + 1)
+
     # --- 避難所マーカー（国土数値情報 P20）。地表から緑柱+発光で遠くから視認 ---
     if evac_facilities and patch_bbox_latlon is not None:
         EVAC_H = 28
@@ -1352,4 +1786,4 @@ def dem_to_blocks_enhanced(
             tree_grid[tree_cells] = "green_stained_glass"
         _emit(LEGEND_YS[2], tree_grid, full=True)
 
-    return blocks, [nx, max_y + 1, nz]
+    return blocks.array(max_y + 1), [nx, max_y + 1, nz]

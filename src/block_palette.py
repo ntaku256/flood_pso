@@ -56,6 +56,7 @@ BLOCKS: dict[str, tuple[str, tuple[int, int, int], str]] = {
     # ── 建物内部（窓・照明）。地表オルソ色マッチには使わない（_NON_MATCH で除外） ──
     "glass":             ("minecraft:glass", (200, 224, 233), "opaque"),
     "glowstone":         ("minecraft:glowstone", (255, 226, 142), "opaque"),
+    "iron_bars":         ("minecraft:iron_bars", (130, 130, 135), "opaque"),
 
     # ── 凡例(地下データ層)用の色付きガラス。地表オルソ色マッチには使わない（_NON_MATCH 除外） ──
     "white_stained_glass":      ("minecraft:white_stained_glass", (236, 240, 240), "opaque"),
@@ -141,7 +142,7 @@ PALETTE_KEYS: list[str] = list(BLOCKS.keys())
 
 # カラーマッチに使うアンカー（opaque のみ。air/water/ice は除外）
 # 発光等のマーカー専用ブロックは地表オルソ色マッチのアンカーから除外
-_NON_MATCH = {"sea_lantern", "glass", "glowstone",
+_NON_MATCH = {"sea_lantern", "glass", "glowstone", "iron_bars",
               "white_stained_glass", "red_stained_glass", "orange_stained_glass",
               "light_blue_stained_glass", "blue_stained_glass",
               "green_stained_glass", "black_stained_glass"}

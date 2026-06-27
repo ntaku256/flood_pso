@@ -274,42 +274,109 @@ def build_meta_compound(meta: dict) -> nbtlib.Compound:
     return nbtlib.Compound(out)
 
 
-def write_nbt_structure(blocks: list, size: list, out_path: str,
-                        meta: dict | None = None):
+def _finalize_meta(meta: dict | None):
+    """flood_pso_meta 用の最終 dict を nbtlib.Compound 化（両書き出し経路で共有）。"""
+    if meta is None:
+        return None
+    full_meta = dict(meta)
+    full_meta.setdefault("schema_version", 1)
+    full_meta.setdefault("generator", "flood_pso/nbt_export.py")
+    full_meta.setdefault("timestamp_utc",
+                         _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z")
+    full_meta.setdefault("git_revision", _git_revision())
+    return build_meta_compound(full_meta)
+
+
+# 1 ボクセル = Compound{pos:List<Int>[x,y,z], state:Int} の NBT ペイロード(固定36byte)。
+# 可変部は x(11..15) y(15..19) z(19..23) state(31..35) の big-endian int32 のみ。
+_VOXEL_TMPL = (b"\x09\x00\x03pos\x03\x00\x00\x00\x03" + b"\x00" * 12
+               + b"\x03\x00\x05state" + b"\x00" * 4 + b"\x00")
+assert len(_VOXEL_TMPL) == 36
+
+
+def _write_nbt_dense(arr: np.ndarray, size: list, out_path,
+                     meta_compound=None) -> int:
+    """密3D配列 ``arr[y,z,x]``（uint16, 0=air, 値=palette index）を Structure NBT へ
+    **ストリーミング書き出し**する（施策③）。
+
+    非air ボクセルを numpy でベクトル encode し gzip ストリームへ直書きするため、
+    中間 nbtlib.Compound 群を一切作らず、メモリは密配列＋数百MBのバッファに収まる
+    （docs/06 の 8-12GB 問題の根治）。出力は標準 NBT バイナリで、既存の nbtlib／
+    nbt_preview._parse_fast の双方で読め、従来 write_nbt_structure と等価。
+    返り値: 書き込んだ非air ブロック数。
     """
-    Minecraft Structure NBT 形式でファイルを書き出す。
-    Minecraft 1.17+ の Structure Block 形式。
-
-    meta が与えられたら ``flood_pso_meta`` キーとして埋め込む（任意のkey-value辞書）。
-    """
-    palette_list = nbtlib.List[nbtlib.Compound]([PALETTE[k] for k in PALETTE_LIST_KEYS])
-    blocks_list  = nbtlib.List[nbtlib.Compound](blocks)
-    size_list    = nbtlib.List[nbtlib.Int]([nbtlib.Int(s) for s in size])
-
-    root = {
-        "DataVersion": nbtlib.Int(4671),   # Minecraft 1.21.4相当
-        "author":      nbtlib.String("flood_pso"),
-        "size":        size_list,
-        "palette":     palette_list,
-        "blocks":      blocks_list,
-        "entities":    nbtlib.List[nbtlib.Compound]([]),
-    }
-
-    if meta is not None:
-        full_meta = dict(meta)
-        full_meta.setdefault("schema_version", 1)
-        full_meta.setdefault("generator", "flood_pso/nbt_export.py")
-        full_meta.setdefault("timestamp_utc",
-                             _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z")
-        full_meta.setdefault("git_revision", _git_revision())
-        root["flood_pso_meta"] = build_meta_compound(full_meta)
-
-    nbt_file = nbtlib.File(nbtlib.Compound(root))
+    ys, zs, xs = np.nonzero(arr)            # air(=0) を除く非air(Y,Z,X 昇順)
+    states = arr[ys, zs, xs]
+    n = int(xs.shape[0])
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    nbt_file.save(str(out_path), gzipped=True)
+
+    def _named(tag_id: int, name: bytes) -> bytes:
+        return bytes([tag_id]) + struct.pack(">H", len(name)) + name
+
+    rec = np.frombuffer(_VOXEL_TMPL, dtype=np.uint8)
+    with gzip.open(str(out_path), "wb") as f:
+        f.write(b"\x0a\x00\x00")                                   # root TAG_Compound, name ""
+        f.write(_named(3, b"DataVersion") + struct.pack(">i", 4671))
+        au = b"flood_pso"
+        f.write(_named(8, b"author") + struct.pack(">H", len(au)) + au)
+        f.write(_named(9, b"size") + b"\x03" + struct.pack(">i", 3)
+                + struct.pack(">iii", int(size[0]), int(size[1]), int(size[2])))
+        f.write(_named(9, b"palette") + b"\x0a" + struct.pack(">i", len(PALETTE_LIST_KEYS)))
+        for k in PALETTE_LIST_KEYS:
+            PALETTE[k].write(f)                                    # compound payload+end
+        f.write(_named(9, b"blocks") + b"\x0a" + struct.pack(">i", n))
+        CH = 2_000_000
+        for s0 in range(0, n, CH):
+            s1 = min(n, s0 + CH); m = s1 - s0
+            buf = np.broadcast_to(rec, (m, 36)).copy()
+            buf[:, 11:15] = xs[s0:s1].astype(">i4").view(np.uint8).reshape(-1, 4)
+            buf[:, 15:19] = ys[s0:s1].astype(">i4").view(np.uint8).reshape(-1, 4)
+            buf[:, 19:23] = zs[s0:s1].astype(">i4").view(np.uint8).reshape(-1, 4)
+            buf[:, 31:35] = states[s0:s1].astype(">i4").view(np.uint8).reshape(-1, 4)
+            f.write(buf.tobytes())
+        f.write(_named(9, b"entities") + b"\x0a" + struct.pack(">i", 0))   # 空 List<Compound>
+        if meta_compound is not None:
+            f.write(_named(10, b"flood_pso_meta"))
+            meta_compound.write(f)
+        f.write(b"\x00")                                           # root TAG_End
+    return n
+
+
+def write_nbt_structure(blocks, size: list, out_path: str,
+                        meta: dict | None = None):
+    """
+    Minecraft Structure NBT 形式（1.17+ Structure Block）でファイルを書き出す。
+
+    blocks が **np.ndarray**（密3D配列 ``arr[y,z,x]``, 0=air）なら _write_nbt_dense で
+    ストリーミング省メモリ書き出し（施策③）。**list[Compound]**（legacy）なら従来の
+    nbtlib 直列化。meta が与えられたら ``flood_pso_meta`` を埋め込む。
+    """
+    meta_compound = _finalize_meta(meta)
+    out_path = Path(out_path)
+
+    if isinstance(blocks, np.ndarray):
+        n = _write_nbt_dense(blocks, size, out_path, meta_compound)
+    else:
+        palette_list = nbtlib.List[nbtlib.Compound]([PALETTE[k] for k in PALETTE_LIST_KEYS])
+        blocks_list  = nbtlib.List[nbtlib.Compound](blocks)
+        size_list    = nbtlib.List[nbtlib.Int]([nbtlib.Int(s) for s in size])
+        root = {
+            "DataVersion": nbtlib.Int(4671),   # Minecraft 1.21.4相当
+            "author":      nbtlib.String("flood_pso"),
+            "size":        size_list,
+            "palette":     palette_list,
+            "blocks":      blocks_list,
+            "entities":    nbtlib.List[nbtlib.Compound]([]),
+        }
+        if meta_compound is not None:
+            root["flood_pso_meta"] = meta_compound
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        nbtlib.File(nbtlib.Compound(root)).save(str(out_path), gzipped=True)
+        n = len(blocks)
+
     size_mb = out_path.stat().st_size / 1e6
-    print(f"Saved: {out_path} ({size_mb:.1f} MB, {len(blocks):,} blocks)"
+    print(f"Saved: {out_path} ({size_mb:.1f} MB, {n:,} blocks)"
           + (" [+meta]" if meta is not None else ""))
 
 
@@ -336,6 +403,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   use_esa: bool = False,
                   use_osm: bool = False,
                   use_fgd: bool = False,
+                  road_curb_use_osm: bool = True,   # 道路境界線の交差点偽枠線をOSM回廊で抑制(既定ON)
                   fgd_bld_xml: str | None = None,
                   fgd_rdedg_xml: str | None = None,
                   fgd_wa_xml: str | None = None,
@@ -343,6 +411,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   surface_ortho: bool = False,
                   ortho_zoom: int = 18,
                   ortho_saturation: float = 1.4,
+                  ortho_layer: str = "seamlessphoto",
                   building_height_m: float = 6.0,
                   building_height_grid: np.ndarray | None = None,
                   tree_height_grid: np.ndarray | None = None,
@@ -351,9 +420,17 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   tellus_world_scale: float = 1.0,
                   tellus_sea_level_y: int = 0,
                   bridges_json: str | None = None,
+                  power_json: str | None = None,
+                  parking_json: str | None = None,
                   evac_xml: str | None = None,
                   hollow_buildings: bool = True,
-                  legend_layer: bool = False):
+                  legend_layer: bool = False,
+                  tile_crop: tuple | None = None,
+                  anvil_out: str | None = None,
+                  anvil_offset: tuple | None = None,
+                  anvil_merge: bool = False,
+                  anvil_level_name: str = "flood_pso",
+                  anvil_level_template: str | None = None):
     """
     DEMと浸水マップの指定範囲をMinecraft NBT Structureに変換する。
 
@@ -527,6 +604,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
     res_lon = dem_info_render["res_lon"]
     bh_patch = None   # 建物高さ[m] パッチ（DSM 由来, 任意）
     tree_patch = None  # 樹冠高[m] パッチ（LiDAR class3 由来, 任意）
+    _tile_core = None  # 施策④halo: (top,left,core_rows,core_cols) ブロック単位の切り戻し窓
+    r0 = c0 = 0        # パッチの DEM セル原点（軸6-2 ディザの世界座標基準。tellus 経路は 0）
 
     if terrain_source == "tellus_world":
         # tellus_world では fetch_grid 段階で既に target bbox を切り出してあるので
@@ -540,18 +619,40 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             float(dem_info_render["lon_max"]),
         )
     else:
-        # 中心ピクセル
-        row_c = round((lat_max - lat_center) / res_lat)
-        col_c = round((lon_center - lon_min) / res_lon)
+        if tile_crop is not None:
+            # 施策④: 呼び出し側(make_nbt_hd)が全域を整数でタイル分割した DEMセル範囲を
+            # そのまま使う（タイル毎の独立丸めを排し、隣接タイルが境界セルを共有して密着）。
+            tr0, tr1, tc0, tc1 = tile_crop
+            r0 = max(0, int(tr0)); r1 = min(dem.shape[0], int(tr1))
+            c0 = max(0, int(tc0)); c1 = min(dem.shape[1], int(tc1))
+            # 施策④halo: 継ぎ目で建物/道路のエッジ効果（寄棟屋根の distance_transform、
+            # 壁周のラスタ縁、道路バッファの打ち切り）がグリッド端に誤って出るのを防ぐため、
+            # クロップを halo セル分広げてレンダし、出力ブロック配列をコアに切り戻す。
+            # リサンプル無し（factor=1, ブロック=DEMセル 1:1）かつ enhanced 時のみ厳密に
+            # 切り戻せるので適用（=wakayama LiDAR タイル運用）。それ以外は halo=0 で従来どおり。
+            _hrd0 = res_lat / lat_per_m
+            _no_resample = (not (h_res > 0 and h_res < _hrd0 * 0.95)
+                            and max(1, round(h_res / _hrd0)) == 1)
+            _halo = 16 if (_no_resample and terrain_quality == "enhanced") else 0
+            if _halo > 0:
+                er0 = max(0, r0 - _halo); er1 = min(dem.shape[0], r1 + _halo)
+                ec0 = max(0, c0 - _halo); ec1 = min(dem.shape[1], c1 + _halo)
+                # 切り戻し窓（拡張パッチ内のコア位置, factor=1 なのでブロック=セル）
+                _tile_core = (r0 - er0, c0 - ec0, r1 - r0, c1 - c0)
+                r0, r1, c0, c1 = er0, er1, ec0, ec1
+        else:
+            # 中心ピクセル
+            row_c = round((lat_max - lat_center) / res_lat)
+            col_c = round((lon_center - lon_min) / res_lon)
 
-        # エリアを DEMセル数で計算
-        half_rows = int((depth_m / 2) * lat_per_m / res_lat)
-        half_cols = int((width_m / 2) * lon_per_m / res_lon)
+            # エリアを DEMセル数で計算
+            half_rows = int((depth_m / 2) * lat_per_m / res_lat)
+            half_cols = int((width_m / 2) * lon_per_m / res_lon)
 
-        r0 = max(0, row_c - half_rows)
-        r1 = min(dem.shape[0], row_c + half_rows)
-        c0 = max(0, col_c - half_cols)
-        c1 = min(dem.shape[1], col_c + half_cols)
+            r0 = max(0, row_c - half_rows)
+            r1 = min(dem.shape[0], row_c + half_rows)
+            c0 = max(0, col_c - half_cols)
+            c1 = min(dem.shape[1], col_c + half_cols)
 
         dem_patch = dem[r0:r1, c0:c1]
         idn_patch = inundation_render[r0:r1, c0:c1]
@@ -687,6 +788,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
 
         # 地表色を空中写真から（最優先の surface_grid_override に流す）
         surface_override = tellus_surface_grid
+        ortho_rgb = None
         if surface_ortho:
             from ortho_surface import ortho_surface_grid
             ph, pw = dem_patch.shape
@@ -697,8 +799,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 "res_lon": (patch_bbox_latlon[3] - patch_bbox_latlon[2]) / pw,
                 "shape": (ph, pw),
             }
-            surface_override = ortho_surface_grid(dst_meta, zoom=ortho_zoom,
-                                                  saturation=ortho_saturation)
+            surface_override, ortho_rgb = ortho_surface_grid(
+                dst_meta, zoom=ortho_zoom, saturation=ortho_saturation,
+                layer=ortho_layer, return_rgb=True)
 
         # OSM 橋（bridge=yes + layer）を読み、patch 範囲に交差するものを立体化対象に
         bridges_render = None
@@ -713,6 +816,29 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   + (f"（例: {', '.join(b['name'] for b in bridges_render if b['name'])[:60]}）"
                      if any(b['name'] for b in bridges_render) else ""))
 
+        # OSM 送電線/鉄塔（power=line/tower）を patch 範囲で読む
+        power_lines = power_towers = None
+        if power_json:
+            from power_osm import load_power
+            _pw = load_power(
+                power_json,
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+            )
+            power_lines, power_towers = _pw["lines"], _pw["towers"]
+            print(f"  [power] OSM 送電線 {len(power_lines)} 本 / 鉄塔・電柱 {len(power_towers)} 基を配置")
+
+        # OSM 駐車場（amenity=parking）を patch 範囲で読む
+        parking_render = None
+        if parking_json:
+            from parking_osm import load_parking
+            parking_render = load_parking(
+                parking_json,
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+            )
+            print(f"  [parking] OSM 駐車場 {len(parking_render)} 面を地表に配置")
+
         evac_render = None
         if evac_xml:
             from ksj_evac import load_evac_facilities
@@ -721,6 +847,30 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
                 lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
             )
+
+        # 道路境界線(curb)の交差点偽枠線対策: OSM道路センターラインを塗りつぶし回廊にした mask を
+        # 用意して dem_to_blocks_enhanced に渡す（centerline は交差点を連続して貫くので「同一道路」
+        # 判定に使える）。オフライン等で取得失敗時は None=極小穴埋めのみにフォールバック。
+        road_curb_osm_mask = None
+        if road_mask is not None and road_curb_use_osm:
+            try:
+                from tellus_data import fetch_osm_buildings_roads as _fetch_osm
+                _osm_c = _fetch_osm(
+                    lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                    lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                    verbose=False,
+                )
+                _factor = max(1, round(h_res / h_res_dem))
+                _nzg = dem_patch.shape[0] // _factor
+                _nxg = dem_patch.shape[1] // _factor
+                _, road_curb_osm_mask, _ = build_osm_masks(
+                    _osm_c, patch_bbox_latlon, grid_h=_nzg, grid_w=_nxg, h_res_block_m=h_res,
+                )
+                print(f"  [road-curb] OSM道路回廊 {int(road_curb_osm_mask.sum())} cells "
+                      f"(roads={_osm_c.get('n_roads')}) → 交差点の偽枠線を抑制")
+            except Exception as _e:
+                print(f"  [road-curb] OSM回廊取得不可 ({_e}); 極小穴埋めのみで対応")
+                road_curb_osm_mask = None
 
         print(f"Converting to blocks [enhanced] "
               f"(h_res={h_res}m/block, v_res={v_res}m/block, "
@@ -758,10 +908,16 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             color_building_roofs=surface_ortho,
             surface_grid_override=surface_override,
             bridges=bridges_render,
+            powerlines=power_lines,
+            power_towers=power_towers,
+            parkings=parking_render,
+            ortho_rgb=ortho_rgb,
             evac_facilities=evac_render,
             patch_bbox_latlon=patch_bbox_latlon,
             water_mask=water_mask,
             road_major_mask=road_major_mask,
+            road_curb_osm_mask=road_curb_osm_mask,
+            cell_offset=(c0, r0),   # 軸6-2: 地表ディザの世界座標基準（タイル間整合）
         )
     elif terrain_quality == "legacy":
         print(f"Converting to blocks [legacy] "
@@ -770,7 +926,19 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                                       v_res=v_res, v_exag=v_exag)
     else:
         raise ValueError(f"unknown terrain_quality: {terrain_quality} (use 'enhanced' or 'legacy')")
-    print(f"Structure size: {size[0]} x {size[1]} x {size[2]} blocks ({len(blocks):,} block entries)")
+
+    # 施策④halo: 拡張パッチでレンダした密ブロック配列を、コア [c0,c1)×[r0,r1) に切り戻す。
+    # 軸順は (Y, Z, X)=(高さ, 南北, 東西)。size=[nx, ny, nz]。Y は絶対標高基準で不変。
+    # これで建物/道路/橋のエッジ効果は halo 域に出て破棄され、隣接タイルのコアが密着する。
+    if _tile_core is not None and isinstance(blocks, np.ndarray):
+        _top, _left, _crz, _crx = _tile_core
+        blocks = np.ascontiguousarray(blocks[:, _top:_top + _crz, _left:_left + _crx])
+        size = [int(_crx), int(size[1]), int(_crz)]
+        print(f"  [halo] 拡張パッチ {dem_patch.shape[1]}×{dem_patch.shape[0]} → "
+              f"コア {_crx}×{_crz} に切り戻し（継ぎ目のエッジ効果を破棄）")
+
+    n_entries = int(np.count_nonzero(blocks)) if isinstance(blocks, np.ndarray) else len(blocks)
+    print(f"Structure size: {size[0]} x {size[1]} x {size[2]} blocks ({n_entries:,} block entries)")
 
     # メタデータに描画範囲・解像度情報を補足
     full_meta = None
@@ -784,7 +952,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         full_meta.setdefault("v_res_m_per_block", float(v_res))
         full_meta.setdefault("v_exag", float(v_exag))
         full_meta.setdefault("structure_size_xyz", [int(size[0]), int(size[1]), int(size[2])])
-        full_meta.setdefault("n_block_entries", int(len(blocks)))
+        full_meta.setdefault("n_block_entries", int(n_entries))
         full_meta.setdefault("terrain_quality", str(terrain_quality))
         full_meta.setdefault("terrain_source", str(terrain_source))
         if terrain_source == "mapzen":
@@ -813,4 +981,16 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             full_meta.setdefault("deep_ground", int(deep_ground))
 
     write_nbt_structure(blocks, size, out_path, meta=full_meta)
+
+    # 施策⑤: native Anvil world(.mca)も出力（密配列のときのみ＝enhanced）。
+    if anvil_out is not None:
+        if isinstance(blocks, np.ndarray):
+            from anvil_export import write_anvil_world
+            ox, oz = (int(anvil_offset[0]), int(anvil_offset[1])) if anvil_offset else (0, 0)
+            write_anvil_world(blocks, size, anvil_out, x_offset=ox, z_offset=oz,
+                              merge=bool(anvil_merge), level_name=anvil_level_name,
+                              level_template=anvil_level_template)
+        else:
+            print("  [anvil] スキップ: dense 配列でない（terrain_quality=enhanced が必要）")
+
     return size, len(blocks)
