@@ -702,7 +702,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         building_id_grid = None        # P2: 建物ごとの整数ラベル
         building_wall_keys = None      # P2: 建物 id → 壁ブロックキー
         building_roof_keys = None      # P2: 建物 id → 屋根ブロックキー(fallback)
-        building_style_keys = None     # 建物 id → スタイル(house/building/factory)
+        building_style_keys = None     # 建物 id → スタイル(wood_house/apartment/shop/rc/...)
+        building_facade_by_id = None   # 建物 id → 外壁装飾スペック(アーキタイプ由来)
         if use_osm:
             from tellus_data import fetch_osm_buildings_roads
             osm = fetch_osm_buildings_roads(
@@ -779,6 +780,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_wall_keys = bmaps["wall_keys"]
             building_roof_keys = bmaps["roof_keys"]
             building_style_keys = bmaps.get("style_keys")
+            building_facade_by_id = bmaps.get("facade")
             _bh_in = building_height_block[np.isfinite(building_height_block)]
             _med = float(np.median(_bh_in)) if _bh_in.size else 0.0
             _src = "plateau/osm" if building_list is not None else "fgd"
@@ -903,6 +905,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_wall_keys=building_wall_keys,
             building_roof_keys=building_roof_keys,
             building_style_keys=building_style_keys,
+            building_facade_by_id=building_facade_by_id,
             hollow_buildings=hollow_buildings,
             legend_layer=legend_layer,
             color_building_roofs=surface_ortho,

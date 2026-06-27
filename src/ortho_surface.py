@@ -60,6 +60,16 @@ def rgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
 _ANCHOR_OKLAB = rgb_to_oklab(_ANCHOR_RGB)  # (M,3) アンカーの Oklab（起動時前計算）
 
 
+def classify_rgb_to_palette_saturated(rgb: np.ndarray, saturation: float = 1.9) -> np.ndarray:
+    """屋根色専用。パレットの水色/黄緑ブロックは高彩度・やや暗めで、オルソの淡い青タイル屋根
+    (水色)・黄緑屋根は最近傍だと clay/diorite 等グレーに吸われて色が落ちる。マッチ前に彩度を
+    上げて高彩度ブロックへ届かせる(グレーは彩度0で不変)。地表マッチには使わない(屋根のみ)。"""
+    a = rgb.astype(np.float32)
+    luma = a @ np.array([0.299, 0.587, 0.114], np.float32)
+    a = np.clip(luma[..., None] + (a - luma[..., None]) * saturation, 0, 255).astype(np.uint8)
+    return classify_rgb_to_palette(a)
+
+
 def enhance_rgb(rgb: np.ndarray, *, saturation: float = 1.35,
                 low_pct: float = 2.0, high_pct: float = 98.0,
                 scale_cap: float = 1.5) -> np.ndarray:
