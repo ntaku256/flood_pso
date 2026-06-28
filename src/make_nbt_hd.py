@@ -129,11 +129,17 @@ def main():
     ap.add_argument("--fgd-wa", default=DEFAULT_WA_XML,
                     help="--use-fgd の水域 WA/WStrA GML パス（河川・池を水面に）。"
                          "カンマ区切りで複数可。空文字で水域無効")
+    ap.add_argument("--fgd-rail", default=None,
+                    help="鉄道 RailCL GML パス（道床+枕木+レールで敷設）。カンマ区切りで複数メッシュ可")
     ap.add_argument("--plateau-bld", default=None,
                     help="PLATEAU CityGML 建物ディレクトリ（udx/bldg）。指定時は建物を PLATEAU の "
                          "正確な footprint+実測高さ(measuredHeight) から生成（高精度版）")
     ap.add_argument("--osm-bld", action="store_true",
                     help="OSM(Overpass) の建物 footprint + LiDAR DSM 高さで建物を生成（いつも通り版）")
+    ap.add_argument("--fill-gap-osm", action="store_true",
+                    help="LiDAR(3次元点群)が欠落する図郭外の領域を補完: 地形は mapzen DEM で埋め、"
+                         "建物高さは OSM(building:levels/height)をラスタ化して埋める。FGD footprint は"
+                         "そのまま使い、欠落域だけ OSM 由来の高さを与える（点群が無い所だけ OSM 利用）")
     ap.add_argument("--plateau-lod2", action="store_true",
                     help="PLATEAU LOD2 の屋根形状を建物高さに反映（城など。--plateau-bld と併用、やや重い）")
     ap.add_argument("--surface-ortho", action="store_true",
@@ -177,10 +183,17 @@ def main():
                     help="建物 DSM(_org) から LiDAR 植生クラス(class 3)を除外しない。"
                          "既定は除外して樹木混入の建物高さ（御坊で建物の24%が影響）を浄化")
     ap.add_argument("--bridges-json", type=str,
-                    default=str(REPO_ROOT / "data_cache" / "osm" / "gobo_bridges_geom.json"),
+                    default=str(REPO_ROOT / "data_cache" / "osm" / "gobo_bridges_full_geom.json"),
                     help="OSM 橋(bridge=yes highway)の Overpass geom JSON。存在すれば道路が"
                          "水域を渡る箇所に桁+坂+橋脚を立体化（FG-GMLに橋情報が無いため）。"
+                         "既定=全御坊144本のfull_geom（旧 gobo_bridges_geom.json は中央部のみで"
+                         "北東部等の橋が0本になる）。"
                          "空文字で無効化")
+    ap.add_argument("--tunnels-json", type=str,
+                    default=str(REPO_ROOT / "data_cache" / "osm" / "gobo_tunnels_geom.json"),
+                    help="OSM トンネル(tunnel=yes highway/railway)の Overpass geom JSON。存在すれば"
+                         "山を貫く道路/鉄道を地形に刳り貫いて坑道+路面+照明を生成（橋の逆処理）。"
+                         "既定=御坊全域。空文字で無効化")
     ap.add_argument("--power-json", type=str, default="",
                     help="OSM 送電線(power=line)+鉄塔/電柱(power=tower/pole)の Overpass geom JSON。"
                          "指定すると voltage→高さの架線(iron_bars)+鉄塔ラティスを立体化。"
@@ -249,6 +262,11 @@ def main():
         print("Loading DEM (5m, full resolution)...")
         dem_info = mosaic_tiles(DEM_DIR)
     dem = dem_info["dem"]
+    # LiDAR(点群)欠落域(図郭外=NaN)の補完。gap マスクは地形補完の前に確定しておく。
+    gap_mask = ~np.isfinite(dem)
+    if args.fill_gap_osm and gap_mask.any():
+        from gap_fill import fill_terrain_gap_mapzen
+        fill_terrain_gap_mapzen(dem, dem_info, gap_mask, verbose=True)
     # 軸4-3: FGD 河川/水域(WA/WStrA)ポリゴンを水源にする（矩形 bbox より高精度＝損失精度↑）。
     #   範囲外/未配置でポリゴンが空なら make_river_source 内で矩形 bbox にフォールバック。
     _Hd, _Wd = dem.shape
@@ -300,6 +318,10 @@ def main():
             building_height_grid = np.clip(dsm_on_dem - dem, 0, None).astype(np.float32)
             print(f"  obj-height: median={np.nanmedian(building_height_grid):.2f}m "
                   f"99%={np.nanpercentile(building_height_grid,99):.1f}m")
+            # 欠落域(LiDAR無し)は DSM が NaN→建物高さ不明。OSM(building:levels/height)で埋める。
+            if args.fill_gap_osm and gap_mask.any():
+                from gap_fill import fill_building_heights_gap_osm
+                fill_building_heights_gap_osm(building_height_grid, dem_info, gap_mask, verbose=True)
 
     # 樹冠高グリッド（LiDAR class3=植生のみの DSM − DEM）。--trees で樹木を立てる。
     tree_height_grid = None
@@ -630,6 +652,7 @@ def main():
                 fgd_bld_xml=args.fgd_bld,
                 fgd_rdedg_xml=args.fgd_rdedg,
                 fgd_wa_xml=(args.fgd_wa or None),
+                fgd_rail_xml=(args.fgd_rail or None),
                 building_list=building_list,
                 surface_ortho=args.surface_ortho,
                 ortho_zoom=args.ortho_zoom,
@@ -643,6 +666,7 @@ def main():
                 tellus_world_scale=args.tellus_world_scale,
                 tellus_sea_level_y=args.tellus_sea_level_y,
                 bridges_json=(args.bridges_json or None),
+                tunnels_json=(args.tunnels_json or None),
                 power_json=(args.power_json or None),
                 parking_json=(args.parking_json or None),
                 evac_xml=(args.evac_xml if args.evac else None),

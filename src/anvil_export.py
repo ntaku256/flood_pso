@@ -23,7 +23,7 @@ import numpy as np
 from nbt import nbt as N
 from nbt import region as R
 
-from block_palette import PALETTE_KEYS, minecraft_name, block_state_properties
+from block_palette import PALETTE_KEYS, minecraft_name, block_state_properties_for_key
 from anvil_loader import _decode_section   # merge 読み戻し（read 側と同一デコーダで対称性保証）
 
 # 施策③/nbt_export と同じ DataVersion（1.21.x。古い MC で開くなら下げる）
@@ -33,7 +33,7 @@ SECTION = 16
 
 # グローバルパレット index → (Minecraft 名, Properties dict|None) を事前計算
 _NAMES = [minecraft_name(k) for k in PALETTE_KEYS]
-_PROPS = [block_state_properties(_NAMES[i]) for i in range(len(PALETTE_KEYS))]
+_PROPS = [block_state_properties_for_key(PALETTE_KEYS[i]) for i in range(len(PALETTE_KEYS))]
 _AIR_IDX = PALETTE_KEYS.index("air") if "air" in PALETTE_KEYS else 0
 assert _NAMES[_AIR_IDX] in ("minecraft:air", "air"), f"air index想定外: {_NAMES[_AIR_IDX]}"
 # Minecraft 名 → グローバル index（merge 時の読み戻しデコード用。最初の出現を採用）

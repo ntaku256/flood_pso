@@ -150,6 +150,24 @@ def load_roads(xml_path: str, *, lat_min, lat_max, lon_min, lon_max) -> list[dic
     return out
 
 
+def load_rail(xml_path: str, *, lat_min, lat_max, lon_min, lon_max) -> list[dict]:
+    """RailCL（鉄道中心線）→ [{"coords":[[lat,lon],...], "tags":{"fgd_type"}}]。
+    type 例: 普通鉄道 / 路面の鉄道 / 索道 等。道路と同じく polyline。"""
+    out = []
+    for el in _iter_features(xml_path, "RailCL"):
+        pl = el.find(f".//{POSLIST}")
+        if pl is None or not pl.text:
+            continue
+        coords = _parse_poslist(pl.text)
+        if len(coords) < 2:
+            continue
+        if not _coords_intersect_bbox(coords, lat_min, lat_max, lon_min, lon_max):
+            continue
+        tp = el.findtext(f"{{{FGD}}}type") or ""
+        out.append({"coords": coords, "tags": {"fgd_type": tp}})
+    return out
+
+
 def load_water(xml_path: str, *, lat_min, lat_max, lon_min, lon_max) -> list[dict]:
     """WA / WStrA（水域面）→ [{"coords":[[lat,lon],...], "tags":{...}}]"""
     out = []

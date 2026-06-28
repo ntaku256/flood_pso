@@ -65,11 +65,10 @@ def pack_litematica_bits(values: np.ndarray, bits: int) -> np.ndarray:
     return packed.view(np.int64)
 
 
-def _name_to_compound(name: str) -> Compound:
-    """パレット名 → BlockStatePalette 用 Compound。Properties は block_palette が単一真実源
-    （grass_block=snowy false / *_leaves=persistent true で葉の崩壊を防ぐ 等）。"""
-    from block_palette import block_state_properties
-    props = block_state_properties(name)
+def _entry_to_compound(name: str, props: dict | None) -> Compound:
+    """パレット名＋Properties → BlockStatePalette 用 Compound。Properties は構造NBT側
+    （nbt_export の _palette_compound）が単一真実源で、_parse_fast が読み取った値を
+    そのまま使う。これにより同一 minecraft 名で複数 state（例: rail の shape 別）を保持できる。"""
     if props:
         return Compound({"Name": String(name),
                          "Properties": Compound({k: String(v) for k, v in props.items()})})
@@ -82,7 +81,7 @@ def structure_nbt_to_litematic(in_path: str, out_path: str | None = None,
     t0 = time.time()
     # nbt_preview の自前バイナリパーサで pos/state を numpy 高速抽出（nbtlib ループ回避）
     from nbt_preview import _parse_fast
-    size, names, (xs, ys, zs, sts) = _parse_fast(in_path)
+    size, names, palprops, (xs, ys, zs, sts) = _parse_fast(in_path)
     sx, sy, sz = (int(v) for v in size)
     air_idx = names.index("minecraft:air") if "minecraft:air" in names else 0
     if verbose:
@@ -106,7 +105,9 @@ def structure_nbt_to_litematic(in_path: str, out_path: str | None = None,
               f"non-air blocks={nonair:,}  ({time.time()-t0:.1f}s)")
 
     # ── パレット（名前→Compound, air を同じ index に保つ） ──
-    palette_list = NbtList[Compound]([_name_to_compound(n) for n in palette])
+    palette_list = NbtList[Compound](
+        [_entry_to_compound(n, (palprops[i] if palprops else None))
+         for i, n in enumerate(palette)])
     region_name = name or Path(in_path).stem
     now_ms = int(time.time() * 1000)
 

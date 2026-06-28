@@ -37,12 +37,12 @@ import nbtlib
 # パレットは block_palette.py（単一真実源, ~80 バニラブロック）から生成。
 # water/blue_ice はアニメーションテクスチャ回避のため stained_glass で代替（block_palette 内で定義）。
 from block_palette import (BLOCKS as _BLOCKS, PALETTE_KEYS as _PALETTE_KEYS,
-                           block_state_properties as _block_state_properties)
+                           block_state_properties_for_key as _block_state_properties_for_key)
 
 
 def _palette_compound(key: str) -> nbtlib.Compound:
     name = _BLOCKS[key][0]
-    props = _block_state_properties(name)
+    props = _block_state_properties_for_key(key)
     if props:
         return nbtlib.Compound({
             "Name": nbtlib.String(name),
@@ -407,6 +407,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   fgd_bld_xml: str | None = None,
                   fgd_rdedg_xml: str | None = None,
                   fgd_wa_xml: str | None = None,
+                  fgd_rail_xml: str | None = None,
                   building_list: list | None = None,
                   surface_ortho: bool = False,
                   ortho_zoom: int = 18,
@@ -420,6 +421,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   tellus_world_scale: float = 1.0,
                   tellus_sea_level_y: int = 0,
                   bridges_json: str | None = None,
+                  tunnels_json: str | None = None,
                   power_json: str | None = None,
                   parking_json: str | None = None,
                   evac_xml: str | None = None,
@@ -673,6 +675,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
 
     print(f"DEM patch: {dem_patch.shape} cells = {dem_patch.shape[1]*res_lon/lon_per_m:.0f}m W x {dem_patch.shape[0]*res_lat/lat_per_m:.0f}m N "
           f"[source={terrain_source}]")
+    print(f"  [patch_bbox] lat[{patch_bbox_latlon[0]:.7f},{patch_bbox_latlon[1]:.7f}] "
+          f"lon[{patch_bbox_latlon[2]:.7f},{patch_bbox_latlon[3]:.7f}]")
 
     h_res_dem = res_lat / lat_per_m   # DEMセル = 何m か
 
@@ -818,6 +822,17 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   + (f"（例: {', '.join(b['name'] for b in bridges_render if b['name'])[:60]}）"
                      if any(b['name'] for b in bridges_render) else ""))
 
+        # OSM トンネル（tunnel=yes）を patch 範囲で読む（橋と同じ Overpass geom JSON 形式）
+        tunnels_render = None
+        if tunnels_json:
+            from bridge_osm import load_bridges as _load_ways
+            tunnels_render = _load_ways(
+                tunnels_json,
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+            )
+            print(f"  [tunnel] OSM トンネル {len(tunnels_render)} 本を patch 内で検出")
+
         # OSM 送電線/鉄塔（power=line/tower）を patch 範囲で読む
         power_lines = power_towers = None
         if power_json:
@@ -829,6 +844,20 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             )
             power_lines, power_towers = _pw["lines"], _pw["towers"]
             print(f"  [power] OSM 送電線 {len(power_lines)} 本 / 鉄塔・電柱 {len(power_towers)} 基を配置")
+
+        # FG-GML 鉄道中心線（RailCL）を patch 範囲で読む
+        rail_render = None
+        if fgd_rail_xml:
+            from fgd_vector import load_rail
+            rail_render = []
+            for rx in str(fgd_rail_xml).split(","):
+                rx = rx.strip()
+                if rx and Path(rx).exists():
+                    rail_render += load_rail(
+                        rx, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                        lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                    )
+            print(f"  [rail] FG-GML RailCL {len(rail_render)} 本を敷設")
 
         # OSM 駐車場（amenity=parking）を patch 範囲で読む
         parking_render = None
@@ -911,8 +940,10 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             color_building_roofs=surface_ortho,
             surface_grid_override=surface_override,
             bridges=bridges_render,
+            tunnels=tunnels_render,
             powerlines=power_lines,
             power_towers=power_towers,
+            rails=rail_render,
             parkings=parking_render,
             ortho_rgb=ortho_rgb,
             evac_facilities=evac_render,
