@@ -269,8 +269,10 @@ def main():
     # LiDAR(点群)欠落域(図郭外=NaN)の補完。gap マスクは地形補完の前に確定しておく。
     gap_mask = ~np.isfinite(dem)
     if args.fill_gap_osm and gap_mask.any():
-        from gap_fill import fill_terrain_gap_mapzen
-        fill_terrain_gap_mapzen(dem, dem_info, gap_mask, verbose=True)
+        # 沿岸の点群欠落は周囲 LiDAR からの近傍補間で平坦化(mapzen 表層だと発電所等の構造物が
+        # 地形へ焼き込まれ max 数十 m の凸塊になり激しくずれる)。海/陸は最近傍 LiDAR が継承。
+        from gap_fill import fill_terrain_gap_nearest
+        fill_terrain_gap_nearest(dem, dem_info, gap_mask, verbose=True)
     # 軸4-3: FGD 河川/水域(WA/WStrA)ポリゴンを水源にする（矩形 bbox より高精度＝損失精度↑）。
     #   範囲外/未配置でポリゴンが空なら make_river_source 内で矩形 bbox にフォールバック。
     _Hd, _Wd = dem.shape

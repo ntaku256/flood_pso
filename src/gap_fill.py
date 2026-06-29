@@ -40,6 +40,39 @@ def fill_terrain_gap_mapzen(dem, dem_info, gap_mask, *, zoom: int = 14, verbose:
     return int(fillable.sum())
 
 
+def fill_terrain_gap_nearest(dem, dem_info, gap_mask, *, smooth: float = 1.2,
+                             verbose: bool = True) -> int:
+    """dem の gap(NaN) セルを「最近傍の有効 LiDAR 値」で **in-place** 補完。補完セル数を返す。
+
+    mapzen terrarium(=表層 DSM, z14≈4.8m) で埋めると、沿岸の点群欠落域に発電所等の構造物高
+    (建物/タンク/煙突)が地形へ焼き込まれ、平坦であるべき埋立地が max 数十 m の凸塊になる
+    (LiDAR-mapzen は mean -2.3m / std 5.4m, 標高基準も T.P. と不一致)。
+    本関数は外部 DEM を使わず、欠落域を周囲の実測 LiDAR から最近傍補間する:
+      - 海(標高≤海面)に近いセルは海値を、陸(埋立地)に近いセルは陸値を継承
+        → sea_mask(標高ベース) と整合し、海岸線も自然に継承される
+      - gap セルのみガウシアン平滑し、最近傍補間の方向縞/境界段差を緩和(実測 LiDAR は不変)
+    """
+    from scipy.ndimage import distance_transform_edt, gaussian_filter
+    fin = np.isfinite(dem)
+    if not fin.any() or not gap_mask.any():
+        return 0
+    idx = distance_transform_edt(~fin, return_distances=False, return_indices=True)
+    nn = dem[tuple(idx)]                       # 各セル ← 最近傍の有効 LiDAR 値(海/陸を継承)
+    out = dem.copy()
+    out[gap_mask] = nn[gap_mask]
+    if smooth and smooth > 0:
+        sm = gaussian_filter(out.astype(np.float32), smooth)
+        out[gap_mask] = sm[gap_mask]          # gap のみ平滑。境界の実測値はブレンドに寄与し不変
+    dem[gap_mask] = out[gap_mask].astype(dem.dtype)
+    n = int(gap_mask.sum())
+    if verbose:
+        v = dem[gap_mask]
+        print(f"  [gap-fill] 地形(近傍LiDAR補間): {n:,} セル補完 "
+              f"mean={float(np.mean(v)):.2f} max={float(np.max(v)):.2f} "
+              f"(gap {int(gap_mask.sum()):,} / 図郭外)")
+    return n
+
+
 def _osm_height_m(tags: dict, default_levels: float, m_per_level: float) -> float:
     """OSM tags → 建物高さ[m]。height > building:levels×3 > 既定(2階)の順。"""
     h = tags.get("height")
