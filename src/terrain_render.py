@@ -996,6 +996,56 @@ def add_rail_blocks(blocks, rails, patch_bbox_latlon, nz, nx, *,
     return ymax[0]
 
 
+def assign_global_bridge_anchors(bridges, dem_full, lat_max, lon_min, res_lat, res_lon,
+                                 *, h_res_block_m, scale_land, lift, sea_level_m=0.0):
+    """各橋の端アンカー高 b["startS"]/["endS"] を **全域DEM** から計算して付与する（in-place）。
+
+    add_bridge_blocks の end_base はタイルローカル grid を見るため、--tiles 分割で長い高架が複数
+    タイルにまたがると、橋端点を含まない中間タイルで端点が範囲外→ terrain_y=1 にフォールバックし、
+    デッキが地表付近まで降下していた。本関数は分割前に全域DEMで端アンカー(端点から橋の外向き
+    0..45block の陸地形 median 標高→ブロックY)を1回だけ計算し、全タイルが同一の高さを参照できる
+    ようにする。y_surf_land = max(1, 標高×scale_land) + lift（terrain_render の地表Yと同式）。
+    """
+    import math
+    H, W = dem_full.shape
+    M_PER_DEG_LAT = 111320.0
+    h_res_dem = max(res_lat * M_PER_DEG_LAT, 1e-6)        # DEM 1セルの m（lat方向）
+    step = max(1, int(round(h_res_block_m / h_res_dem)))  # 1 block = step DEMセル
+
+    def cell(lat, lon):
+        return int(round((lat_max - lat) / res_lat)), int(round((lon - lon_min) / res_lon))  # (row,col)
+
+    def ysl(row, col):
+        if 0 <= row < H and 0 <= col < W:
+            v = dem_full[row, col]
+            if np.isfinite(v) and v > sea_level_m:        # 陸のみ（水上は橋台高に使わない）
+                return max(1, int(v * scale_land)) + lift
+        return None
+
+    def anchor(p_end, p_in):
+        r0, c0 = cell(p_end[0], p_end[1]); r1, c1 = cell(p_in[0], p_in[1])
+        dr, dc = r0 - r1, c0 - c1                          # 外向き（橋の延長＝奥の道路方向）
+        L = math.hypot(dr, dc)
+        if L > 1e-6:
+            dr, dc = dr / L, dc / L
+        ys = []
+        for d in range(0, 46):                            # 端から外側 0..45 block の陸地形
+            v = ysl(int(round(r0 + dr * d * step)), int(round(c0 + dc * d * step)))
+            if v is not None:
+                ys.append(v)
+        if not ys:
+            v = ysl(r0, c0)
+            return int(v) if v is not None else 1
+        return int(round(np.median(ys)))
+
+    for b in bridges:
+        c = b.get("coords") or []
+        if len(c) < 2:
+            continue
+        b["startS"] = anchor(c[0], c[1])
+        b["endS"] = anchor(c[-1], c[-2])
+
+
 def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                       y_surf_land, sea_mask, y_sea_surface, y_sea_floor,
                       scale_land, h_res_block_m, surf_block=None,
@@ -1105,8 +1155,12 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         if total < 2.0:
             infos.append(None)
             continue
-        startS = end_base(pts[0], pts[1] if len(pts) > 1 else pts[0])
-        endS = end_base(pts[-1], pts[-2] if len(pts) > 1 else pts[-1])
+        # 端アンカー高。全域で事前計算した b["startS"]/["endS"] があれば優先（タイル分割で橋端点が
+        # タイル外に出ても降下しない＝高架が複数タイルにまたがっても一貫した高さで連続平坦飛行）。
+        # 無ければ従来どおりタイルローカル地形から end_base（単一タイル内に収まる橋はこれで十分）。
+        _gs = b.get("startS"); _ge = b.get("endS")
+        startS = int(_gs) if _gs is not None else end_base(pts[0], pts[1] if len(pts) > 1 else pts[0])
+        endS = int(_ge) if _ge is not None else end_base(pts[-1], pts[-2] if len(pts) > 1 else pts[-1])
         rise_full = min(layer * arch_rise_m, MAX_RISE_M) * scale_land
         clear_full = CLEAR_M.get(rc, 5.0) * scale_land
         # スパンが水を渡るか（渡る時だけ水面+clearance を最低デッキ高に）

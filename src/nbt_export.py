@@ -822,6 +822,15 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             print(f"  [bridge] OSM 橋 {len(bridges_render)} 本を patch 内に配置"
                   + (f"（例: {', '.join(b['name'] for b in bridges_render if b['name'])[:60]}）"
                      if any(b['name'] for b in bridges_render) else ""))
+            # 端アンカー高を全域DEMで事前計算（--tiles 分割で橋端点がタイル外に出てもデッキが
+            # 地表へ降下しないよう、全タイルが同一の高さを参照＝高架が一貫して連続平坦飛行する）。
+            from terrain_render import assign_global_bridge_anchors
+            assign_global_bridge_anchors(
+                bridges_render, dem_info["dem"],
+                dem_info["lat_max"], dem_info["lon_min"],
+                dem_info["res_lat"], dem_info["res_lon"],
+                h_res_block_m=h_res, scale_land=(v_exag / max(v_res, 1e-6)),
+                lift=(6 if legend_layer else 1), sea_level_m=sea_level_m)
 
         # OSM トンネル（tunnel=yes）を patch 範囲で読む（橋と同じ Overpass geom JSON 形式）
         tunnels_render = None
