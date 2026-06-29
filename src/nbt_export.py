@@ -432,7 +432,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   anvil_offset: tuple | None = None,
                   anvil_merge: bool = False,
                   anvil_level_name: str = "flood_pso",
-                  anvil_level_template: str | None = None):
+                  anvil_level_template: str | None = None,
+                  world_base_y: int = 0):
     """
     DEMと浸水マップの指定範囲をMinecraft NBT Structureに変換する。
 
@@ -1022,6 +1023,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             from anvil_export import write_anvil_world
             ox, oz = (int(anvil_offset[0]), int(anvil_offset[1])) if anvil_offset else (0, 0)
             write_anvil_world(blocks, size, anvil_out, x_offset=ox, z_offset=oz,
+                              y_offset=int(world_base_y),
                               merge=bool(anvil_merge), level_name=anvil_level_name,
                               level_template=anvil_level_template)
         else:

@@ -111,9 +111,10 @@ def _section_compound(sub: np.ndarray, sy: int):
     return sec, all_air
 
 
-def _gather_chunk_slab(dense, x_off, z_off, gcx, gcz, n_sec_y):
+def _gather_chunk_slab(dense, x_off, z_off, gcx, gcz, n_sec_y, pad=0):
     """グローバル chunk(gcx,gcz) を覆う (n_sec_y*16, 16, 16) のグローバル index slab を、
-    dense(Y,Z,X, ローカル原点が world(x_off,z_off)) から収集（範囲外は air）。"""
+    dense(Y,Z,X, ローカル原点が world(x_off,z_off)) から収集（範囲外は air）。
+    pad: 最下 section 内で dense Y0 を何ブロック上から置くか（world_base_y の端数。負Y開始用）。"""
     ny, nz, nx = dense.shape
     slab = np.full((n_sec_y * SECTION, SECTION, SECTION), _AIR_IDX, dtype=dense.dtype)
     # この chunk の world ブロック範囲 [gx0,gx0+16) を dense ローカルへ写す
@@ -125,13 +126,15 @@ def _gather_chunk_slab(dense, x_off, z_off, gcx, gcz, n_sec_y):
     if sx1 <= sx0 or sz1 <= sz0:
         return slab, True                         # この chunk は dense と重ならない
     dx0, dz0 = sx0 - lx0, sz0 - lz0               # slab 内の書込開始
-    yh = min(n_sec_y * SECTION, ny)
-    slab[:yh, dz0:dz0 + (sz1 - sz0), dx0:dx0 + (sx1 - sx0)] = dense[:yh, sz0:sz1, sx0:sx1]
+    yh = min(n_sec_y * SECTION - pad, ny)         # pad 分だけ上にずらして配置（world Y0 = slab[pad]）
+    if yh > 0:
+        slab[pad:pad + yh, dz0:dz0 + (sz1 - sz0), dx0:dx0 + (sx1 - sx0)] = dense[:yh, sz0:sz1, sx0:sx1]
     return slab, False
 
 
-def _read_chunk_slab(ch, n_sec_y):
-    """既存 chunk root → (n_sec_y*16,16,16) グローバル index slab（merge 用読み戻し）。"""
+def _read_chunk_slab(ch, n_sec_y, sec_y0=0):
+    """既存 chunk root → (n_sec_y*16,16,16) グローバル index slab（merge 用読み戻し）。
+    sec_y0: 最下 section の Y index（world_base_y 由来。slab 行 = (section Y) - sec_y0）。"""
     slab = np.full((n_sec_y * SECTION, SECTION, SECTION), _AIR_IDX, dtype=np.uint16)
     secs = ch.get("sections")
     if secs is None:
@@ -147,26 +150,28 @@ def _read_chunk_slab(ch, n_sec_y):
         data = bs.get("data")
         local = _decode_section(pal_names, list(data) if data is not None else None)  # (16,16,16)
         gmap = np.array([_NAME_TO_IDX.get(nm, _AIR_IDX) for nm in pal_names], dtype=np.uint16)
-        sy = int(s["Y"].value)
-        if 0 <= sy < n_sec_y:
-            slab[sy * SECTION:(sy + 1) * SECTION] = gmap[local]
+        li = int(s["Y"].value) - sec_y0
+        if 0 <= li < n_sec_y:
+            slab[li * SECTION:(li + 1) * SECTION] = gmap[local]
     return slab
 
 
-def _chunk_nbt_from_slab(slab: np.ndarray, gcx: int, gcz: int, data_version: int) -> N.NBTFile:
-    """(n_sec_y*16,16,16) グローバル index slab → chunk root NBT。"""
+def _chunk_nbt_from_slab(slab: np.ndarray, gcx: int, gcz: int, data_version: int,
+                         sec_y0: int = 0) -> N.NBTFile:
+    """(n_sec_y*16,16,16) グローバル index slab → chunk root NBT。
+    sec_y0: 最下 section の Y index（world_base_y//16。負Y開始時は負値）。"""
     root = N.NBTFile()
     root.name = ""
     root.tags.append(_named(N.TAG_Int(data_version), "DataVersion"))
     root.tags.append(_named(N.TAG_Int(gcx), "xPos"))
-    root.tags.append(_named(N.TAG_Int(0), "yPos"))      # 最下 section Y index = 0（world Y0 始まり）
+    root.tags.append(_named(N.TAG_Int(sec_y0), "yPos"))  # 最下 section Y index（world_base_y 由来）
     root.tags.append(_named(N.TAG_Int(gcz), "zPos"))
     root.tags.append(_named(N.TAG_String("minecraft:full"), "Status"))
     n_sec_y = slab.shape[0] // SECTION
     sections = N.TAG_List(type=N.TAG_Compound); sections.name = "sections"
     for sy in range(n_sec_y):
         sub = slab[sy * SECTION:(sy + 1) * SECTION]
-        sec, all_air = _section_compound(sub, sy)
+        sec, all_air = _section_compound(sub, sec_y0 + sy)   # 実 section Y = sec_y0 + 行
         if all_air:
             continue                                     # 全 air section は省略（MC が air 補完）
         sections.tags.append(sec)
@@ -272,6 +277,7 @@ def _write_level_dat(path: Path, level_name: str, spawn_xyz, data_version: int):
 
 def write_anvil_world(dense: np.ndarray, size, out_dir: str | Path, *,
                       x_offset: int = 0, z_offset: int = 0,
+                      y_offset: int = 0,
                       merge: bool = False,
                       level_name: str = "flood_pso",
                       data_version: int = DATA_VERSION,
@@ -289,7 +295,11 @@ def write_anvil_world(dense: np.ndarray, size, out_dir: str | Path, *,
     """
     dense = np.ascontiguousarray(dense)
     ny, nz, nx = dense.shape
-    n_sec_y = (ny + SECTION - 1) // SECTION
+    # world_base_y(=y_offset): dense Y0 を world Y この値に置く。負値で山に頭上余裕を作る。
+    # sec_y0=最下 section index(floor), pad=最下 section 内での dense Y0 の行(0..15)。
+    sec_y0 = y_offset // SECTION
+    pad = y_offset - sec_y0 * SECTION
+    n_sec_y = (pad + ny + SECTION - 1) // SECTION
 
     out_dir = Path(out_dir)
     region_dir = out_dir / "region"          # vanilla overworld レイアウト
@@ -310,7 +320,7 @@ def write_anvil_world(dense: np.ndarray, size, out_dir: str | Path, *,
     n_chunks = 0
     for gcz in range(gcz0, gcz1 + 1):
         for gcx in range(gcx0, gcx1 + 1):
-            slab, empty = _gather_chunk_slab(dense, x_offset, z_offset, gcx, gcz, n_sec_y)
+            slab, empty = _gather_chunk_slab(dense, x_offset, z_offset, gcx, gcz, n_sec_y, pad)
             if empty:
                 continue
             rx, rz = gcx >> 5, gcz >> 5
@@ -321,11 +331,11 @@ def write_anvil_world(dense: np.ndarray, size, out_dir: str | Path, *,
                 except Exception:
                     ex = None
                 if ex is not None:
-                    base = _read_chunk_slab(ex, n_sec_y)
+                    base = _read_chunk_slab(ex, n_sec_y, sec_y0)
                     fill = slab != _AIR_IDX            # 新 dense の非 air だけ上書き
                     base[fill] = slab[fill]
                     slab = base
-            root = _chunk_nbt_from_slab(slab, gcx, gcz, data_version)
+            root = _chunk_nbt_from_slab(slab, gcx, gcz, data_version, sec_y0)
             if len(root["sections"]) == 0:
                 continue                      # 全 air chunk は書かない
             rf.write_chunk(gcx & 31, gcz & 31, root)
@@ -341,7 +351,8 @@ def write_anvil_world(dense: np.ndarray, size, out_dir: str | Path, *,
             pass
 
     if write_level:
-        spawn = (x_offset + nx // 2, int(ny + 8), z_offset + nz // 2)
+        # spawn は地形上端より少し上（world_base_y 反映）。build limit(319)を超えないようクランプ。
+        spawn = (x_offset + nx // 2, int(min(ny + y_offset + 8, 318)), z_offset + nz // 2)
         if level_template and Path(level_template).exists():
             _clone_level_from_template(Path(level_template), out_dir / "level.dat",
                                        level_name, spawn)
