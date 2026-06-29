@@ -1012,6 +1012,9 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     返り値: 置いた最大 y（max_y 更新用）。
     """
     import math
+    _BDBG = bool(__import__("os").environ.get("BRIDGE_DEBUG"))
+    _BDUMP = __import__("os").environ.get("BRIDGE_DUMP")   # 指定で高さプロファイルを npz 出力
+    _dump_recs = []
     MAX_RISE_M, RAMP_HV = 10.0, 4.0
     CLEAR_M = {"main": 6.0, "normal": 5.0, "dirt": 3.0}
     PIER_SPACING_M = 16.0
@@ -1207,6 +1210,12 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
             if ch:
                 chains.append(ch)
 
+    if _BDBG:
+        _dropped = [b.get("name", "") for b, inf in zip(bridges, infos) if inf is None]
+        print(f"[bridge] ways={len(bridges)} valid={len(valid)} "
+              f"dropped(total<2)={len(_dropped)} chains={len(chains)} "
+              f"links={len(linked)//2}")
+
     # ── デッキ高の解析式（_render_span と「派生元の橋の高さ」問い合わせで共有） ──
     def _deck_dy(station, total, startS, endS, rise_full, min_deck):
         base = startS + (endS - startS) * (station / total) if total > 1e-6 else startS
@@ -1215,6 +1224,24 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                    startS + station / RAMP_HV,
                    endS + (total - station) / RAMP_HV)
         return int(round(max(base + ramp(station, total, rise_full), lift)))
+
+    def _chain_profile(mpts, seglen, startS, endS, rise_full, min_deck, kind):
+        # 検証用: 実レンダと同じ _deck_profile の deck 高＋直下地形/水面/橋脚底をサンプル。
+        total = sum(seglen)
+        cxs, czs, sts, dys = _deck_profile(mpts, seglen, total, startS, endS,
+                                           rise_full, min_deck)
+        terr = [terrain_y(cxs[i], czs[i]) for i in range(len(sts))]
+        flr = [floor_y(cxs[i], czs[i]) for i in range(len(sts))]
+        wss = []
+        for i in range(len(sts)):
+            ci, cj = col(cxs[i], czs[i])
+            _sea = (0 <= cj < nz and 0 <= ci < nx and sea_mask[cj, ci])
+            wss.append(int(y_sea_surface) if _sea else -9999)
+        return dict(kind=kind, station=np.array(sts), x=np.array(cxs), z=np.array(czs),
+                    dy=np.array(dys), terr=np.array(terr), floor=np.array(flr),
+                    wsurf=np.array(wss),
+                    startS=float(startS), endS=float(endS), total=float(total),
+                    min_deck=float(min_deck))
 
     # 橋デッキ/路面に使われる灰色系(衛星が橋を写し込むと橋下に出る色)。補完では避けたい。
     _ROADISH = {"andesite", "gray_concrete", "light_gray_concrete", "stone", "smooth_stone",
@@ -1275,6 +1302,47 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         # road_mask は「細くする方向のみ」採用(nominal=width_m半幅を超えない)。交差点の膨張を防ぐ。
         return max(1, min(hw, fallback)) if hw > 0 else fallback
 
+    # ── デッキ高プロファイル: 解析デッキ raw=_deck_dy を、直下フットプリント(幅方向)の最高
+    #    ground(水面 or 地形トップ)より下げない＝埋没/水没を防ぐ。ただし「超過分 excess=ground-raw」
+    #    だけを 1/RAMP_HV 勾配で envelope し raw に足す（dy=raw+excess）。これにより:
+    #      ・端や平坦高所橋では ground<=raw → excess0 → raw のまま着地/平坦飛行を保持（コブ/+1段差なし）
+    #      ・谷/低地/境界に潰れていた橋(従来 Y1)は excess が滑らかに持ち上げて連続・可視化
+    #    境界外(OOB)サンプルは ground 評価から除外（terrain_y の OOB=1 で低く潰れるのを防ぐ）。
+    def _deck_profile(mpts, seg, total, startS, endS, rise_full, min_deck, lhw=1):
+        cxs, czs, sts, oxs, ozs = [], [], [], [], []
+        s_acc = 0.0
+        for si in range(len(seg)):
+            (x0, z0), (x1, z1) = mpts[si], mpts[si + 1]
+            L = seg[si]
+            if L < 1e-6:
+                continue
+            ox, oz = -(z1 - z0) / L, (x1 - x0) / L
+            n = max(1, int(L / 0.5))
+            for k in range(n + 1):
+                t = k / n
+                cxs.append(x0 + (x1 - x0) * t); czs.append(z0 + (z1 - z0) * t)
+                sts.append(s_acc + L * t); oxs.append(ox); ozs.append(oz)
+            s_acc += L
+        m = len(sts)
+        raw = [float(_deck_dy(sts[i], total, startS, endS, rise_full, min_deck))
+               for i in range(m)]
+        excess = [0.0] * m
+        for i in range(m):
+            g = None
+            for w in (-lhw, -lhw * 0.5, 0.0, lhw * 0.5, lhw):
+                ci, cj = col(cxs[i] + oxs[i] * w, czs[i] + ozs[i] * w)
+                if 0 <= cj < nz and 0 <= ci < nx:
+                    gw = int(y_sea_surface) if sea_mask[cj, ci] else int(y_surf_land[cj, ci])
+                    g = gw if g is None else max(g, gw)
+            if g is not None:
+                excess[i] = max(0.0, g - raw[i])
+        # excess(床超過分)だけを 1/RAMP_HV 勾配で envelope（前後2パス）。raw は素のまま。
+        for i in range(1, m):
+            excess[i] = max(excess[i], excess[i - 1] - abs(sts[i] - sts[i - 1]) / RAMP_HV)
+        for i in range(m - 2, -1, -1):
+            excess[i] = max(excess[i], excess[i + 1] - abs(sts[i + 1] - sts[i]) / RAMP_HV)
+        return cxs, czs, sts, [int(round(raw[i] + excess[i])) for i in range(m)]
+
     # ── レンダリング本体: 1スパン=連続ポリラインを startS→endS 線形デッキで立体化。
     #    head_ext/tail_ext = 端の延長区間長(station)。延長部は柵を生成しない(道路へ自然に接続)。──
     def _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc,
@@ -1283,7 +1351,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                for s in range(len(mpts) - 1)]
         total = sum(seg)
         if total < 2.0:
-            return
+            return [], []
         pier_step = max(4.0, PIER_SPACING_M / max(h_res_block_m, 0.1))
         next_pier = pier_step
         # デッキ幅は「直下道路実幅の一番大きい部分」で全長統一(#1)。事前スキャンで最大半幅を求める
@@ -1301,6 +1369,9 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                 uniform_hw = max(uniform_hw, _road_halfw(
                     x0 + (x1 - x0) * t, z0 + (z1 - z0) * t, ox, oz, half_w))
         lhw = max(1, uniform_hw)
+        _, _, _prof_sts, dyt = _deck_profile(mpts, seg, total, startS, endS,
+                                             rise_full, min_deck, lhw)
+        idx = 0
         s_acc = 0.0
         for si in range(len(seg)):
             (x0, z0), (x1, z1) = mpts[si], mpts[si + 1]
@@ -1315,7 +1386,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                 cx, cz = x0 + (x1 - x0) * t, z0 + (z1 - z0) * t
                 station = s_acc + L * t
                 in_ext = (station < head_ext - 1e-6) or (station > total - tail_ext + 1e-6)
-                dy = _deck_dy(station, total, startS, endS, rise_full, min_deck)
+                dy = dyt[idx]; idx += 1
                 # 斜め橋でデッキに 1×1 ピンホールが空くのを防ぐため、法線方向を 0.5 step で走査。
                 half_steps = max(1, int(round(lhw / 0.5)))
                 for wi in range(-half_steps, half_steps + 1):
@@ -1364,6 +1435,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                         elif fill_col is not None and gcol < int(dy) - 1:
                             put(ix2, gcol, iz2, fill_col)   # 橋下地表トップを周囲色で補完
             s_acc += L
+        return _prof_sts, dyt          # 実デッキ高プロファイル(ランプ接続=_parent_at で参照)
 
     # ── チェーン → マージ済みポリライン / 属性 / 端延長 / 射影 のヘルパ ──
     def _seglens(mpts):
@@ -1458,22 +1530,39 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         mpts, tail_ext, h1 = _ext_tail(mpts)
         startS, endS = h0, h1
         seglen = _seglens(mpts)
-        _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc, head_ext, tail_ext)
+        psts, pdy = _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc,
+                                 head_ext, tail_ext)
         main_params.append(dict(mpts=mpts, seglen=seglen, total=sum(seglen),
                                 startS=startS, endS=endS, rise_full=rise_full,
-                                min_deck=min_deck))
+                                min_deck=min_deck, psts=psts, pdy=pdy))
+        if _BDBG:
+            _tot = sum(seglen)
+            _names = sorted({infos[i]["name"] for (i, _) in ch if infos[i]["name"]})
+            _steps = [abs(pdy[k + 1] - pdy[k]) for k in range(len(pdy) - 1)] or [0]
+            _samp = [pdy[int(round(j * (len(pdy) - 1) / 10))] for j in range(11)] if pdy else []
+            print(f"[bridge] MAIN ways={[i for i,_ in ch]} layer={infos[ch[0][0]]['layer']} "
+                  f"rc={rc} L={_tot:.0f}b startS={startS} endS={endS} min_deck={min_deck:.0f} "
+                  f"has_water={min_deck>-1e8} head_ext={head_ext:.0f} tail_ext={tail_ext:.0f} "
+                  f"maxstep={max(_steps):.0f} dy@={_samp} names={_names}")
+        if _BDUMP:
+            _dump_recs.append(_chain_profile(mpts, seglen, startS, endS, rise_full,
+                                             min_deck, "main"))
 
     JOIN_TOL = 40.0 / max(h_res_block_m, 0.1)         # ランプ端が本線へ接続とみなす距離(block, ≈40m)
 
     def _parent_at(q):
-        # q に最も近い本線高架のデッキ高（接続端の「派生元の高さ」）。十分近くなければ None。
+        # q に最も近い本線高架の「実デッキ高」（床/勾配で嵩上げ後の psts/pdy を補間）。
+        #   解析値 _deck_dy ではなく実レンダ高を返すことで、嵩上げされた本線へランプが段差なく接続。
         best_dy, best_d2 = None, JOIN_TOL * JOIN_TOL
         for pp in main_params:
             s, d2 = _project(pp["mpts"], pp["seglen"], q)
             if d2 < best_d2:
                 best_d2 = d2
-                best_dy = _deck_dy(s, pp["total"], pp["startS"], pp["endS"],
-                                   pp["rise_full"], pp["min_deck"])
+                if pp["psts"]:
+                    best_dy = int(round(float(np.interp(s, pp["psts"], pp["pdy"]))))
+                else:
+                    best_dy = _deck_dy(s, pp["total"], pp["startS"], pp["endS"],
+                                       pp["rise_full"], pp["min_deck"])
         return best_dy, best_d2
 
     for ch in chains:
@@ -1496,6 +1585,21 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
             mpts, head_ext, startS = _ext_head(mpts)
             mpts, tail_ext, endS = _ext_tail(mpts)
         _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc, head_ext, tail_ext)
+        if _BDBG or _BDUMP:
+            _sl = _seglens(mpts); _tot = sum(_sl)
+            if _BDBG:
+                _pr = [_deck_dy(s, _tot, startS, endS, rise_full, min_deck)
+                       for s in np.linspace(0, _tot, 11)]
+                _stp = max(abs(_pr[k + 1] - _pr[k]) for k in range(len(_pr) - 1)) if _tot else 0
+                print(f"[bridge] RAMP ways={[i for i,_ in ch]} L={_tot:.0f}b "
+                      f"startS={startS} endS={endS} head_ext={head_ext:.0f} "
+                      f"tail_ext={tail_ext:.0f} maxstep={_stp:.0f} dy@={_pr}")
+            if _BDUMP:
+                _dump_recs.append(_chain_profile(mpts, _sl, startS, endS, rise_full,
+                                                 min_deck, "ramp"))
+    if _BDUMP and _dump_recs:
+        np.savez(_BDUMP, recs=np.array(_dump_recs, dtype=object))
+        print(f"[bridge] dumped {len(_dump_recs)} chains → {_BDUMP}")
     return ymax[0]
 
 
