@@ -68,14 +68,15 @@ PRESETS = {
     "gobo_walk_1km": (1000, 1000, 1, 1, 1.0),
     "gobo_walk_2km": (2000, 2000, 1, 1, 1.0),
     # 和歌山高専キャンパス局所（現況建物: --remove/-add-bld-geojson で旧体育館→総合体育館）
-    "kosen_campus": (450, 450, 1, 1, 1.0),
+    # 敷地は約343m(N-S)×320m(E-W)。南半分はDEM503561外→--dem-gsi-tiles で地形取得。
+    "kosen_campus": (400, 400, 1, 1, 1.0),
 }
 
 # preset 既定の中心座標（--center-lat/lon 未指定時）。歩行用は市街地中心へ。
 PRESET_CENTERS = {
     "gobo_walk_1km": (33.8875, 135.1515),
     "gobo_walk_2km": (33.8875, 135.1515),
-    "kosen_campus": (33.834, 135.177),
+    "kosen_campus": (33.8332, 135.1774),
 }
 
 
@@ -107,6 +108,9 @@ def main():
                     help="Tellus 世界の海面 y。dem (m) = block_y - sea_level_y（既定 0）")
     ap.add_argument("--mapzen-zoom", type=int, default=15,
                     help="Mapzen タイル zoom (14≈9.5m, 15≈4.8m, 16≈2.4m)")
+    ap.add_argument("--dem-gsi-tiles", action="store_true",
+                    help="地形をローカル DEM5A ではなく GSI 標高タイル DEM5A(online, 全国被覆, bare-earth)から"
+                         "中心±範囲で取得する。ローカルに無いメッシュ(例 503551)も継ぎ目なくカバー。zoom=--mapzen-zoom")
     ap.add_argument("--use-esa", action="store_true",
                     help="ESA WorldCover 2021 の土地被覆別ブロック割当を有効化（rasterio 必須）")
     ap.add_argument("--use-osm", action="store_true",
@@ -273,6 +277,20 @@ def main():
         from wakayama_pcd import load_wakayama_dem
         print(f"Loading Wakayama LiDAR DEM (res={lidar_res:.3f}m): {args.wakayama_grd}")
         dem_info = load_wakayama_dem(args.wakayama_grd, res_m=lidar_res)
+    elif args.dem_gsi_tiles:
+        import math as _mm
+        _p = PRESETS[args.preset]
+        _w = args.width if args.width is not None else _p[0]
+        _d = args.depth if args.depth is not None else _p[1]
+        _pc = PRESET_CENTERS.get(args.preset, (LAT_CENTER, LON_CENTER))
+        _clat = args.center_lat if args.center_lat is not None else _pc[0]
+        _clon = args.center_lon if args.center_lon is not None else _pc[1]
+        _mlat = (_d / 2 + 150) / 111320.0
+        _mlon = (_w / 2 + 150) / (111320.0 * _mm.cos(_mm.radians(_clat)))
+        print(f"Loading DEM from GSI DEM5A tiles (online) around ({_clat:.5f},{_clon:.5f})...")
+        from tellus_data import fetch_gsi_dem5a
+        dem_info = fetch_gsi_dem5a(_clat - _mlat, _clat + _mlat, _clon - _mlon, _clon + _mlon,
+                                   zoom=args.mapzen_zoom)
     else:
         print("Loading DEM (5m, full resolution)...")
         dem_info = mosaic_tiles(DEM_DIR)
