@@ -409,6 +409,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   fgd_wa_xml: str | None = None,
                   fgd_rail_xml: str | None = None,
                   building_list: list | None = None,
+                  remove_bld_polys: list | None = None,  # 重心がこの[lat,lon]環内のFGD建物を除去
+                  add_bld_list: list | None = None,       # FGD建物に追加する新設建物dict
                   surface_ortho: bool = False,
                   ortho_zoom: int = 18,
                   ortho_saturation: float = 1.4,
@@ -741,6 +743,21 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                     lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
                 )
                 _blds = _fgd["buildings"]; _roads = _fgd["roads"]
+            # 現況補正: 解体済み建物を除去 → 新設建物を追加（FGD/building_list どちらにも適用）
+            if remove_bld_polys:
+                from shapely.geometry import Polygon as _Poly
+                _rm = [_Poly([(lo, la) for la, lo in ring]) for ring in remove_bld_polys]
+                def _in_rm(coords):
+                    if len(coords) < 3:
+                        return False
+                    c = _Poly([(lo, la) for la, lo in coords]).centroid
+                    return any(c.within(p) for p in _rm)
+                _n0 = len(_blds)
+                _blds = [b for b in _blds if not _in_rm(b.get("coords", []))]
+                print(f"  [bld-fix] 除去: {_n0} -> {len(_blds)} 棟（解体済み {_n0 - len(_blds)} 棟を削除）")
+            if add_bld_list:
+                _blds = _blds + add_bld_list
+                print(f"  [bld-fix] 追加: +{len(add_bld_list)} 棟（新設）→ 計 {len(_blds)} 棟")
             factor = max(1, round(h_res / h_res_dem))
             nz_g = dem_patch.shape[0] // factor
             nx_g = dem_patch.shape[1] // factor
@@ -814,12 +831,23 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         bridges_render = None
         if bridges_json:
             from bridge_osm import load_bridges
+            import math as _math
+            _ctx_m = 650.0
+            _mid_lat = 0.5 * (patch_bbox_latlon[0] + patch_bbox_latlon[1])
+            _ctx_lat = _ctx_m / 111320.0
+            _ctx_lon = _ctx_m / (111320.0 * max(0.2, _math.cos(_math.radians(_mid_lat))))
+            _bridge_bbox = (
+                max(float(dem_info["lat_min"]), patch_bbox_latlon[0] - _ctx_lat),
+                min(float(dem_info["lat_max"]), patch_bbox_latlon[1] + _ctx_lat),
+                max(float(dem_info["lon_min"]), patch_bbox_latlon[2] - _ctx_lon),
+                min(float(dem_info["lon_max"]), patch_bbox_latlon[3] + _ctx_lon),
+            )
             bridges_render = load_bridges(
                 bridges_json,
-                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
-                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                lat_min=_bridge_bbox[0], lat_max=_bridge_bbox[1],
+                lon_min=_bridge_bbox[2], lon_max=_bridge_bbox[3],
             )
-            print(f"  [bridge] OSM 橋 {len(bridges_render)} 本を patch 内に配置"
+            print(f"  [bridge] OSM 橋 {len(bridges_render)} 本を patch 周辺({_ctx_m:.0f}m)に配置"
                   + (f"（例: {', '.join(b['name'] for b in bridges_render if b['name'])[:60]}）"
                      if any(b['name'] for b in bridges_render) else ""))
             # 端アンカー高を全域DEMで事前計算（--tiles 分割で橋端点がタイル外に出てもデッキが

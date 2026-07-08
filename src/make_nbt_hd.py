@@ -67,12 +67,15 @@ PRESETS = {
     # --use-fgd で建物・道路を載せると「歩ける町」になる。
     "gobo_walk_1km": (1000, 1000, 1, 1, 1.0),
     "gobo_walk_2km": (2000, 2000, 1, 1, 1.0),
+    # 和歌山高専キャンパス局所（現況建物: --remove/-add-bld-geojson で旧体育館→総合体育館）
+    "kosen_campus": (450, 450, 1, 1, 1.0),
 }
 
 # preset 既定の中心座標（--center-lat/lon 未指定時）。歩行用は市街地中心へ。
 PRESET_CENTERS = {
     "gobo_walk_1km": (33.8875, 135.1515),
     "gobo_walk_2km": (33.8875, 135.1515),
+    "kosen_campus": (33.834, 135.177),
 }
 
 
@@ -131,6 +134,11 @@ def main():
                          "カンマ区切りで複数可。空文字で水域無効")
     ap.add_argument("--fgd-rail", default=None,
                     help="鉄道 RailCL GML パス（道床+枕木+レールで敷設）。カンマ区切りで複数メッシュ可")
+    ap.add_argument("--remove-bld-geojson", default=None,
+                    help="この Polygon 群に重心が入る FGD 建物を除去（現況で解体済みの建物用）。緯度経度 GeoJSON")
+    ap.add_argument("--add-bld-geojson", default=None,
+                    help="ここの建物を FGD 建物に追加（現況で新設された建物用）。"
+                         "properties に fgd_type / height_m を持てる。緯度経度 GeoJSON")
     ap.add_argument("--plateau-bld", default=None,
                     help="PLATEAU CityGML 建物ディレクトリ（udx/bldg）。指定時は建物を PLATEAU の "
                          "正確な footprint+実測高さ(measuredHeight) から生成（高精度版）")
@@ -176,6 +184,9 @@ def main():
                     help="地下に土地利用の解釈を色付きガラスで層化して埋め込む（光源なし、コマンド応用向け）。"
                          "重なる洪水・樹木は間隔をあけて別の高さに分離（地形は上に退避）：y=0土地利用(建物=赤/"
                          "道路=黒/海=青/河川=水色/橋=橙/地表=白), y=2洪水(浸水=水色), y=4樹木(緑)")
+    ap.add_argument("--no-flood", action="store_true",
+                    help="氾濫(浸水)を一切出さない。海/河川水面(FGD WA)/街並みは残す。"
+                         "御坊用の水位/水源が別エリアで不適合なときに使う")
     ap.add_argument("--no-flood-barrier", action="store_true",
                     help="洪水計算で建物を浸水バリアにしない（従来どおり地形のみで浸水）")
     ap.add_argument("--trees", action="store_true",
@@ -408,6 +419,27 @@ def main():
                              for b in _osm["buildings"] if len(b.get("coords", [])) >= 4]
             print(f"  [osm-bld] 建物 {len(building_list)} 棟（OSM footprint + LiDAR高さ）")
 
+    # ── 現況補正（解体建物の除去 / 新設建物の追加）。FGD ロード後に export_to_nbt 内で適用。
+    #    GeoJSON は [lon,lat] → 内部形式 [lat,lon] に変換して渡す。
+    remove_bld_polys = None
+    add_bld_list = None
+    if args.remove_bld_geojson:
+        _gj = json.loads(Path(args.remove_bld_geojson).read_text(encoding="utf-8"))
+        remove_bld_polys = [[[la, lo] for lo, la in ft["geometry"]["coordinates"][0]]
+                            for ft in _gj["features"]]
+        print(f"  [bld-fix] 除去領域 {len(remove_bld_polys)} ポリゴン（解体済み建物）")
+    if args.add_bld_geojson:
+        _gj = json.loads(Path(args.add_bld_geojson).read_text(encoding="utf-8"))
+        add_bld_list = []
+        for ft in _gj["features"]:
+            rings = ft["geometry"]["coordinates"]
+            p = ft.get("properties", {})
+            add_bld_list.append({
+                "coords": [[la, lo] for lo, la in rings[0]],
+                "holes": [[[la, lo] for lo, la in r] for r in rings[1:]],
+                "tags": {"fgd_type": p.get("fgd_type", "普通建物"), "height_m": p.get("height_m")}})
+        print(f"  [bld-fix] 追加建物 {len(add_bld_list)} 棟（新設）")
+
     # ── タイル分割（--tiles）: 全域を重なりなく COLS×ROWS に割り、各タイルを個別に書き出す。
     #    DEM/inundation は全域で1回だけ計算し、export_to_nbt がクロップする（省メモリ）。
     if args.tiles:
@@ -536,7 +568,12 @@ def main():
             _cd = Path(args.reuse_inundation); _cd.mkdir(parents=True, exist_ok=True)
             _inund_cache = _cd / f"inund_{tag}_w{r['water']:.3f}.npz"
         inundation = None
-        if _inund_cache is not None and _inund_cache.exists():
+        if args.no_flood:
+            # 氾濫(浸水)を一切出さない。御坊用の水位/水源が別エリアで不適合なときに使う。
+            # 海(sea_mask)/河川水面(FGD WA)/街並みは dem_to_blocks_enhanced 内の別経路で描画される。
+            inundation = np.zeros(dem_flood.shape, np.float32)
+            print("  [no-flood] 浸水simスキップ（海/河川水面/街並みは残る）")
+        elif _inund_cache is not None and _inund_cache.exists():
             _z = np.load(_inund_cache)
             if _z["inund"].shape == dem_flood.shape:
                 inundation = _z["inund"]
@@ -660,6 +697,8 @@ def main():
                 fgd_wa_xml=(args.fgd_wa or None),
                 fgd_rail_xml=(args.fgd_rail or None),
                 building_list=building_list,
+                remove_bld_polys=remove_bld_polys,
+                add_bld_list=add_bld_list,
                 surface_ortho=args.surface_ortho,
                 ortho_zoom=args.ortho_zoom,
                 ortho_saturation=args.ortho_saturation,
