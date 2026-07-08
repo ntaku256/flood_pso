@@ -142,7 +142,10 @@ def main():
                     help="この Polygon 群に重心が入る FGD 建物を除去（現況で解体済みの建物用）。緯度経度 GeoJSON")
     ap.add_argument("--add-bld-geojson", default=None,
                     help="ここの建物を FGD 建物に追加（現況で新設された建物用）。"
-                         "properties に fgd_type / height_m を持てる。緯度経度 GeoJSON")
+                         "properties に fgd_type / height_m / roof_solid を持てる。緯度経度 GeoJSON")
+    ap.add_argument("--terrain-skirt", type=int, default=0,
+                    help="ワールド外周この幅(セル)を斜面で下ろし、境界の垂直な崖を無くす。0=無効。"
+                         "単一タイル(局所プリセット)前提。--tiles とは併用しない")
     ap.add_argument("--plateau-bld", default=None,
                     help="PLATEAU CityGML 建物ディレクトリ（udx/bldg）。指定時は建物を PLATEAU の "
                          "正確な footprint+実測高さ(measuredHeight) から生成（高精度版）")
@@ -455,7 +458,8 @@ def main():
             add_bld_list.append({
                 "coords": [[la, lo] for lo, la in rings[0]],
                 "holes": [[[la, lo] for lo, la in r] for r in rings[1:]],
-                "tags": {"fgd_type": p.get("fgd_type", "普通建物"), "height_m": p.get("height_m")}})
+                "tags": {"fgd_type": p.get("fgd_type", "普通建物"), "height_m": p.get("height_m"),
+                         "roof_solid": bool(p.get("roof_solid"))}})
         print(f"  [bld-fix] 追加建物 {len(add_bld_list)} 棟（新設）")
 
     # ── タイル分割（--tiles）: 全域を重なりなく COLS×ROWS に割り、各タイルを個別に書き出す。
@@ -717,6 +721,7 @@ def main():
                 building_list=building_list,
                 remove_bld_polys=remove_bld_polys,
                 add_bld_list=add_bld_list,
+                terrain_skirt_cells=args.terrain_skirt,
                 surface_ortho=args.surface_ortho,
                 ortho_zoom=args.ortho_zoom,
                 ortho_saturation=args.ortho_saturation,

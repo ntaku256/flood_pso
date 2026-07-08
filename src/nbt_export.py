@@ -411,6 +411,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   building_list: list | None = None,
                   remove_bld_polys: list | None = None,  # 重心がこの[lat,lon]環内のFGD建物を除去
                   add_bld_list: list | None = None,       # FGD建物に追加する新設建物dict
+                  terrain_skirt_cells: int = 0,           # >0: ワールド外周を斜面化し境界の崖を無くす
                   surface_ortho: bool = False,
                   ortho_zoom: int = 18,
                   ortho_saturation: float = 1.4,
@@ -709,6 +710,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         building_id_grid = None        # P2: 建物ごとの整数ラベル
         building_wall_keys = None      # P2: 建物 id → 壁ブロックキー
         building_roof_keys = None      # P2: 建物 id → 屋根ブロックキー(fallback)
+        building_roof_solid = None     # 建物 id → 屋根を型単色化しオルソ焼込無効(新設建物)
         building_style_keys = None     # 建物 id → スタイル(wood_house/apartment/shop/rc/...)
         building_facade_by_id = None   # 建物 id → 外壁装飾スペック(アーキタイプ由来)
         if use_osm:
@@ -801,6 +803,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_id_grid = bmaps["id"]
             building_wall_keys = bmaps["wall_keys"]
             building_roof_keys = bmaps["roof_keys"]
+            building_roof_solid = bmaps.get("roof_solid")
             building_style_keys = bmaps.get("style_keys")
             building_facade_by_id = bmaps.get("facade")
             _bh_in = building_height_block[np.isfinite(building_height_block)]
@@ -971,11 +974,13 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_id=building_id_grid,
             building_wall_keys=building_wall_keys,
             building_roof_keys=building_roof_keys,
+            building_roof_solid=building_roof_solid,
             building_style_keys=building_style_keys,
             building_facade_by_id=building_facade_by_id,
             hollow_buildings=hollow_buildings,
             legend_layer=legend_layer,
             color_building_roofs=surface_ortho,
+            terrain_skirt_cells=terrain_skirt_cells,
             surface_grid_override=surface_override,
             bridges=bridges_render,
             tunnels=tunnels_render,

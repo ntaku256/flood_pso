@@ -652,6 +652,7 @@ def build_building_maps(
     roof_keys: list[str] = []
     style_keys: list[str] = []
     facade_keys: list[dict] = []          # 建物 id → 外壁装飾スペック(アーキタイプ由来)
+    roof_solid_keys: list[bool] = []      # 建物 id → 屋根を型単色にしオルソ焼込を無効化(新設建物用)
     # 1セルの実寸(㎡)= アーキタイプ判定の footprint 面積に使う
     _la0, _la1, _lo0, _lo1 = patch_bbox_latlon
     _cell_ns = (_la1 - _la0) * 111000.0 / max(grid_h, 1)
@@ -724,10 +725,11 @@ def build_building_maps(
         roof_keys.append(BUILDING_ROOF_BY_TYPE.get(tp, DEFAULT_ROOF_KEY))
         style_keys.append(spec["style"])
         facade_keys.append(spec)
+        roof_solid_keys.append(bool(b.get("tags", {}).get("roof_solid")))
         bid += 1
     return {"mask": mask, "height": hmap, "id": idmap,
             "wall_keys": wall_keys, "roof_keys": roof_keys, "style_keys": style_keys,
-            "facade": facade_keys}
+            "facade": facade_keys, "roof_solid": roof_solid_keys}
 
 
 def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
@@ -1188,6 +1190,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     #   直交するため別チェーンに分かれる。──
     ENDPOINT_TOL = max(2.0, 3.0 / max(h_res_block_m, 0.1))
     MAX_LINK = 130.0 / max(h_res_block_m, 0.1)        # 連結する隙間上限(block, ≈130m)
+    MAX_LINK_NAME = 400.0 / max(h_res_block_m, 0.1)   # 同一道路名は橋間の地上区間(OSM非bridge)越えで連結
     COS_LINK = math.cos(math.radians(30.0))           # 直線継続とみなす角度許容(過剰グループ化抑制)
 
     def _udir(p_from, p_to):
@@ -1197,6 +1200,14 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
 
     def _is_link(i):                                   # IC ランプ(motorway_link 等)か
         return "link" in (infos[i]["highway"] or "")
+
+    def _name_tokens(i):
+        return {s.strip() for s in (infos[i]["name"] or "").replace("；", ";").split(";") if s.strip()}
+
+    def _same_road(i, j):
+        # 「阪和自動車道」と「阪和自動車道;湯浅御坊道路」のような併記差も同一路線として扱う。
+        a, b = _name_tokens(i), _name_tokens(j)
+        return bool(a and b and (a & b))
 
     valid = [i for i in range(len(infos)) if infos[i] is not None]
     def _epos(i, e):
@@ -1219,7 +1230,10 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
             pa, pb = _epos(ia, ea), _epos(ib, eb)
             gv = (pb[0] - pa[0], pb[1] - pa[1])
             gl = math.hypot(*gv)
-            if gl > MAX_LINK:
+            # 同一道路名(阪和道など本線)は橋区間の間の地上区間を越えて連結。角度(直線継続)は維持する
+            # ので上下線(進行方向と直交)・分岐は連結しない。
+            _same = (not _is_link(ia)) and _same_road(ia, ib)
+            if gl > (MAX_LINK_NAME if _same else MAX_LINK):
                 continue
             if gl > ENDPOINT_TOL:                     # 近接共有でなければ直線継続を要求
                 gu = (gv[0] / gl, gv[1] / gl)
@@ -1572,25 +1586,120 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     # ── 本線高架(motorway/trunk 等)を先に描き、各チェーンのデッキ高プロファイルを保持。
     #    その後 IC ランプ(motorway_link 等)を描き、本線へ接続する側の端を「派生元の橋の高さ」に
     #    合わせる（反対端は最高点へ延長）。──
-    main_params = []
+    main_specs = []
     for ch in chains:
         if any(_is_link(i) for (i, _) in ch):
             continue
-        mpts = _build_mpts(ch)
-        if len(mpts) < 2:
+        raw_mpts = _build_mpts(ch)
+        if len(raw_mpts) < 2:
             continue
         rise_full, half_w, rc, min_deck = _chain_attrs(ch)
+        join_head, join_tail = raw_mpts[0], raw_mpts[-1]
+        join_head_dir = _udir(raw_mpts[1], raw_mpts[0])
+        join_tail_dir = _udir(raw_mpts[-2], raw_mpts[-1])
+        mpts = list(raw_mpts)
         mpts, head_ext, h0 = _ext_head(mpts)
         mpts, tail_ext, h1 = _ext_tail(mpts)
-        startS, endS = h0, h1
+        # チェーン両端の高さ。_extend_to_highest はタイルローカル y_surf_land を見るため、--tiles 分割で
+        # チェーン端点がタイル外に出ると地表(terrain_y=1)にフォールバックし、デッキ全体が地表へ降下する
+        # （チェーン内 way 同士は線形補間で連続するが、グループ全体が地表に沈む）。チェーン端 way の
+        # 全域アンカー（assign_global_bridge_anchors が infos に付与した startS/endS, flip 考慮）を優先。
+        _i0, _f0 = ch[0]; _iL, _fL = ch[-1]
+        _g0 = infos[_i0]["endS"] if _f0 else infos[_i0]["startS"]   # チェーン始端 way の自由端アンカー
+        _g1 = infos[_iL]["startS"] if _fL else infos[_iL]["endS"]   # チェーン終端 way の自由端アンカー
+        startS = int(_g0) if _g0 is not None else h0                # 全域アンカー優先(タイル間で一貫＝境界段差を防止)
+        endS = int(_g1) if _g1 is not None else h1
         seglen = _seglens(mpts)
+        main_specs.append(dict(ch=ch, mpts=mpts, seglen=seglen, total=sum(seglen),
+                               startS=startS, endS=endS, rise_full=rise_full,
+                               min_deck=min_deck, half_w=half_w, rc=rc,
+                               head_ext=head_ext, tail_ext=tail_ext,
+                               join_head=join_head, join_tail=join_tail,
+                               join_head_dir=join_head_dir, join_tail_dir=join_tail_dir,
+                               layer=infos[ch[0][0]]["layer"],
+                               tokens=set().union(*(_name_tokens(i) for (i, _) in ch))))
+
+    # チェーン自体を連結できなかった接続点でも、同一路線の本線端が近ければ端高を揃える。
+    # OSM の bridge=yes が IC/JCT や短い地上区間で複数 way に分かれると、片側だけ地形medianに
+    # 落ちて「橋が切れた段差」に見える。ジオメトリは分けたまま、接続点の高さだけ高い方へ寄せる。
+    HEIGHT_JOIN_TOL = 60.0 / max(h_res_block_m, 0.1)
+    COS_HEIGHT_LINK = math.cos(math.radians(75.0))
+    endpoints = []
+    for si, sp in enumerate(main_specs):
+        endpoints.append((si, "startS", sp["join_head"], sp["join_head_dir"]))
+        endpoints.append((si, "endS", sp["join_tail"], sp["join_tail_dir"]))
+    for a in range(len(endpoints)):
+        ia, ka, pa, da = endpoints[a]
+        for b in range(a + 1, len(endpoints)):
+            ib, kb, pb, db = endpoints[b]
+            if ia == ib:
+                continue
+            A, B = main_specs[ia], main_specs[ib]
+            if A["layer"] != B["layer"] or not (A["tokens"] and B["tokens"] and (A["tokens"] & B["tokens"])):
+                continue
+            gv = (pb[0] - pa[0], pb[1] - pa[1])
+            gl = math.hypot(*gv)
+            if gl > HEIGHT_JOIN_TOL:
+                continue
+            if gl > ENDPOINT_TOL:
+                gu = (gv[0] / gl, gv[1] / gl)
+                if da[0] * gu[0] + da[1] * gu[1] < COS_HEIGHT_LINK:
+                    continue
+                if db[0] * (-gu[0]) + db[1] * (-gu[1]) < COS_HEIGHT_LINK:
+                    continue
+            # 分岐点では両チェーン端が同じ地形median(地表)に落ち、max(A,B) では更新されないことがある。
+            # 各チェーンの反対端(高架側)も見て、接続点を高架高へ引き上げる(地表に沈む接続を防ぐ)。
+            _ao = A["endS"] if ka == "startS" else A["startS"]
+            _bo = B["endS"] if kb == "startS" else B["startS"]
+            h = max(int(A[ka]), int(B[kb]), int(_ao), int(_bo))
+            if h > A[ka] or h > B[kb]:
+                if _BDBG:
+                    print(f"[bridge] JOIN height {ia}.{ka}<->{ib}.{kb} "
+                          f"dist={gl:.0f}b {A[ka]}/{B[kb]} -> {h}")
+                A[ka] = B[kb] = h
+
+    # 同一路線の上下線は横並びで別チェーンに残す必要があるが、橋台の高さは揃っていないと
+    # 片側だけ地表アンカーへ落ちて大きな段差に見える。ジオメトリは連結せず、近接・平行な
+    # main チェーン端だけ高い方へ同期する。
+    COS_PARALLEL_HEIGHT = math.cos(math.radians(30.0))
+    for a in range(len(endpoints)):
+        ia, ka, pa, da = endpoints[a]
+        for b in range(a + 1, len(endpoints)):
+            ib, kb, pb, db = endpoints[b]
+            if ia == ib:
+                continue
+            A, B = main_specs[ia], main_specs[ib]
+            if A["rc"] != "main" or B["rc"] != "main":
+                continue
+            if A["layer"] != B["layer"] or not (A["tokens"] and B["tokens"] and (A["tokens"] & B["tokens"])):
+                continue
+            gl = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+            if gl > HEIGHT_JOIN_TOL:
+                continue
+            if abs(da[0] * db[0] + da[1] * db[1]) < COS_PARALLEL_HEIGHT:
+                continue
+            h = max(int(A[ka]), int(B[kb]))
+            if h > A[ka] or h > B[kb]:
+                if _BDBG:
+                    print(f"[bridge] PARALLEL height {ia}.{ka}<->{ib}.{kb} "
+                          f"dist={gl:.0f}b {A[ka]}/{B[kb]} -> {h}")
+                A[ka] = B[kb] = h
+
+    main_params = []
+    for sp in main_specs:
+        ch = sp["ch"]
+        mpts, seglen = sp["mpts"], sp["seglen"]
+        startS, endS = int(sp["startS"]), int(sp["endS"])
+        rise_full, min_deck = sp["rise_full"], sp["min_deck"]
+        half_w, rc = sp["half_w"], sp["rc"]
+        head_ext, tail_ext = sp["head_ext"], sp["tail_ext"]
         psts, pdy = _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc,
                                  head_ext, tail_ext)
-        main_params.append(dict(mpts=mpts, seglen=seglen, total=sum(seglen),
+        main_params.append(dict(mpts=mpts, seglen=seglen, total=sp["total"],
                                 startS=startS, endS=endS, rise_full=rise_full,
                                 min_deck=min_deck, psts=psts, pdy=pdy))
         if _BDBG:
-            _tot = sum(seglen)
+            _tot = sp["total"]
             _names = sorted({infos[i]["name"] for (i, _) in ch if infos[i]["name"]})
             _steps = [abs(pdy[k + 1] - pdy[k]) for k in range(len(pdy) - 1)] or [0]
             _samp = [pdy[int(round(j * (len(pdy) - 1) / 10))] for j in range(11)] if pdy else []
@@ -1965,8 +2074,10 @@ def dem_to_blocks_enhanced(
     building_id: np.ndarray | None = None,
     building_wall_keys: list | None = None,
     building_roof_keys: list | None = None,
+    building_roof_solid: list | None = None,   # 建物 id → 屋根を型単色にしオルソ焼込無効
     roof_color_tol: float = 55.0,
     color_building_roofs: bool = False,
+    terrain_skirt_cells: int = 0,   # >0: ワールド外周この幅を斜面で下ろし境界の崖を無くす(単一タイル前提)
     wall_block: str = "white_concrete",
     window_block: str = "glass",
     floor_height: int = 5,
@@ -2094,6 +2205,18 @@ def dem_to_blocks_enhanced(
     # 陸地表 y（最低 1）。凡例有効時は _lift 持ち上げ
     elev_land = np.where(np.isnan(dem_ds), 0.0, dem_ds)
     y_surf_land = np.maximum(1, (elev_land * scale_land).astype(int)) + _lift
+    # terrain skirt: ワールド外周 N セルを端に向け斜面で下ろし、境界の垂直な崖を無くす。
+    #   単一タイル(campus)前提＝dem_ds の外周がそのままワールド端。--tiles 併用時は継ぎ目にも
+    #   斜面が出るため使わないこと。陸セルのみ対象(海/水面は既に傾斜)。
+    if terrain_skirt_cells and terrain_skirt_cells > 0:
+        _N = int(terrain_skirt_cells)
+        _dz = np.minimum(np.arange(nz), nz - 1 - np.arange(nz))[:, None]
+        _dx = np.minimum(np.arange(nx), nx - 1 - np.arange(nx))[None, :]
+        _d = np.minimum(_dz, _dx)                       # 最寄り端までのセル距離
+        _frac = np.clip(_d / float(_N), 0.0, 1.0)
+        _y_skirt = (_lift + (y_surf_land - _lift) * _frac).round().astype(y_surf_land.dtype)
+        _inzone = (_d < _N) & land_mask
+        y_surf_land = np.where(_inzone, np.minimum(y_surf_land, _y_skirt), y_surf_land)
     # 海面 y（sea_level + 1 が水面ブロック）。地盤柱の起点として使う海底 y は sea - depth
     y_sea_surface = max(1, int((sea_level_m + 1.0) * scale_sea)) + _lift
     y_sea_floor   = (np.maximum(0.0, sea_level_m - ocean_depth) * scale_sea).astype(int)
@@ -2367,6 +2490,9 @@ def dem_to_blocks_enhanced(
         #     RGB 距離 roof_color_tol 以内（=同系統の濃淡）はセルの色を残し、外れ色
         #     （木の緑・隣家の別色など speckle）だけ代表色へスナップする。
         #     color_building_roofs 無効/未集約は type 由来の屋根キー（単色）。
+        def _roof_solid(_id):      # その棟が「屋根を型単色・オルソ非焼込」指定か
+            return bool(building_roof_solid is not None
+                        and 0 <= _id < len(building_roof_solid) and building_roof_solid[_id])
         roof_by_id = None          # 各建物の代表屋根キー
         roof_dom_rgb = None        # 代表屋根キーの RGB（同系統判定用）
         if building_id is not None and building_roof_keys is not None:
@@ -2389,7 +2515,7 @@ def dem_to_blocks_enhanced(
                     mean_rgb[have] = (rgb_sum[have] / cnt[have, None]).round().astype(np.uint8)
                     matched = _csat(mean_rgb.reshape(1, nb, 3)).reshape(nb)
                     for _id in range(nb):
-                        if have[_id]:
+                        if have[_id] and not _roof_solid(_id):   # 新設建物はオルソを焼かず型単色を保持
                             roof_by_id[_id] = str(matched[_id])
                 else:
                     acc: dict[int, Counter] = {}
@@ -2397,7 +2523,7 @@ def dem_to_blocks_enhanced(
                                        np.asarray(surf_block)[bsel].tolist()):
                         acc.setdefault(_id, Counter())[_c] += 1
                     for _id, c in acc.items():
-                        if 0 <= _id < len(roof_by_id):
+                        if 0 <= _id < len(roof_by_id) and not _roof_solid(_id):
                             roof_by_id[_id] = c.most_common(1)[0][0]
                 roof_dom_rgb = [(_BP[k][1] if k in _BP else (128, 128, 128))
                                 for k in roof_by_id]
@@ -2484,7 +2610,7 @@ def dem_to_blocks_enhanced(
             ceil_y = y_base + int(eave_blocks_by_bid.get(bid_c, bh_blocks))   # 軒高（上は中実の屋根）
             if top_y > b_max_y:
                 b_max_y = top_y
-            if roof_dom_rgb is not None and 0 <= bid_c < len(roof_by_id):
+            if roof_dom_rgb is not None and 0 <= bid_c < len(roof_by_id) and not _roof_solid(bid_c):
                 # color_building_roofs 経路: 同系統の濃淡は残し、外れ色だけ代表色へ
                 cell_k = surf_block[j, i_]
                 dom_k = roof_by_id[bid_c]
