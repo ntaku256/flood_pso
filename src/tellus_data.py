@@ -196,19 +196,19 @@ def fetch_mapzen_dem(
     }
 
 
-# GSI 標高タイル DEM5A（航空レーザ測量・bare-earth 5m、ログイン不要・全国被覆）。
-# ローカルの FG-GML DEM5A が無いメッシュ(例 503551)を online で補うために使う。
-GSI_DEM5A_BASE_URL = "https://cyberjapandata.gsi.go.jp/xyz/dem5a_png"
+# GSI 標高タイル（航空レーザ測量・bare-earth, ログイン不要・全国被覆）。
+# layer="dem5a_png"(5m,〜z15) / "dem1a_png"(1m,〜z17)。ローカル DEM が無い/粗い域を online で補う。
+GSI_DEM_BASE = "https://cyberjapandata.gsi.go.jp/xyz"
 
 
-def fetch_gsi_dem5a_tile(z: int, x: int, y: int,
-                         cache_dir: Path = DEFAULT_CACHE_DIR) -> np.ndarray:
-    """DEM5A タイル(256×256)を取得し標高[m]を返す。無被覆(404)は全 NaN。
+def fetch_gsi_dem_tile(z: int, x: int, y: int, layer: str = "dem5a_png",
+                       cache_dir: Path = DEFAULT_CACHE_DIR) -> np.ndarray:
+    """GSI 標高タイル(256×256)を取得し標高[m]を返す。無被覆(404)は全 NaN。
     GSI 標高 PNG: v = R*2^16+G*2^8+B; v==2^23 → 無効, v<2^23 → v*0.01, else (v-2^24)*0.01。"""
-    tile_dir = cache_dir / "gsi_dem5a" / str(z) / str(x)
+    tile_dir = cache_dir / layer / str(z) / str(x)
     tile_path = tile_dir / f"{y}.png"
     if not tile_path.exists():
-        url = f"{GSI_DEM5A_BASE_URL}/{z}/{x}/{y}.png"
+        url = f"{GSI_DEM_BASE}/{layer}/{z}/{x}/{y}.png"
         try:
             data = _http_get_with_retry(url)
         except urllib.error.HTTPError as e:
@@ -229,10 +229,11 @@ def fetch_gsi_dem5a(
     lat_min: float, lat_max: float,
     lon_min: float, lon_max: float,
     zoom: int = 15,
+    layer: str = "dem5a_png",
     cache_dir: Path = DEFAULT_CACHE_DIR,
     verbose: bool = True,
 ) -> dict:
-    """BBOX をカバーする GSI DEM5A タイルをモザイク化。戻り値は fetch_mapzen_dem と同形式。"""
+    """BBOX をカバーする GSI 標高タイル(dem5a/dem1a)をモザイク化。戻り値は fetch_mapzen_dem と同形式。"""
     tiles = tiles_for_bbox(lon_min, lat_min, lon_max, lat_max, zoom)
     if not tiles:
         raise ValueError(f"empty bbox: lat[{lat_min},{lat_max}] lon[{lon_min},{lon_max}]")
@@ -243,10 +244,10 @@ def fetch_gsi_dem5a(
     H = (ys[-1] - ys[0] + 1) * ts; W = (xs[-1] - xs[0] + 1) * ts
     mosaic = np.full((H, W), np.nan, dtype=np.float32)
     if verbose:
-        print(f"[gsi_dem5a] zoom={zoom}  tiles={len(tiles)}  → mosaic {H}×{W}")
+        print(f"[gsi:{layer}] zoom={zoom}  tiles={len(tiles)}  → mosaic {H}×{W}")
     for i, (x, y) in enumerate(tiles, 1):
         try:
-            tile = fetch_gsi_dem5a_tile(zoom, x, y, cache_dir=cache_dir)
+            tile = fetch_gsi_dem_tile(zoom, x, y, layer=layer, cache_dir=cache_dir)
         except Exception as e:
             if verbose:
                 print(f"  [warn] tile ({x},{y}) failed: {e}")
@@ -262,7 +263,7 @@ def fetch_gsi_dem5a(
         "lat_min": se_lat, "lat_max": nw_lat,
         "lon_min": nw_lon, "lon_max": se_lon,
         "res_lat": res_lat, "res_lon": res_lon,
-        "source": "gsi_dem5a", "zoom": zoom,
+        "source": layer, "zoom": zoom,
     }
 
 

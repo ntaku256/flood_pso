@@ -109,8 +109,10 @@ def main():
     ap.add_argument("--mapzen-zoom", type=int, default=15,
                     help="Mapzen タイル zoom (14≈9.5m, 15≈4.8m, 16≈2.4m)")
     ap.add_argument("--dem-gsi-tiles", action="store_true",
-                    help="地形をローカル DEM5A ではなく GSI 標高タイル DEM5A(online, 全国被覆, bare-earth)から"
+                    help="地形をローカル DEM5A ではなく GSI 標高タイル(online, 全国被覆, bare-earth)から"
                          "中心±範囲で取得する。ローカルに無いメッシュ(例 503551)も継ぎ目なくカバー。zoom=--mapzen-zoom")
+    ap.add_argument("--dem-gsi-layer", default="dem5a_png", choices=["dem5a_png", "dem1a_png"],
+                    help="--dem-gsi-tiles のレイヤ。dem5a_png=5m(〜z15) / dem1a_png=1m(〜z17, 高精細・都市部のみ)")
     ap.add_argument("--use-esa", action="store_true",
                     help="ESA WorldCover 2021 の土地被覆別ブロック割当を有効化（rasterio 必須）")
     ap.add_argument("--use-osm", action="store_true",
@@ -290,10 +292,10 @@ def main():
         _clon = args.center_lon if args.center_lon is not None else _pc[1]
         _mlat = (_d / 2 + 150) / 111320.0
         _mlon = (_w / 2 + 150) / (111320.0 * _mm.cos(_mm.radians(_clat)))
-        print(f"Loading DEM from GSI DEM5A tiles (online) around ({_clat:.5f},{_clon:.5f})...")
+        print(f"Loading DEM from GSI {args.dem_gsi_layer} tiles (online) around ({_clat:.5f},{_clon:.5f})...")
         from tellus_data import fetch_gsi_dem5a
         dem_info = fetch_gsi_dem5a(_clat - _mlat, _clat + _mlat, _clon - _mlon, _clon + _mlon,
-                                   zoom=args.mapzen_zoom)
+                                   zoom=args.mapzen_zoom, layer=args.dem_gsi_layer)
     else:
         print("Loading DEM (5m, full resolution)...")
         dem_info = mosaic_tiles(DEM_DIR)
