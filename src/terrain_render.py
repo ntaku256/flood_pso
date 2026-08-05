@@ -30,6 +30,24 @@ import nbtlib
 from nbt_export import block_id
 
 
+# ── 調整可能な既定値（呼出側から引数で上書き可） ─────────────────
+# トンネル: コア(OSM way 本体)区間の被覆判定を何 block 甘くするか。
+# 0(既定) = 「構造(壁+アーチ天井)の頂部が地表以下」なら密閉。延長部の判定
+# (tc > fy+CLEAR+SHELL) より 1block だけ緩い。大きくすると密閉を維持しやすくなるが、
+# その分シェル頂部が地表に露出する（合成データ実測: slack 0→1 で山越えトンネルの
+# 地表露出ブロックが 0→108、2 で 308）。
+TUNNEL_CORE_COVER_SLACK = 0
+# トンネル: 被覆判定を station 方向へ closing する長さ[block]。密閉に挟まれた
+# これ未満の非密閉ギャップは密閉へ戻す（山中の小さな谷/DEMノイズ対策）。0 で無効。
+TUNNEL_COVER_CLOSE_BLOCKS = 8
+# 地盤アンダーフィル: 隣接セルとの段差に応じた可変深さの下限/上限[block]。
+# 上限は「段差 + UNDERFILL_EXTRA」でも足りない崖のための安全弁で、既定は
+# 従来の deep_ground クランプを超えて崖の穴を塞げるよう十分大きく取る。
+UNDERFILL_MIN = 2
+UNDERFILL_EXTRA = 1
+UNDERFILL_HARD_CAP = 96
+
+
 class _DenseBlockSink:
     """`blocks.append(Compound)` インターフェースを保ったまま、各 Compound の
     pos/state を密3D配列 ``arr[y,z,x]``（uint16, 0=air, 値=palette index）へ書き込む
@@ -732,9 +750,58 @@ def build_building_maps(
             "facade": facade_keys, "roof_solid": roof_solid_keys}
 
 
+def assign_global_power_anchors(lines, dem_full, lat_max, lon_min, res_lat, res_lon,
+                                *, scale_land, lift, search_cells: int = 8):
+    """各送電線の頂点（=実鉄塔位置）の地表Y を **全域DEM** から計算して
+    ``L["ground_y"] = [int|None, ...]``（頂点数と同数）として付与する（in-place）。
+
+    add_power_blocks の ground_y はタイルローカル grid を見るため、--tiles 分割で径間の
+    端点（鉄塔）がタイル外に出ると端点高が「線とタイルの交差区間の端の地形高」に化ける。
+    ところが径間内部の位置決めは**全長基準**の媒介変数 f なので、タイル毎に別の直線を
+    引くことになり、傾斜地では継ぎ目に段差が出て対地クリアランスも狂う（本番 halo は
+    16 DEMセルしか無く、実鉄塔径間は数百 block なのでほぼ必ずクリップされる）。
+    本関数は分割前に全域DEMで各頂点の地表Yを1回だけ計算し、全タイルが**同一の径間端点高**を
+    参照できるようにする（橋の assign_global_bridge_anchors と同じ手当て）。
+    y_surf_land = max(1, 標高×scale_land) + lift（terrain_render の地表Yと同式）。
+
+    search_cells : 頂点セルの DEM が欠損(NaN)のとき、この半径[DEMセル]まで近傍を探す。
+                   見つからなければ None を入れ、add_power_blocks はタイルローカルへ
+                   フォールバックする（後方互換）。
+    """
+    H, W = dem_full.shape
+
+    def ysl(row, col):
+        if 0 <= row < H and 0 <= col < W:
+            v = dem_full[row, col]
+            if np.isfinite(v):
+                return max(1, int(v * scale_land)) + lift
+        return None
+
+    def anchor(lat, lon):
+        r = int(round((lat_max - lat) / res_lat))
+        c = int(round((lon - lon_min) / res_lon))
+        v = ysl(r, c)
+        if v is not None:
+            return int(v)
+        for rad in range(1, int(max(1, search_cells)) + 1):     # NaN 穴は近傍リングで補完
+            for dr in range(-rad, rad + 1):
+                for dc in range(-rad, rad + 1):
+                    if max(abs(dr), abs(dc)) != rad:
+                        continue
+                    v = ysl(r + dr, c + dc)
+                    if v is not None:
+                        return int(v)
+        return None
+
+    for L in (lines or []):
+        cs = L.get("coords") or []
+        L["ground_y"] = [anchor(float(la), float(lo)) for la, lo in cs]
+
+
 def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
                      y_surf_land, sea_mask, scale_land,
-                     wire_key="iron_bars", pylon_key="iron_bars") -> int:
+                     wire_key="iron_bars", pylon_key="iron_bars",
+                     clip_spans_to_grid: bool = True) -> int:
     """OSM 送電線（power=line/minor_line）+ 鉄塔/電柱（power=tower/pole）を立体化。
 
     - 電線: voltage → 基準高さ(実m×scale_land)。径間（頂点間）ごとにカテナリ（垂れ）で
@@ -742,6 +809,13 @@ def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
     - 鉄塔: 線の各頂点（=実鉄塔位置）に iron_bars ラティス柱+頂部クロスアーム。
       power=tower/pole の単独ノードも柱（tower=高,pole=低）として立てる（頂点と重複時は省略）。
     返り値: 置いた最大 y（max_y 更新用）。FG-GML に電力設備が無いため OSM を入力に使う。
+
+    clip_spans_to_grid : True(既定) で、径間端点がタイル外のとき「線とタイルの交差区間の
+        端」の地形高で代用し、タイル内に入る区間だけを描く。False で旧挙動（端点が
+        タイル外の径間は丸ごと捨てる＝タイルを貫く送電線が消える）。
+        ※ これは assign_global_power_anchors が使えないとき用のフォールバックで、
+          タイルローカル高を端点に使う以上、傾斜地では継ぎ目に段差が残る。
+          ``L["ground_y"]``（全域DEMアンカー）があればそちらが優先される。
     """
     import math
     seen: set = set()
@@ -765,6 +839,30 @@ def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
         i, j = int(round(x)), int(round(z))
         if 0 <= j < nz and 0 <= i < nx and np.isfinite(y_surf_land[j, i]):
             return int(y_surf_land[j, i])
+        return None
+
+    def span_ground_y(x, z, xo, zo):
+        """径間端点 (x,z) の地形高。端点がタイル外/無効セルなら、対向端点 (xo,zo) 方向へ
+        進んで**最初に有効になる点＝線とタイルの交差区間の端**の高さで代用する。
+
+        これが無いと「タイルを貫くが両端の鉄塔がタイル外」の径間が丸ごと消える。
+        power_osm._bbox_hit は線全体の bbox 重なりで拾うだけでジオメトリをクリップ
+        しないため、端点がタイル外の coords がそのまま渡ってくるのが原因。
+        径間内部のサンプルは f（全長基準の媒介変数）で位置決めしており、タイルを
+        分割しても同じ f→同じ高さになるので継ぎ目で架線が繋がる。"""
+        g = ground_y(x, z)
+        if g is not None or not clip_spans_to_grid:
+            return g
+        dx, dz = xo - x, zo - z
+        d = math.hypot(dx, dz)
+        if d < 1e-9:
+            return None
+        n = max(1, min(int(d * 2) + 1, 4096))       # 0.5block 刻み（上限 4096 サンプル）
+        for t in range(1, n + 1):
+            f = t / n
+            g = ground_y(x + dx * f, z + dz * f)
+            if g is not None:
+                return g
         return None
 
     def base_h_m(volt):
@@ -838,23 +936,43 @@ def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
     for L in (lines or []):
         pts = [_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, nz, nx) for la, lo in L["coords"]]
         bh = int(round(base_h_m(int(L.get("voltage", 0))) * scale_land))
-        # 各頂点（実鉄塔位置）に柱
+        # 全域DEMアンカー（assign_global_power_anchors が付与）。頂点数が合うときだけ使う。
+        ganch = L.get("ground_y")
+        if not (isinstance(ganch, (list, tuple)) and len(ganch) == len(pts)):
+            ganch = None
+        # 各頂点（実鉄塔位置）に柱。柱の**足元**はタイルローカル地形（地面から浮かせない）、
+        # **頂部**はアンカー基準（架線の端点と必ず一致させる）。
         vert_top = {}
-        for (x, z) in pts:
+        for vi, (x, z) in enumerate(pts):
             ix, iz = int(round(x)), int(round(z))
             gy = ground_y(x, z)
             if gy is None:
                 continue
-            vert_top[(ix, iz)] = gy + bh
+            ga = ganch[vi] if ganch is not None else None
+            top = (int(ga) if ga is not None else gy) + bh
+            vert_top[(ix, iz)] = top
             if (ix, iz) not in pylon_cells:
                 pylon_cells.add((ix, iz))
-                pylon(ix, iz, gy, gy + bh,
+                pylon(ix, iz, gy, top,
                       kind=("tower" if (bh / max(scale_land, 1e-6)) >= 16.0 else "pole"))
         # 径間ごとに架線（カテナリ）。両端鉄塔頂を線形補間し sag を引く
-        for (x0, z0), (x1, z1) in zip(pts, pts[1:]):
-            g0, g1 = ground_y(x0, z0), ground_y(x1, z1)
+        for si in range(len(pts) - 1):
+            (x0, z0), (x1, z1) = pts[si], pts[si + 1]
+            g0 = ganch[si] if ganch is not None else None
+            g1 = ganch[si + 1] if ganch is not None else None
+            if g0 is None:
+                # アンカー欠損時のみ: 端点がタイル外なら交差区間の端の地形高で代用
+                g0 = span_ground_y(x0, z0, x1, z1)
+            if g1 is None:
+                g1 = span_ground_y(x1, z1, x0, z0)
             if g0 is None or g1 is None:
                 continue
+            g0, g1 = int(g0), int(g1)
+            if ganch is not None:
+                # 全域アンカー使用時は径間ジオメトリを量子化して浮動小数のタイル依存を消す。
+                # 隣接タイルの (x,z) は整数オフセットだけ違うので、丸めると dist/f/xi が
+                # bit 一致し、どのタイルで描いても同じ world 位置に同じ y が出る。
+                x0, z0, x1, z1 = (round(v, 6) for v in (x0, z0, x1, z1))
             dist = math.hypot(x1 - x0, z1 - z0)
             n = int(dist) + 1
             max_sag = min(max(dist / 15.0, 1.0), 6.0)
@@ -1766,19 +1884,91 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     return ymax[0]
 
 
+def assign_global_tunnel_anchors(tunnels, dem_full, lat_max, lon_min, res_lat, res_lon,
+                                 *, h_res_block_m, scale_land, lift, portal_blocks: int = 8):
+    """各トンネルの両坑口の床高 ``t["startF"]``/``t["endF"]`` を **全域DEM** から計算して
+    付与する（in-place）。
+
+    add_tunnel_blocks の end_floor/portal_floor はタイルローカル grid を走査するため、
+    --tiles 分割でトンネルが複数タイルにまたがると、坑口を含まないタイルでは「そのタイル内で
+    最初に in-grid になった点」の地形高が坑口高に化ける。床高は両坑口の線形補間なので、
+    タイルごとに違う床勾配になり境界で床が段差になる（実測で最大 29 block）。
+    本関数は分割前に全域DEMで両坑口の床高を1回だけ計算し、全タイルが同一の値を参照
+    できるようにする（橋の assign_global_bridge_anchors と同じ手当て）。
+
+    坑口床高 = 坑口から**外向き**（トンネル外＝道路側）0..portal_blocks block の地形Y の最小値
+    （add_tunnel_blocks.portal_floor と同式）。
+    y_surf_land = max(1, 標高×scale_land) + lift。
+    """
+    import math
+    H, W = dem_full.shape
+    M_PER_DEG_LAT = 111320.0
+    h_res_dem = max(res_lat * M_PER_DEG_LAT, 1e-6)        # DEM 1セルの m（lat方向）
+    step = max(1, int(round(h_res_block_m / h_res_dem)))  # 1 block = step DEMセル
+
+    def cell(lat, lon):
+        return int(round((lat_max - lat) / res_lat)), int(round((lon - lon_min) / res_lon))
+
+    def ysl(row, col):
+        if 0 <= row < H and 0 <= col < W:
+            v = dem_full[row, col]
+            if np.isfinite(v):
+                return max(1, int(v * scale_land)) + lift
+        return None
+
+    def portal(p_end, p_in):
+        r0, c0 = cell(p_end[0], p_end[1]); r1, c1 = cell(p_in[0], p_in[1])
+        dr, dc = r0 - r1, c0 - c1                          # 外向き（坑口の先＝道路側）
+        L = math.hypot(dr, dc)
+        if L > 1e-6:
+            dr, dc = dr / L, dc / L
+        ys = []
+        for d in range(0, int(max(0, portal_blocks)) + 1):
+            v = ysl(int(round(r0 + dr * d * step)), int(round(c0 + dc * d * step)))
+            if v is not None:
+                ys.append(v)
+        if ys:
+            return int(min(ys))
+        v = ysl(r0, c0)
+        return int(v) if v is not None else None
+
+    for t in (tunnels or []):
+        c = t.get("coords") or []
+        if len(c) < 2:
+            continue
+        t["startF"] = portal(c[0], c[1])
+        t["endF"] = portal(c[-1], c[-2])
+
+
 def add_tunnel_blocks(blocks, tunnels, patch_bbox_latlon, nz, nx, *,
                       y_surf_land, h_res_block_m, surf_block=None, sea_mask=None,
                       road_mask=None,
                       floor_key="gray_concrete", base_key="stone",
-                      light_key="sea_lantern", line_key="white_concrete") -> int:
+                      light_key="sea_lantern", line_key="white_concrete",
+                      core_always_covered: bool = False,
+                      core_cover_slack: int | None = None,
+                      cover_close_blocks: int | None = None) -> int:
     """OSM トンネル（tunnel=yes の highway/railway polyline）を地形に刳り貫いて生成。
     橋の逆処理: 両坑口の道路高を線形補間した床高に、道路幅×アーチ断面の空気トンネルを
-    掘る（=air を後勝ちで上書き）。全長を密閉(床+路盤+アーチ天井(石2厚)+壁(石2厚)+灯り)、
+    掘る（=air を後勝ちで上書き）。地形に埋まる区間のみ密閉(床+路盤+アーチ天井(石2厚)+
+    壁(石2厚)+灯り)し、地表に出る区間は開削(cut-and-cover)にする。
     路面に白線。上の地表に写り込んだ道路色を周囲色で消す(#4)。坑口の手前 EXT block を延長
     し道路との障害物を除去(#3)、ただし交叉点に当たる手前で止める。床傾斜は範囲外含む全way端
-    で決める(#5)。延長部も壁・天井で密閉。返り値: 触れた最大 y。
+    で決める(#5)。返り値: 触れた最大 y。
+
+    core_always_covered : True で旧挙動（OSM way 本体は地形の有無に関係なく常に密閉）。
+                          既定 False＝平坦地の tunnel=yes が地表に石の箱を生やさない。
+    core_cover_slack    : コア区間の被覆判定を何 block 甘くするか（既定
+                          TUNNEL_CORE_COVER_SLACK）。大きいほど密閉を維持しやすい。
+    cover_close_blocks  : 密閉判定を station 方向に closing する長さ[block]（既定
+                          TUNNEL_COVER_CLOSE_BLOCKS）。山中の小さな谷/DEMノイズで
+                          密閉が途切れて穴が開くのを防ぐ。0 で無効。
     """
     import math
+    core_slack = (TUNNEL_CORE_COVER_SLACK if core_cover_slack is None
+                  else int(core_cover_slack))
+    close_w = (TUNNEL_COVER_CLOSE_BLOCKS if cover_close_blocks is None
+               else int(cover_close_blocks))
     WALL_H = 4                      # アーチの直壁部の高さ(block)
     CLEAR = 8                       # アーチ頂部(中央)の内空高(block)
     EXT = 20                        # 坑口より手前へ延長する長さ(block, 交叉点手前で短縮)
@@ -1932,6 +2122,12 @@ def add_tunnel_blocks(blocks, tunnels, patch_bbox_latlon, nz, nx, *,
         pts = [_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, nz, nx) for la, lo in b["coords"]]
         if len(pts) < 2:
             continue
+        _sf, _ef = b.get("startF"), b.get("endF")
+        if _sf is not None or _ef is not None:
+            # 全域アンカー使用時はジオメトリを量子化して浮動小数のタイル依存を消す。
+            # 隣接タイルの (x,z) は整数オフセットだけ違うので、丸めると seg/total/ostat が
+            # bit 一致し、床高 fy がどのタイルで描いても同じになる。
+            pts = [(round(x, 6), round(z, 6)) for x, z in pts]
         _wm = float(b.get("width_m") or 5.5)
         if "link" in (b.get("highway") or ""):
             _wm = min(_wm, 5.5)
@@ -1947,8 +2143,11 @@ def add_tunnel_blocks(blocks, tunnels, patch_bbox_latlon, nz, nx, *,
         CLEAR = int(min(9, max(5, round(4.0 + Lm / 80.0)))) # 内空頂高: 短~5(≈アーチ前) → 長~8-9
         WALL_H = min(4, CLEAR - 1)                          # 直壁高(=端の内空高)
         EXT = int(min(70, max(1, round((Lm - 30.0) / 6.0)))) # 延長: 短~1-2(ほぼ無) → 長~50-55
-        f0 = end_floor(pts, True)
-        f1 = end_floor(pts, False)
+        # 坑口床高: 全域DEMアンカー（assign_global_tunnel_anchors）を優先。無ければ
+        # 従来のタイルローカル走査へフォールバック（後方互換）。
+        _sf, _ef = b.get("startF"), b.get("endF")
+        f0 = int(_sf) if _sf is not None else end_floor(pts, True)
+        f1 = int(_ef) if _ef is not None else end_floor(pts, False)
         # #3: 両端を延長（交叉点手前で短縮）。延長部も壁・天井で密閉。station は元始点基準。
         d0 = udir(pts[1], pts[0]); d1 = udir(pts[-2], pts[-1])
         head_len = safe_ext_len(pts[0], d0[0], d0[1], half_w)
@@ -1958,6 +2157,8 @@ def add_tunnel_blocks(blocks, tunnels, patch_bbox_latlon, nz, nx, *,
         epts = [head] + pts + [tail]
         seg = [math.hypot(b1[0] - a1[0], b1[1] - a1[1]) for a1, b1 in zip(epts, epts[1:])]
         n_t += 1
+        # ── パス1: サンプル列を先に構築（被覆判定を station 方向へ平滑化するため2パス化）──
+        samples = []            # (cx, cz, ox, oz, ostat, fy, tc, in_core)
         s_acc = 0.0
         for si in range(len(seg)):
             (x0, z0), (x1, z1) = epts[si], epts[si + 1]
@@ -1976,61 +2177,90 @@ def add_tunnel_blocks(blocks, tunnels, patch_bbox_latlon, nz, nx, *,
                 tc = terr(cx, cz)
                 if tc is None:
                     continue
-                # 被覆判定: コア(OSMトンネル本体, 0≤ostat≤total)は tunnel=yes なので常に密閉。
-                # 延長部(ostat<0 / >total)のみ「地形が天井より上なら密閉, 地表に出たら開削」。
-                # これで長い延長が山を抜け開けた地面に出る区間は浮いた箱にならず開削化する。
-                in_core = -1e-6 <= ostat <= total + 1e-6
-                covered = in_core or (tc > fy + CLEAR + SHELL)
-                for w in range(-half_w, half_w + 1):
-                    ix, iz = col(cx + ox * w, cz + oz * w)
-                    # 路面（白線 or 路盤色）＋路盤(SHELL厚)＋地表が床より低い延長部は床下を石で支持
-                    put(ix, fy, iz, line_key if is_line(w, ostat, half_w) else floor_key)
-                    for s in range(1, SHELL + 1):
-                        put(ix, fy - s, iz, base_key)
-                    yb = fy - SHELL - 1
-                    while yb > tc and yb > fy - 12:
-                        put(ix, yb, iz, base_key)
-                        yb -= 1
-                    ah = arch_h(w, half_w)
-                    if covered:
-                        for yy in range(fy + 1, fy + ah + 1):
-                            put(ix, yy, iz, "air")           # 内空をアーチ状に刳り貫く
-                        for s in range(1, SHELL + 1):
-                            put(ix, fy + ah + s, iz, base_key)   # アーチ天井(SHELL厚)
-                    else:
-                        # 開削: 路面上〜地表まで空に(頭上の地形コブ除去, 天井なし)
-                        twc = terr(cx + ox * w, cz + oz * w)
-                        top = max(fy + ah, twc if twc is not None else fy + ah)
-                        for yy in range(fy + 1, top + 1):
-                            put(ix, yy, iz, "air")
-                if covered:
-                    # 壁(両側 SHELL厚)を床下〜天井上まで石で密閉
-                    for w in [(-half_w - s) for s in range(1, SHELL + 1)] + \
-                             [(half_w + s) for s in range(1, SHELL + 1)]:
-                        ix, iz = col(cx + ox * w, cz + oz * w)
-                        for yy in range(fy - SHELL, fy + CLEAR + SHELL + 1):
-                            put(ix, yy, iz, base_key)
-                # #4: トンネル上に地形(山)がある被覆部は、地表トップの道路色を周囲色で消す
-                if tc > fy + CLEAR + SHELL + 1:
-                    fc = fill_color(cx, cz, ox, oz, half_w)
-                    if fc is not None:
-                        for w in range(-half_w, half_w + 1):
-                            ty = terr(cx + ox * w, cz + oz * w)
-                            if ty is not None and ty > fy + arch_h(w, half_w) + SHELL:
-                                ix, iz = col(cx + ox * w, cz + oz * w)
-                                put(ix, ty, iz, fc)
-                # 照明: 刳り貫き後に直接配置(last-winsでairを上書き; put/seenだと隣接サンプルのairに先取り
-                #       されて消えるため)。天井直下中央に一定間隔。被覆(密閉)部のみ。
-                if covered and int(round(ostat)) % 6 == 0:
-                    ix, iz = col(cx, cz)
-                    ly = fy + CLEAR
-                    if 0 <= ix < nx and 0 <= iz < nz and (ix, ly, iz) not in seen_light:
-                        seen_light.add((ix, ly, iz))
-                        blocks.append(nbtlib.Compound({
-                            "pos": nbtlib.List[nbtlib.Int](
-                                [nbtlib.Int(ix), nbtlib.Int(ly), nbtlib.Int(iz)]),
-                            "state": block_id(light_key)}))
+                samples.append((cx, cz, ox, oz, ostat, fy, tc,
+                                -1e-6 <= ostat <= total + 1e-6))
             s_acc += L
+        # ── 被覆判定 ──
+        # 旧: コア(OSMトンネル本体, 0≤ostat≤total)は tunnel=yes なので**無条件**に密閉。
+        #     → 直上に地形が無い平坦地の tunnel=yes が地表に石の箱を生やしていた
+        #       (way長400blockで地表より上の非air 2万個超)。
+        # 新: コアも延長部と同じく「構造(壁+アーチ天井 SHELL厚)が地形に埋まるか」で判定し、
+        #     埋まらない区間は開削(cut-and-cover)にする。コアは延長部より core_slack block
+        #     だけ緩い閾値を使い、さらに station 方向の closing を掛けることで、
+        #     山中の小さな谷や DEM ノイズで密閉が途切れて穴が開く退行を防ぐ。
+        #     延長部の閾値(tc > fy+CLEAR+SHELL)は従来と完全に同じ。
+        cov = [(s[6] + (core_slack if s[7] else 0)) >= s[5] + CLEAR + SHELL + (0 if s[7] else 1)
+               for s in samples]
+        if core_always_covered:                          # 旧挙動へのエスケープハッチ
+            cov = [c or s[7] for c, s in zip(cov, samples)]
+        elif close_w > 0:
+            # station 方向 closing: 密閉に挟まれた close_w block 未満の非密閉区間は密閉に戻す
+            # (サンプル間隔は 0.5 block なので窓は 2*close_w サンプル)
+            wmax = max(1, int(round(close_w / 0.5)))
+            i0 = 0
+            ncov = len(cov)
+            while i0 < ncov:
+                if cov[i0]:
+                    i0 += 1
+                    continue
+                j0 = i0
+                while j0 < ncov and not cov[j0]:
+                    j0 += 1
+                if i0 > 0 and j0 < ncov and (j0 - i0) <= wmax:
+                    for q in range(i0, j0):
+                        cov[q] = True                    # 両側が密閉な短いギャップを埋める
+                i0 = j0
+        # ── パス2: レンダリング ──
+        for (cx, cz, ox, oz, ostat, fy, tc, _in_core), covered in zip(samples, cov):
+            for w in range(-half_w, half_w + 1):
+                ix, iz = col(cx + ox * w, cz + oz * w)
+                # 路面（白線 or 路盤色）＋路盤(SHELL厚)＋地表が床より低い延長部は床下を石で支持
+                put(ix, fy, iz, line_key if is_line(w, ostat, half_w) else floor_key)
+                for s in range(1, SHELL + 1):
+                    put(ix, fy - s, iz, base_key)
+                yb = fy - SHELL - 1
+                while yb > tc and yb > fy - 12:
+                    put(ix, yb, iz, base_key)
+                    yb -= 1
+                ah = arch_h(w, half_w)
+                if covered:
+                    for yy in range(fy + 1, fy + ah + 1):
+                        put(ix, yy, iz, "air")           # 内空をアーチ状に刳り貫く
+                    for s in range(1, SHELL + 1):
+                        put(ix, fy + ah + s, iz, base_key)   # アーチ天井(SHELL厚)
+                else:
+                    # 開削: 路面上〜地表まで空に(頭上の地形コブ除去, 天井なし)
+                    twc = terr(cx + ox * w, cz + oz * w)
+                    top = max(fy + ah, twc if twc is not None else fy + ah)
+                    for yy in range(fy + 1, top + 1):
+                        put(ix, yy, iz, "air")
+            if covered:
+                # 壁(両側 SHELL厚)を床下〜天井上まで石で密閉
+                for w in [(-half_w - s) for s in range(1, SHELL + 1)] + \
+                         [(half_w + s) for s in range(1, SHELL + 1)]:
+                    ix, iz = col(cx + ox * w, cz + oz * w)
+                    for yy in range(fy - SHELL, fy + CLEAR + SHELL + 1):
+                        put(ix, yy, iz, base_key)
+            # #4: トンネル上に地形(山)がある被覆部は、地表トップの道路色を周囲色で消す
+            if tc > fy + CLEAR + SHELL + 1:
+                fc = fill_color(cx, cz, ox, oz, half_w)
+                if fc is not None:
+                    for w in range(-half_w, half_w + 1):
+                        ty = terr(cx + ox * w, cz + oz * w)
+                        if ty is not None and ty > fy + arch_h(w, half_w) + SHELL:
+                            ix, iz = col(cx + ox * w, cz + oz * w)
+                            put(ix, ty, iz, fc)
+            # 照明: 刳り貫き後に直接配置(last-winsでairを上書き; put/seenだと隣接サンプルのairに先取り
+            #       されて消えるため)。天井直下中央に一定間隔。被覆(密閉)部のみ。
+            if covered and int(round(ostat)) % 6 == 0:
+                ix, iz = col(cx, cz)
+                ly = fy + CLEAR
+                if 0 <= ix < nx and 0 <= iz < nz and (ix, ly, iz) not in seen_light:
+                    seen_light.add((ix, ly, iz))
+                    blocks.append(nbtlib.Compound({
+                        "pos": nbtlib.List[nbtlib.Int](
+                            [nbtlib.Int(ix), nbtlib.Int(ly), nbtlib.Int(iz)]),
+                        "state": block_id(light_key)}))
         # #3b: 密閉延長端から地表道路まで開削して接続（坑口外の障害物を除去）
         fy_h = (int(round(f0 + (f1 - f0) * (-head_len / total))) if total > 1e-6 else f0)
         fy_t = (int(round(f0 + (f1 - f0) * ((total + tail_len) / total))) if total > 1e-6 else f0)
@@ -2062,6 +2292,15 @@ def dem_to_blocks_enhanced(
     smooth_sigma_cells: float = 1.0,
     cliff_threshold_m_per_m: float = 0.4,
     deep_ground: int = 8,
+    # 地盤アンダーフィル深さの上限[block]。None(既定)＝隣接セルとの段差に応じて可変
+    # （崖面のすきまを塞ぐ）。int を渡すとその値で一律クランプ＝旧挙動
+    # （underfill_cap=deep_ground で従来と完全一致）。
+    underfill_cap: int | None = None,
+    # 旧挙動エスケープハッチ（add_tunnel_blocks / add_power_blocks へそのまま中継）
+    tunnel_core_always_covered: bool = False,
+    tunnel_core_cover_slack: int | None = None,
+    tunnel_cover_close_blocks: int | None = None,
+    power_clip_spans_to_grid: bool = True,
     flood_threshold: float = 0.05,
     cover_patch: np.ndarray | None = None,
     building_mask: np.ndarray | None = None,
@@ -2120,9 +2359,20 @@ def dem_to_blocks_enhanced(
       3. 海セルは **海岸からの距離で段階的水深**、海底に砂/砂利
       4. 地表ブロックは **slope/convexity/海岸距離** で sand/gravel/stone/grass を判定
       5. 地盤柱は **可変アンダーフィル**（arnis 移植）：8近傍の最低地表 Y まで
-         stone で埋め、深さは `deep_ground` を上限にクランプ。平地は 2 ブロックで
-         済みブロック数が激減し、崖面は隣接セルの底まで埋めて見える穴を塞ぐ。
+         stone で埋め、平地は 2 ブロックで済みブロック数が激減し、崖面は隣接セルの
+         底まで埋めて見える穴を塞ぐ。
          （従来は全セル一律 `deep_ground` 本＝地下 stone を無駄に増やしていた）
+         上限は `underfill_cap`（None=段差に応じて可変, 既定）。旧来の固定クランプに
+         戻すには `underfill_cap=deep_ground` を渡す。
+
+    旧挙動エスケープハッチ（すべて既定=新挙動。CLI からは make_nbt_hd の
+    `--underfill-cap` / `--tunnel-core-always-covered` / `--tunnel-core-cover-slack` /
+    `--tunnel-cover-close-blocks` / `--power-no-clip-spans` で到達できる）:
+      underfill_cap              : int でアンダーフィル深さを一律クランプ（旧挙動）
+      tunnel_core_always_covered : True で OSM way 本体を無条件密閉（旧挙動）
+      tunnel_core_cover_slack    : コア被覆判定の緩さ[block]（None=既定値）
+      tunnel_cover_close_blocks  : 被覆判定の station 方向 closing 長[block]（0 で無効）
+      power_clip_spans_to_grid   : False で端点がタイル外の径間を丸ごと捨てる（旧挙動）
 
     Returns: (blocks_list, [nx, max_y+1, nz])
     """
@@ -2396,13 +2646,28 @@ def dem_to_blocks_enhanced(
     # --- 陸セル：可変アンダーフィル(arnis ground_generation.rs:716-758 移植) + 地表 ---
     # 固定 deep_ground 本ではなく、8近傍の最低地表 Y までを stone で埋める。平地は
     # neigh_min≈y_top → 2 ブロックで済みブロック数が激減し、崖面は隣接セルの底まで
-    # 埋めて見える穴を塞ぐ。深さは [2, deep_ground] にクランプ（従来より常に少ない）。
+    # 埋めて見える穴を塞ぐ。
+    #
+    # 上限クランプ:
+    #   旧 = deep_ground(既定8)で固定 → 8block(=5.3m)超の段差で崖面に横から見える
+    #        すきまが開いていた（20m崖で最大20block・穴800個を実測）。
+    #   新 = 隣接セルとの段差そのもの(+UNDERFILL_EXTRA)を上限にする＝段差が大きいセル
+    #        だけ深く埋める。平地の柱の深さは旧と変わらない(2block)ので総ブロック増は
+    #        崖の面積分だけ。UNDERFILL_HARD_CAP は暴走防止の安全弁。
+    #   underfill_cap に int を渡すと旧挙動（その値で一律クランプ）に戻せる。
     from scipy.ndimage import minimum_filter as _min_filter
     _yfm = np.where(land_mask, y_surf_land.astype(np.float32), np.float32(1e9))
     _neigh_min = _min_filter(_yfm, size=3, mode="nearest")
-    _under_depth = np.clip(
-        y_surf_land.astype(np.int32) - _neigh_min.astype(np.int32) + 1,
-        2, int(max(2, deep_ground))).astype(np.int32)
+    _drop = y_surf_land.astype(np.int32) - _neigh_min.astype(np.int32)
+    _umin = int(max(1, UNDERFILL_MIN))
+    if underfill_cap is None:
+        # 自動: 上限は UNDERFILL_HARD_CAP。deep_ground はこれより大きい値を渡したときだけ
+        # 上限を「引き上げる」方向に効く（小さくして崖に穴を開け直したい場合は
+        # underfill_cap を明示すること）。
+        _cap = int(max(_umin, UNDERFILL_HARD_CAP, int(deep_ground)))
+        _under_depth = np.clip(_drop + int(UNDERFILL_EXTRA), _umin, _cap).astype(np.int32)
+    else:                                    # 旧挙動: 一律クランプ
+        _under_depth = np.clip(_drop + 1, 2, int(max(2, underfill_cap))).astype(np.int32)
     land_idx = np.argwhere(land_mask)
     for j, i_ in land_idx.tolist():
         bx_v = int(BX[j, i_]); bz_v = int(BZ[j, i_])
@@ -2854,6 +3119,9 @@ def dem_to_blocks_enhanced(
             surf_block=surf_block, sea_mask=sea_mask,
             road_mask=(road_mask if (road_mask is not None
                        and road_mask.shape == (nz, nx)) else None),
+            core_always_covered=tunnel_core_always_covered,
+            core_cover_slack=tunnel_core_cover_slack,
+            cover_close_blocks=tunnel_cover_close_blocks,
         )
         max_y = max(max_y, tunnel_ymax + 2)
 
@@ -2862,6 +3130,7 @@ def dem_to_blocks_enhanced(
         power_ymax = add_power_blocks(
             blocks, powerlines, power_towers, patch_bbox_latlon, nz, nx,
             y_surf_land=y_surf_land, sea_mask=sea_mask, scale_land=scale_land,
+            clip_spans_to_grid=power_clip_spans_to_grid,
         )
         max_y = max(max_y, power_ymax + 2)
 

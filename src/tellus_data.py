@@ -21,6 +21,13 @@ flood_pso 用の Tellus 風地形を作るためのモジュール。
      ライセンス: CC BY 4.0
 
 キャッシュ: `flood_pso/data_cache/{mapzen,esa}/` 配下にローカル保存。再ダウンロードを避ける。
+
+オフライン運用: 環境変数 `FLOOD_PSO_OFFLINE=1` を立てるとネットワーク取得を一切行わず、
+キャッシュが無い場合は `osm_cache.OfflineError` を送出する（黙って空データを返さない）。
+`OfflineError` は Exception ではなく **BaseException** 派生なので、呼び出し側に点在する
+「取得に失敗したら劣化させて続行する」広域 `except Exception`（nbt_export の道路 curb 回廊、
+gap_fill の建物高さ補完など）に握り潰されない。ネットワーク由来の通常の失敗は従来どおり
+Exception 派生（RuntimeError / OverpassError / URLError）なので劣化継続の挙動は変わらない。
 """
 
 from __future__ import annotations
@@ -37,13 +44,20 @@ from typing import Iterable
 import numpy as np
 from PIL import Image
 
+try:  # src/ を sys.path に載せる通常経路
+    from osm_cache import (OFFLINE_ENV, OVERPASS_URL, OfflineError,
+                           fetch_buildings_roads, offline_guard)
+except ImportError:  # パッケージとして import された場合
+    from .osm_cache import (OFFLINE_ENV, OVERPASS_URL, OfflineError,
+                            fetch_buildings_roads, offline_guard)
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CACHE_DIR = REPO_ROOT / "data_cache"
 MAPZEN_BASE_URL = "https://elevation-tiles-prod.s3.amazonaws.com/terrarium"
 GSI_ORTHO_BASE_URL = "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto"  # 全国シームレス空中写真(JPG)
 ESA_BASE_URL    = "https://esa-worldcover.s3.amazonaws.com/v200/2021/map"
-OVERPASS_URL    = "https://overpass-api.de/api/interpreter"
+# OVERPASS_URL は osm_cache から re-export（後方互換のため名前を残す）
 
 # OSM highway → 道路幅 [m]（典型値、両車線合計）
 OSM_HIGHWAY_WIDTH_M = {
@@ -98,7 +112,11 @@ def tiles_for_bbox(
 
 def _http_get_with_retry(url: str, timeout: float = 20.0,
                          tries: int = 3, backoff_s: float = 1.5) -> bytes:
-    """単純な GET + 指数バックオフ。429/5xx は再試行。404 は即座に raise。"""
+    """単純な GET + 指数バックオフ。429/5xx は再試行。404 は即座に raise。
+
+    FLOOD_PSO_OFFLINE=1 のときはキャッシュミス（＝ここに到達）で OfflineError。
+    """
+    offline_guard(url)
     last_err = None
     for attempt in range(tries):
         try:
@@ -173,6 +191,8 @@ def fetch_mapzen_dem(
     for i, (x, y) in enumerate(tiles, 1):
         try:
             tile = fetch_mapzen_tile(zoom, x, y, cache_dir=cache_dir)
+        except OfflineError:
+            raise                      # オフライン欠損は黙って NaN 埋めせず即エラー
         except Exception as e:
             if verbose:
                 print(f"  [warn] tile ({x},{y}) failed: {e}")
@@ -248,6 +268,8 @@ def fetch_gsi_dem5a(
     for i, (x, y) in enumerate(tiles, 1):
         try:
             tile = fetch_gsi_dem_tile(zoom, x, y, layer=layer, cache_dir=cache_dir)
+        except OfflineError:
+            raise                      # オフライン欠損は黙って NaN 埋めせず即エラー
         except Exception as e:
             if verbose:
                 print(f"  [warn] tile ({x},{y}) failed: {e}")
@@ -325,6 +347,8 @@ def fetch_gsi_ortho(
     for i, (x, y) in enumerate(tiles, 1):
         try:
             tile = fetch_gsi_ortho_tile(zoom, x, y, cache_dir=cache_dir, layer=layer)
+        except OfflineError:
+            raise                      # オフライン欠損は黙って黒タイルにせず即エラー
         except Exception as e:
             if verbose:
                 print(f"  [warn] ortho tile ({x},{y}) failed: {e}")
@@ -576,6 +600,18 @@ def fetch_osm_buildings_roads(
     Overpass API で BBOX 内の建物 (way[building]) と道路 (way[highway]) を取得。
     結果を JSON でキャッシュする（再ダウンロード回避、Overpass の負荷を減らすため必須）。
 
+    キャッシュキーは bbox を 0.001 度（≒100 m）刻みで外側へ量子化した値なので、
+    crop を数 m ずらしても同じキャッシュに当たる（従来は 1 m のズレで再取得していた）。
+    量子化 bbox は要求 bbox を必ず内包するため、返す前に要求範囲でフィルタする。
+    旧形式（要求 bbox 完全一致キー）のキャッシュが既にある場合はそれを優先して使う。
+
+    量子化キーが効くのは新しく取る bbox だけで、既存の旧形式 `osm_*.json` は
+    完全一致キーの探索が先に走るためディスク上で統合されず、今後も個別に使われる。
+
+    FLOOD_PSO_OFFLINE=1 のときはキャッシュが無ければ OfflineError（空データを返さない）。
+    OfflineError は BaseException 派生なので、呼び出し側の広域 except Exception には
+    握り潰されない（Overpass 側の失敗＝OverpassError は従来どおり Exception 派生）。
+
     Returns
     -------
     {
@@ -585,83 +621,11 @@ def fetch_osm_buildings_roads(
       "n_buildings": int, "n_roads": int,
     }
     """
-    import json as _json
-
-    key = f"osm_{lat_min:.5f}_{lat_max:.5f}_{lon_min:.5f}_{lon_max:.5f}.json"
-    cache_path = cache_dir / "osm" / key
-    if cache_path.exists():
-        return _json.loads(cache_path.read_text(encoding="utf-8"))
-
-    query = (
-        "[out:json][timeout:60];("
-        f'way["building"]({lat_min},{lon_min},{lat_max},{lon_max});'
-        f'way["highway"]({lat_min},{lon_min},{lat_max},{lon_max});'
-        f'relation["building"]({lat_min},{lon_min},{lat_max},{lon_max});'
-        ");out geom;"
+    return fetch_buildings_roads(
+        lat_min, lat_max, lon_min, lon_max,
+        highway_width_m=OSM_HIGHWAY_WIDTH_M,
+        cache_dir=cache_dir, verbose=verbose,
     )
-    if verbose:
-        print(f"[osm] Overpass query bbox lat[{lat_min:.4f},{lat_max:.4f}] lon[{lon_min:.4f},{lon_max:.4f}]")
-
-    import urllib.parse as _up
-    body = _up.urlencode({"data": query}).encode("utf-8")
-    # Overpass は混雑時に 429/504 を返すので複数ミラー × リトライ。
-    mirrors = [OVERPASS_URL,
-               "https://overpass.kumi.systems/api/interpreter",
-               "https://overpass.openstreetmap.fr/api/interpreter"]
-    raw = None
-    last_err = None
-    for attempt in range(6):
-        url = mirrors[attempt % len(mirrors)]
-        req = urllib.request.Request(
-            url, data=body,
-            headers={"User-Agent": "flood_pso/tellus_data",
-                     "Content-Type": "application/x-www-form-urlencoded"},
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=180) as r:
-                raw = r.read()
-            break
-        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
-            last_err = e
-            if verbose:
-                print(f"  [osm] {url.split('//')[1].split('/')[0]} failed ({e}); retry...")
-            time.sleep(2.0 * (attempt + 1))
-    if raw is None:
-        raise RuntimeError(f"Overpass API failed after retries: {last_err}")
-    response = _json.loads(raw.decode("utf-8"))
-
-    buildings: list = []
-    roads: list = []
-    for el in response.get("elements", []):
-        tags = el.get("tags", {}) or {}
-        # way: geometry に [{lat, lon}, ...] が入る
-        if el.get("type") == "way" and "geometry" in el:
-            coords = [[g["lat"], g["lon"]] for g in el["geometry"]]
-            if "building" in tags:
-                buildings.append({"coords": coords, "tags": tags})
-            elif "highway" in tags:
-                ht = tags.get("highway", "")
-                roads.append({
-                    "coords": coords, "tags": tags,
-                    "width_m": float(OSM_HIGHWAY_WIDTH_M.get(ht, 4)),
-                })
-        # relation (multipolygon building) は outer ring を抽出
-        elif el.get("type") == "relation" and "members" in el and "building" in tags:
-            for m in el["members"]:
-                if m.get("type") == "way" and m.get("role") == "outer" and "geometry" in m:
-                    coords = [[g["lat"], g["lon"]] for g in m["geometry"]]
-                    buildings.append({"coords": coords, "tags": tags})
-
-    out = {
-        "buildings": buildings, "roads": roads,
-        "bbox": [lat_min, lat_max, lon_min, lon_max],
-        "n_buildings": len(buildings), "n_roads": len(roads),
-    }
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(_json.dumps(out, ensure_ascii=False), encoding="utf-8")
-    if verbose:
-        print(f"[osm] cached {cache_path.name}  buildings={len(buildings)}  roads={len(roads)}")
-    return out
 
 
 if __name__ == "__main__":

@@ -20,6 +20,25 @@ def load_parking(json_path: str, *,
     bbox を与えると、その範囲に交差する駐車場のみ返す。
     relation（マルチポリゴン）は geometry を持たない場合スキップ（way が主）。
     """
+    # bbox は「4要素そろっている」か「全部 None」のどちらかでなければならない。
+    # 部分指定を素通しすると下の比較で 'float > NoneType' の TypeError になり原因が分からない
+    # （bridge_osm / power_osm と同じ検査。osm_cache が import できなくても動くようフォールバック）。
+    try:
+        try:
+            from osm_cache import require_bbox
+        except ImportError:
+            from .osm_cache import require_bbox
+        require_bbox(lat_min, lat_max, lon_min, lon_max, what="load_parking")
+    except ImportError:
+        _bb = {"lat_min": lat_min, "lat_max": lat_max,
+               "lon_min": lon_min, "lon_max": lon_max}
+        _none = [k for k, v in _bb.items() if v is None]
+        if _none and len(_none) != 4:
+            _given = ", ".join(f"{k}={v}" for k, v in _bb.items() if v is not None)
+            raise ValueError(
+                f"load_parking: bbox が不完全です（{', '.join(_none)} が None / "
+                f"指定済み: {_given}）")
+
     p = Path(json_path)
     if not p.exists():
         return []

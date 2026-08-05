@@ -170,6 +170,16 @@ def main():
                     help="GSI 写真レイヤ: seamlessphoto=最新シームレス(既定) / ort=整備済オルソ(高精細・正射性高)")
     ap.add_argument("--no-litematic", action="store_true",
                     help="既定で併せて出力する .litematic を抑止（.nbt のみ）")
+    ap.add_argument("--nbt-compresslevel", type=int, default=6, choices=range(0, 10),
+                    metavar="0-9",
+                    help="中間 structure NBT の gzip 圧縮レベル（既定 6）。"
+                         "旧既定の 9 は書き出し時間の 2割超を使うのにサイズ差は数%%しかない。"
+                         "0=deflate stored（gzip としては正当で MC も読めるが、"
+                         "圧縮しない分サイズが数倍になる。書き出し時間だけ詰めたい検証用）")
+    ap.add_argument("--no-intermediate-nbt", action="store_true",
+                    help="--anvil-world 指定時に中間 structure .nbt を書き出さない"
+                         "（Anvil ワールドだけ欲しいとき。御坊全域72タイルで 3.2GB を節約）。"
+                         "--no-litematic と併用必須（litematic は .nbt から変換するため）")
     ap.add_argument("--anvil-world", type=str, default=None,
                     help="施策⑤: native Anvil world(.mca)も出力するワールドディレクトリ。"
                          "整列タイル(--tiles, gsi/wakayama)は全タイルを1ワールドへ実座標で配置・"
@@ -205,16 +215,15 @@ def main():
                     help="樹木配置法: canopy=class3セル毎に幹+葉(密な森) / sparse=間引いた個別樹木(球状樹冠)")
     ap.add_argument("--no-veg-filter", action="store_true",
                     help="建物 DSM(_org) から LiDAR 植生クラス(class 3)を除外しない。"
-                         "既定は除外して樹木混入の建物高さ（御坊で建物の24%が影響）を浄化")
-    ap.add_argument("--bridges-json", type=str,
-                    default=str(REPO_ROOT / "data_cache" / "osm" / "gobo_bridges_full_geom.json"),
+                         "既定は除外して樹木混入の建物高さ（御坊で建物の24%%が影響）を浄化")
+    ap.add_argument("--bridges-json", type=str, default=None,
                     help="OSM 橋(bridge=yes highway)の Overpass geom JSON。存在すれば道路が"
                          "水域を渡る箇所に桁+坂+橋脚を立体化（FG-GMLに橋情報が無いため）。"
                          "既定=全御坊144本のfull_geom（旧 gobo_bridges_geom.json は中央部のみで"
                          "北東部等の橋が0本になる）。"
-                         "空文字で無効化")
-    ap.add_argument("--tunnels-json", type=str,
-                    default=str(REPO_ROOT / "data_cache" / "osm" / "gobo_tunnels_geom.json"),
+                         "空文字で無効化。**明示指定したパスが存在しなければエラーで停止**"
+                         "（無言で橋0本のワールドが出来るのを防ぐ）")
+    ap.add_argument("--tunnels-json", type=str, default=None,
                     help="OSM トンネル(tunnel=yes highway/railway)の Overpass geom JSON。存在すれば"
                          "山を貫く道路/鉄道を地形に刳り貫いて坑道+路面+照明を生成（橋の逆処理）。"
                          "既定=御坊全域。空文字で無効化")
@@ -236,6 +245,25 @@ def main():
                     help="cliff-aware smoothing の sigma [cells]（既定 1.0）")
     ap.add_argument("--cliff-threshold", type=float, default=0.4,
                     help="急斜面とみなす slope 閾値 [m/m]（既定 0.4 ≒ 22°）")
+    # ── 旧挙動エスケープハッチ（コード編集なしで直前ラウンドの変更を戻すため） ──
+    ap.add_argument("--underfill-cap", type=int, default=None,
+                    help="地盤アンダーフィル深さの上限[block]を一律クランプ（旧挙動）。"
+                         "未指定=段差に応じて可変（既定, 崖の穴を塞ぐ）。8 で従来相当。")
+    ap.add_argument("--tunnel-core-always-covered", action="store_true",
+                    help="OSMトンネル way 本体を地形の有無に関係なく常に密閉（旧挙動）。"
+                         "既定は地形に埋まる区間のみ密閉＝平坦地に石の箱を生やさない")
+    ap.add_argument("--tunnel-core-cover-slack", type=int, default=None,
+                    help="トンネルのコア区間の被覆判定を何 block 甘くするか"
+                         "（未指定=terrain_render の既定。大きいほど密閉を維持しやすい）")
+    ap.add_argument("--tunnel-cover-close-blocks", type=int, default=None,
+                    help="トンネル被覆判定を station 方向に closing する長さ[block]"
+                         "（未指定=terrain_render の既定, 0 で無効=旧挙動）")
+    ap.add_argument("--power-no-clip-spans", action="store_true",
+                    help="送電線: 端点がタイル外の径間を丸ごと捨てる（旧挙動＝タイルを貫く"
+                         "送電線が消える）。既定は交差区間の端の地形高で代用")
+    ap.add_argument("--no-global-anchors", action="store_true",
+                    help="送電線/トンネルの全域DEMアンカー（タイル継ぎ目の段差対策）を無効化し"
+                         "タイルローカル走査に戻す（旧挙動）。橋のアンカーは常に有効")
     ap.add_argument("--center-lat", type=float, default=None,
                     help="出力エリア中心の緯度（デフォルト 33.875 = 御坊市中心）")
     ap.add_argument("--center-lon", type=float, default=None,
@@ -261,6 +289,44 @@ def main():
                          "かかるため、樹木/建物モードだけ変えて再生成する際に DIR/inund_<method>_w*.npz "
                          "を load/保存して sim をスキップ（dem 形状一致時のみ）。")
     args = ap.parse_args()
+
+    # ── OSM geom JSON: 未指定なら従来の既定パス（無ければ警告のみ＝従来動作）、
+    #    明示指定されたのにファイルが無ければ **ここで停止**する。Makefile world-full が
+    #    欠落した gobo_bridges_full_geom.json 等を渡して「無言で橋0本のワールド」が
+    #    出来ていた事故の再発防止（DEM ロード前に落とすので数秒で分かる）。
+    _osm_dir = REPO_ROOT / "data_cache" / "osm"
+    _osm_defaults = {"bridges_json": str(_osm_dir / "gobo_bridges_full_geom.json"),
+                     "tunnels_json": str(_osm_dir / "gobo_tunnels_geom.json")}
+    _missing = []
+    for _key, _flag in (("bridges_json", "--bridges-json"), ("tunnels_json", "--tunnels-json"),
+                        ("power_json", "--power-json"), ("parking_json", "--parking-json")):
+        _val = getattr(args, _key)
+        _explicit = _val is not None and _val != ""
+        if _val is None:                       # フラグ未指定 → 従来の既定パスへ
+            _val = _osm_defaults.get(_key, "")
+            setattr(args, _key, _val)
+        if _val and not Path(_val).exists():
+            if _explicit:
+                _missing.append(f"  {_flag} {_val}")
+            else:
+                print(f"  [warn] 既定の OSM JSON が見つかりません（{_flag} 未指定）: {_val}\n"
+                      f"         → このフィーチャは0件になります")
+    if _missing:
+        sys.exit("指定された OSM geom JSON が存在しません:\n" + "\n".join(_missing)
+                 + "\n  → 無言で0本のワールドが生成されるのを防ぐため中止しました。"
+                   "\n    取得するか、意図的に無効化するなら空文字を渡して下さい"
+                   "（例 --bridges-json ''）")
+
+    if args.no_intermediate_nbt:
+        if not args.anvil_world:
+            sys.exit("--no-intermediate-nbt は --anvil-world と併用して下さい"
+                     "（両方無しでは出力が何も残りません）")
+        if not args.no_litematic:
+            sys.exit("--no-intermediate-nbt は --no-litematic と併用して下さい"
+                     "（.litematic は中間 .nbt から変換するため）")
+        if args.quality != "enhanced":
+            sys.exit("--no-intermediate-nbt は --quality enhanced のときだけ使えます"
+                     "（legacy は密配列でないため Anvil を書けず出力が空になります）")
 
     suffix = f"_ks{args.ks}" if args.ks > 0 else ""
     case_path = BENCH_DIR / f"case_K{args.K}{suffix}_seed{args.seed}.json"
@@ -309,33 +375,43 @@ def main():
         fill_terrain_gap_nearest(dem, dem_info, gap_mask, verbose=True)
     # 軸4-3: FGD 河川/水域(WA/WStrA)ポリゴンを水源にする（矩形 bbox より高精度＝損失精度↑）。
     #   範囲外/未配置でポリゴンが空なら make_river_source 内で矩形 bbox にフォールバック。
-    _Hd, _Wd = dem.shape
-    _b_lat_max = dem_info["lat_max"]; _b_lon_min = dem_info["lon_min"]
-    _b_lat_min = _b_lat_max - _Hd * dem_info["res_lat"]
-    _b_lon_max = _b_lon_min + _Wd * dem_info["res_lon"]
-    _wpolys = None
-    if args.fgd_wa:
-        try:
-            from fgd_vector import load_water
-            _wpolys = []
-            for wx in str(args.fgd_wa).split(","):
-                wx = wx.strip()
-                if wx and Path(wx).exists():
-                    _wpolys += load_water(wx, lat_min=_b_lat_min, lat_max=_b_lat_max,
-                                          lon_min=_b_lon_min, lon_max=_b_lon_max)
-            _wpolys = _wpolys or None
-        except Exception as _e:
-            print(f"  [fgd-water-source] 読込失敗→矩形bboxにfallback: {_e}")
-            _wpolys = None
-    source = make_river_source(
-        dem,
-        lat_max=dem_info["lat_max"], res_lat=dem_info["res_lat"],
-        lon_min=dem_info["lon_min"], res_lon=dem_info["res_lon"],
-        river_bbox=RIVER_BBOX, elev_max=RIVER_ELEV_MAX,
-        water_polygons=_wpolys,
-    )
-    print(f"  DEM={dem.shape}  src cells={int(np.sum(source))} "
-          f"[水源={'FGD河川/水域ポリゴン '+str(len(_wpolys))+'面' if _wpolys else '矩形bbox'}]")
+    #   ※ 水源ラスタ化は「全域グリッド × 水域ポリゴン数」の matplotlib Path 判定で数分かかる。
+    #     結果は洪水sim 以外では使わないので **実際に sim を回すときだけ**遅延計算する
+    #     （--reuse-inundation ヒット時 / --no-flood 時はまるごとスキップ＝crop 反復が高速化）。
+    _source_holder = []
+
+    def _river_source():
+        if _source_holder:
+            return _source_holder[0]
+        _Hd, _Wd = dem.shape
+        _b_lat_max = dem_info["lat_max"]; _b_lon_min = dem_info["lon_min"]
+        _b_lat_min = _b_lat_max - _Hd * dem_info["res_lat"]
+        _b_lon_max = _b_lon_min + _Wd * dem_info["res_lon"]
+        _wpolys = None
+        if args.fgd_wa:
+            try:
+                from fgd_vector import load_water
+                _wpolys = []
+                for wx in str(args.fgd_wa).split(","):
+                    wx = wx.strip()
+                    if wx and Path(wx).exists():
+                        _wpolys += load_water(wx, lat_min=_b_lat_min, lat_max=_b_lat_max,
+                                              lon_min=_b_lon_min, lon_max=_b_lon_max)
+                _wpolys = _wpolys or None
+            except Exception as _e:
+                print(f"  [fgd-water-source] 読込失敗→矩形bboxにfallback: {_e}")
+                _wpolys = None
+        _src = make_river_source(
+            dem,
+            lat_max=dem_info["lat_max"], res_lat=dem_info["res_lat"],
+            lon_min=dem_info["lon_min"], res_lon=dem_info["res_lon"],
+            river_bbox=RIVER_BBOX, elev_max=RIVER_ELEV_MAX,
+            water_polygons=_wpolys,
+        )
+        print(f"  DEM={dem.shape}  src cells={int(np.sum(_src))} "
+              f"[水源={'FGD河川/水域ポリゴン '+str(len(_wpolys))+'面' if _wpolys else '矩形bbox'}]")
+        _source_holder.append(_src)
+        return _src
 
     # 建物高さグリッド（DSM 由来）：和歌山 LiDAR の _org（DSM）があれば DSM-DEM を建物実高に使う。
     building_height_grid = None
@@ -606,14 +682,14 @@ def main():
             # 5m フル解像度 DEM 上でシミュレーションを再実行
             if r["sigma_map"] is not None:
                 inundation = simulate_flood_hd(
-                    dem_flood, source,
+                    dem_flood, _river_source(),
                     water_level_global=r["water"],
                     dh_map=r["dh"],
                     sigma_map=r["sigma_map"],
                 )
             else:
                 inundation = simulate_flood_hd(
-                    dem_flood, source,
+                    dem_flood, _river_source(),
                     water_level_global=r["water"],
                     dh_map=r["dh"],
                     sigma=SIGMA,
@@ -710,6 +786,12 @@ def main():
                 sea_level_m=args.sea_level,
                 smooth_sigma_cells=args.smooth_sigma,
                 cliff_threshold_m_per_m=args.cliff_threshold,
+                underfill_cap=args.underfill_cap,
+                tunnel_core_always_covered=args.tunnel_core_always_covered,
+                tunnel_core_cover_slack=args.tunnel_core_cover_slack,
+                tunnel_cover_close_blocks=args.tunnel_cover_close_blocks,
+                power_clip_spans_to_grid=not args.power_no_clip_spans,
+                global_anchors=not args.no_global_anchors,
                 terrain_source=args.terrain_source,
                 mapzen_zoom=args.mapzen_zoom,
                 use_esa=args.use_esa,
@@ -749,6 +831,8 @@ def main():
                 anvil_level_name=anvil_lname,
                 anvil_level_template=args.anvil_level_template,
                 world_base_y=args.world_base_y,
+                nbt_compresslevel=args.nbt_compresslevel,
+                write_intermediate_nbt=not args.no_intermediate_nbt,
             )
 
             # 既定で Litematica (.litematic) も併せて出力（redtact / Litematica mod 用）

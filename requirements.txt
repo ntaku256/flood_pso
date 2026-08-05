@@ -1,11 +1,39 @@
-numpy
-scipy
-matplotlib
-lxml
-Pillow
-opencv-python
-pyswarms
-nbtlib
-NBT
-pyproj
-pandas
+# flood_pso 依存パッケージ
+#
+# 検証環境: Python 3.10.12 (WSL2 / Ubuntu)
+#
+# 構築 (uv を使うこと):
+#     uv venv .venv --python 3.10
+#     uv pip install --python .venv/bin/python -r requirements.txt
+#
+# ※ `python3 -m venv` は python3-venv (ensurepip) が無い環境では失敗する。
+#    sudo が使えない場合が多いので uv を既定の手順とする。
+#    そのため既存の .venv には pip が入っておらず `.venv/bin/pip` は使えない。
+#
+# バージョンは実際に生成が通っている組み合わせに固定している。
+# 別PCへ移行する際もこのファイルだけで同じ環境が再現できるようにすること。
+# (2026-08-05 に uv でクリーン環境を作り、全パッケージの import 通過を実測確認)
+
+# --- 数値計算 ---
+numpy==2.2.6
+scipy==1.15.3
+pandas==2.3.3          # wakayama_pcd.py の点群読込
+
+# --- 地理空間 ---
+pyproj==3.7.1          # 座標変換
+rasterio==1.4.4        # GeoTIFF (DEM/オルソ) 読込
+shapely==2.1.2         # FGD/OSM ポリゴン演算
+lxml==6.1.0            # 基盤地図情報 (FG-GML) パース
+
+# --- Minecraft 構造データ ---
+nbtlib==2.0.4          # structure NBT / litematic 書き出し
+NBT==1.5.1             # anvil_loader.py の region 読込 (nbtlib とは別パッケージ)
+
+# --- 画像 ---
+Pillow==12.2.0         # オルソ地表・プレビュー画像
+matplotlib==3.10.9     # 診断プロット
+
+# --- 最適化 (研究側: Layer B) ---
+pyswarms==1.3.0        # PSO 比較対象。ccpso2.py は自前実装
+
+# 削除済み: opencv-python — cv2 は src/ 内で一度も import されていない (2026-08-05 確認)
