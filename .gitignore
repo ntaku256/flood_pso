@@ -40,3 +40,8 @@ results/data_preview/gobo_full/
 results/inspect/
 results/anvil/
 results/world/
+
+# scratch スクリプトの生成物（コード自体は追跡する）
+scratch_calib_diag/*.npz
+scratch_calib_diag/*.png
+scratch_calib_diag/__pycache__/
