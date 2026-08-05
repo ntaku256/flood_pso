@@ -67,12 +67,16 @@ PRESETS = {
     # --use-fgd で建物・道路を載せると「歩ける町」になる。
     "gobo_walk_1km": (1000, 1000, 1, 1, 1.0),
     "gobo_walk_2km": (2000, 2000, 1, 1, 1.0),
+    # 和歌山高専キャンパス局所（現況建物: --remove/-add-bld-geojson で旧体育館→総合体育館）
+    # 敷地は約343m(N-S)×320m(E-W)。南半分はDEM503561外→--dem-gsi-tiles で地形取得。
+    "kosen_campus": (400, 400, 1, 1, 1.0),
 }
 
 # preset 既定の中心座標（--center-lat/lon 未指定時）。歩行用は市街地中心へ。
 PRESET_CENTERS = {
     "gobo_walk_1km": (33.8875, 135.1515),
     "gobo_walk_2km": (33.8875, 135.1515),
+    "kosen_campus": (33.8332, 135.1774),
 }
 
 
@@ -104,6 +108,11 @@ def main():
                     help="Tellus 世界の海面 y。dem (m) = block_y - sea_level_y（既定 0）")
     ap.add_argument("--mapzen-zoom", type=int, default=15,
                     help="Mapzen タイル zoom (14≈9.5m, 15≈4.8m, 16≈2.4m)")
+    ap.add_argument("--dem-gsi-tiles", action="store_true",
+                    help="地形をローカル DEM5A ではなく GSI 標高タイル(online, 全国被覆, bare-earth)から"
+                         "中心±範囲で取得する。ローカルに無いメッシュ(例 503551)も継ぎ目なくカバー。zoom=--mapzen-zoom")
+    ap.add_argument("--dem-gsi-layer", default="dem5a_png", choices=["dem5a_png", "dem1a_png"],
+                    help="--dem-gsi-tiles のレイヤ。dem5a_png=5m(〜z15) / dem1a_png=1m(〜z17, 高精細・都市部のみ)")
     ap.add_argument("--use-esa", action="store_true",
                     help="ESA WorldCover 2021 の土地被覆別ブロック割当を有効化（rasterio 必須）")
     ap.add_argument("--use-osm", action="store_true",
@@ -129,11 +138,25 @@ def main():
     ap.add_argument("--fgd-wa", default=DEFAULT_WA_XML,
                     help="--use-fgd の水域 WA/WStrA GML パス（河川・池を水面に）。"
                          "カンマ区切りで複数可。空文字で水域無効")
+    ap.add_argument("--fgd-rail", default=None,
+                    help="鉄道 RailCL GML パス（道床+枕木+レールで敷設）。カンマ区切りで複数メッシュ可")
+    ap.add_argument("--remove-bld-geojson", default=None,
+                    help="この Polygon 群に重心が入る FGD 建物を除去（現況で解体済みの建物用）。緯度経度 GeoJSON")
+    ap.add_argument("--add-bld-geojson", default=None,
+                    help="ここの建物を FGD 建物に追加（現況で新設された建物用）。"
+                         "properties に fgd_type / height_m / roof_solid を持てる。緯度経度 GeoJSON")
+    ap.add_argument("--terrain-skirt", type=int, default=0,
+                    help="ワールド外周この幅(セル)を斜面で下ろし、境界の垂直な崖を無くす。0=無効。"
+                         "単一タイル(局所プリセット)前提。--tiles とは併用しない")
     ap.add_argument("--plateau-bld", default=None,
                     help="PLATEAU CityGML 建物ディレクトリ（udx/bldg）。指定時は建物を PLATEAU の "
                          "正確な footprint+実測高さ(measuredHeight) から生成（高精度版）")
     ap.add_argument("--osm-bld", action="store_true",
                     help="OSM(Overpass) の建物 footprint + LiDAR DSM 高さで建物を生成（いつも通り版）")
+    ap.add_argument("--fill-gap-osm", action="store_true",
+                    help="LiDAR(3次元点群)が欠落する図郭外の領域を補完: 地形は mapzen DEM で埋め、"
+                         "建物高さは OSM(building:levels/height)をラスタ化して埋める。FGD footprint は"
+                         "そのまま使い、欠落域だけ OSM 由来の高さを与える（点群が無い所だけ OSM 利用）")
     ap.add_argument("--plateau-lod2", action="store_true",
                     help="PLATEAU LOD2 の屋根形状を建物高さに反映（城など。--plateau-bld と併用、やや重い）")
     ap.add_argument("--surface-ortho", action="store_true",
@@ -151,6 +174,10 @@ def main():
                     help="施策⑤: native Anvil world(.mca)も出力するワールドディレクトリ。"
                          "整列タイル(--tiles, gsi/wakayama)は全タイルを1ワールドへ実座標で配置・"
                          "境界はmergeで密着。Tellus非依存で歩けるワールドになる（要 NBT パッケージ）。")
+    ap.add_argument("--world-base-y", type=int, default=0,
+                    help="Anvilワールドの最下ブロックを置く world Y（既定0）。負値で世界全体を下げ、"
+                         "高い山が build limit(319) で切れないよう頭上余裕を作る（例 -50）。"
+                         "MC は y=-64 まで対応。spawn も連動。")
     ap.add_argument("--anvil-level-template", type=str, default=None,
                     help="施策⑤: level.dat の雛形にする既存の正規ワールドの level.dat。"
                          "実機が作った世界を流用し LevelName/spawn だけ差し替えるので、MC で"
@@ -166,6 +193,9 @@ def main():
                     help="地下に土地利用の解釈を色付きガラスで層化して埋め込む（光源なし、コマンド応用向け）。"
                          "重なる洪水・樹木は間隔をあけて別の高さに分離（地形は上に退避）：y=0土地利用(建物=赤/"
                          "道路=黒/海=青/河川=水色/橋=橙/地表=白), y=2洪水(浸水=水色), y=4樹木(緑)")
+    ap.add_argument("--no-flood", action="store_true",
+                    help="氾濫(浸水)を一切出さない。海/河川水面(FGD WA)/街並みは残す。"
+                         "御坊用の水位/水源が別エリアで不適合なときに使う")
     ap.add_argument("--no-flood-barrier", action="store_true",
                     help="洪水計算で建物を浸水バリアにしない（従来どおり地形のみで浸水）")
     ap.add_argument("--trees", action="store_true",
@@ -177,10 +207,17 @@ def main():
                     help="建物 DSM(_org) から LiDAR 植生クラス(class 3)を除外しない。"
                          "既定は除外して樹木混入の建物高さ（御坊で建物の24%が影響）を浄化")
     ap.add_argument("--bridges-json", type=str,
-                    default=str(REPO_ROOT / "data_cache" / "osm" / "gobo_bridges_geom.json"),
+                    default=str(REPO_ROOT / "data_cache" / "osm" / "gobo_bridges_full_geom.json"),
                     help="OSM 橋(bridge=yes highway)の Overpass geom JSON。存在すれば道路が"
                          "水域を渡る箇所に桁+坂+橋脚を立体化（FG-GMLに橋情報が無いため）。"
+                         "既定=全御坊144本のfull_geom（旧 gobo_bridges_geom.json は中央部のみで"
+                         "北東部等の橋が0本になる）。"
                          "空文字で無効化")
+    ap.add_argument("--tunnels-json", type=str,
+                    default=str(REPO_ROOT / "data_cache" / "osm" / "gobo_tunnels_geom.json"),
+                    help="OSM トンネル(tunnel=yes highway/railway)の Overpass geom JSON。存在すれば"
+                         "山を貫く道路/鉄道を地形に刳り貫いて坑道+路面+照明を生成（橋の逆処理）。"
+                         "既定=御坊全域。空文字で無効化")
     ap.add_argument("--power-json", type=str, default="",
                     help="OSM 送電線(power=line)+鉄塔/電柱(power=tower/pole)の Overpass geom JSON。"
                          "指定すると voltage→高さの架線(iron_bars)+鉄塔ラティスを立体化。"
@@ -245,10 +282,31 @@ def main():
         from wakayama_pcd import load_wakayama_dem
         print(f"Loading Wakayama LiDAR DEM (res={lidar_res:.3f}m): {args.wakayama_grd}")
         dem_info = load_wakayama_dem(args.wakayama_grd, res_m=lidar_res)
+    elif args.dem_gsi_tiles:
+        import math as _mm
+        _p = PRESETS[args.preset]
+        _w = args.width if args.width is not None else _p[0]
+        _d = args.depth if args.depth is not None else _p[1]
+        _pc = PRESET_CENTERS.get(args.preset, (LAT_CENTER, LON_CENTER))
+        _clat = args.center_lat if args.center_lat is not None else _pc[0]
+        _clon = args.center_lon if args.center_lon is not None else _pc[1]
+        _mlat = (_d / 2 + 150) / 111320.0
+        _mlon = (_w / 2 + 150) / (111320.0 * _mm.cos(_mm.radians(_clat)))
+        print(f"Loading DEM from GSI {args.dem_gsi_layer} tiles (online) around ({_clat:.5f},{_clon:.5f})...")
+        from tellus_data import fetch_gsi_dem5a
+        dem_info = fetch_gsi_dem5a(_clat - _mlat, _clat + _mlat, _clon - _mlon, _clon + _mlon,
+                                   zoom=args.mapzen_zoom, layer=args.dem_gsi_layer)
     else:
         print("Loading DEM (5m, full resolution)...")
         dem_info = mosaic_tiles(DEM_DIR)
     dem = dem_info["dem"]
+    # LiDAR(点群)欠落域(図郭外=NaN)の補完。gap マスクは地形補完の前に確定しておく。
+    gap_mask = ~np.isfinite(dem)
+    if args.fill_gap_osm and gap_mask.any():
+        # 沿岸の点群欠落は周囲 LiDAR からの近傍補間で平坦化(mapzen 表層だと発電所等の構造物が
+        # 地形へ焼き込まれ max 数十 m の凸塊になり激しくずれる)。海/陸は最近傍 LiDAR が継承。
+        from gap_fill import fill_terrain_gap_nearest
+        fill_terrain_gap_nearest(dem, dem_info, gap_mask, verbose=True)
     # 軸4-3: FGD 河川/水域(WA/WStrA)ポリゴンを水源にする（矩形 bbox より高精度＝損失精度↑）。
     #   範囲外/未配置でポリゴンが空なら make_river_source 内で矩形 bbox にフォールバック。
     _Hd, _Wd = dem.shape
@@ -300,6 +358,10 @@ def main():
             building_height_grid = np.clip(dsm_on_dem - dem, 0, None).astype(np.float32)
             print(f"  obj-height: median={np.nanmedian(building_height_grid):.2f}m "
                   f"99%={np.nanpercentile(building_height_grid,99):.1f}m")
+            # 欠落域(LiDAR無し)は DSM が NaN→建物高さ不明。OSM(building:levels/height)で埋める。
+            if args.fill_gap_osm and gap_mask.any():
+                from gap_fill import fill_building_heights_gap_osm
+                fill_building_heights_gap_osm(building_height_grid, dem_info, gap_mask, verbose=True)
 
     # 樹冠高グリッド（LiDAR class3=植生のみの DSM − DEM）。--trees で樹木を立てる。
     tree_height_grid = None
@@ -379,6 +441,28 @@ def main():
                               "tags": {"fgd_type": "普通建物", "height_m": None}}
                              for b in _osm["buildings"] if len(b.get("coords", [])) >= 4]
             print(f"  [osm-bld] 建物 {len(building_list)} 棟（OSM footprint + LiDAR高さ）")
+
+    # ── 現況補正（解体建物の除去 / 新設建物の追加）。FGD ロード後に export_to_nbt 内で適用。
+    #    GeoJSON は [lon,lat] → 内部形式 [lat,lon] に変換して渡す。
+    remove_bld_polys = None
+    add_bld_list = None
+    if args.remove_bld_geojson:
+        _gj = json.loads(Path(args.remove_bld_geojson).read_text(encoding="utf-8"))
+        remove_bld_polys = [[[la, lo] for lo, la in ft["geometry"]["coordinates"][0]]
+                            for ft in _gj["features"]]
+        print(f"  [bld-fix] 除去領域 {len(remove_bld_polys)} ポリゴン（解体済み建物）")
+    if args.add_bld_geojson:
+        _gj = json.loads(Path(args.add_bld_geojson).read_text(encoding="utf-8"))
+        add_bld_list = []
+        for ft in _gj["features"]:
+            rings = ft["geometry"]["coordinates"]
+            p = ft.get("properties", {})
+            add_bld_list.append({
+                "coords": [[la, lo] for lo, la in rings[0]],
+                "holes": [[[la, lo] for lo, la in r] for r in rings[1:]],
+                "tags": {"fgd_type": p.get("fgd_type", "普通建物"), "height_m": p.get("height_m"),
+                         "roof_solid": bool(p.get("roof_solid"))}})
+        print(f"  [bld-fix] 追加建物 {len(add_bld_list)} 棟（新設）")
 
     # ── タイル分割（--tiles）: 全域を重なりなく COLS×ROWS に割り、各タイルを個別に書き出す。
     #    DEM/inundation は全域で1回だけ計算し、export_to_nbt がクロップする（省メモリ）。
@@ -508,7 +592,12 @@ def main():
             _cd = Path(args.reuse_inundation); _cd.mkdir(parents=True, exist_ok=True)
             _inund_cache = _cd / f"inund_{tag}_w{r['water']:.3f}.npz"
         inundation = None
-        if _inund_cache is not None and _inund_cache.exists():
+        if args.no_flood:
+            # 氾濫(浸水)を一切出さない。御坊用の水位/水源が別エリアで不適合なときに使う。
+            # 海(sea_mask)/河川水面(FGD WA)/街並みは dem_to_blocks_enhanced 内の別経路で描画される。
+            inundation = np.zeros(dem_flood.shape, np.float32)
+            print("  [no-flood] 浸水simスキップ（海/河川水面/街並みは残る）")
+        elif _inund_cache is not None and _inund_cache.exists():
             _z = np.load(_inund_cache)
             if _z["inund"].shape == dem_flood.shape:
                 inundation = _z["inund"]
@@ -630,7 +719,11 @@ def main():
                 fgd_bld_xml=args.fgd_bld,
                 fgd_rdedg_xml=args.fgd_rdedg,
                 fgd_wa_xml=(args.fgd_wa or None),
+                fgd_rail_xml=(args.fgd_rail or None),
                 building_list=building_list,
+                remove_bld_polys=remove_bld_polys,
+                add_bld_list=add_bld_list,
+                terrain_skirt_cells=args.terrain_skirt,
                 surface_ortho=args.surface_ortho,
                 ortho_zoom=args.ortho_zoom,
                 ortho_saturation=args.ortho_saturation,
@@ -643,6 +736,7 @@ def main():
                 tellus_world_scale=args.tellus_world_scale,
                 tellus_sea_level_y=args.tellus_sea_level_y,
                 bridges_json=(args.bridges_json or None),
+                tunnels_json=(args.tunnels_json or None),
                 power_json=(args.power_json or None),
                 parking_json=(args.parking_json or None),
                 evac_xml=(args.evac_xml if args.evac else None),
@@ -654,6 +748,7 @@ def main():
                 anvil_merge=anvil_merge,
                 anvil_level_name=anvil_lname,
                 anvil_level_template=args.anvil_level_template,
+                world_base_y=args.world_base_y,
             )
 
             # 既定で Litematica (.litematic) も併せて出力（redtact / Litematica mod 用）

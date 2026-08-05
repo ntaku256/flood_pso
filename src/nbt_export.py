@@ -37,12 +37,12 @@ import nbtlib
 # パレットは block_palette.py（単一真実源, ~80 バニラブロック）から生成。
 # water/blue_ice はアニメーションテクスチャ回避のため stained_glass で代替（block_palette 内で定義）。
 from block_palette import (BLOCKS as _BLOCKS, PALETTE_KEYS as _PALETTE_KEYS,
-                           block_state_properties as _block_state_properties)
+                           block_state_properties_for_key as _block_state_properties_for_key)
 
 
 def _palette_compound(key: str) -> nbtlib.Compound:
     name = _BLOCKS[key][0]
-    props = _block_state_properties(name)
+    props = _block_state_properties_for_key(key)
     if props:
         return nbtlib.Compound({
             "Name": nbtlib.String(name),
@@ -407,7 +407,11 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   fgd_bld_xml: str | None = None,
                   fgd_rdedg_xml: str | None = None,
                   fgd_wa_xml: str | None = None,
+                  fgd_rail_xml: str | None = None,
                   building_list: list | None = None,
+                  remove_bld_polys: list | None = None,  # 重心がこの[lat,lon]環内のFGD建物を除去
+                  add_bld_list: list | None = None,       # FGD建物に追加する新設建物dict
+                  terrain_skirt_cells: int = 0,           # >0: ワールド外周を斜面化し境界の崖を無くす
                   surface_ortho: bool = False,
                   ortho_zoom: int = 18,
                   ortho_saturation: float = 1.4,
@@ -420,6 +424,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   tellus_world_scale: float = 1.0,
                   tellus_sea_level_y: int = 0,
                   bridges_json: str | None = None,
+                  tunnels_json: str | None = None,
                   power_json: str | None = None,
                   parking_json: str | None = None,
                   evac_xml: str | None = None,
@@ -430,7 +435,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   anvil_offset: tuple | None = None,
                   anvil_merge: bool = False,
                   anvil_level_name: str = "flood_pso",
-                  anvil_level_template: str | None = None):
+                  anvil_level_template: str | None = None,
+                  world_base_y: int = 0):
     """
     DEMと浸水マップの指定範囲をMinecraft NBT Structureに変換する。
 
@@ -673,6 +679,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
 
     print(f"DEM patch: {dem_patch.shape} cells = {dem_patch.shape[1]*res_lon/lon_per_m:.0f}m W x {dem_patch.shape[0]*res_lat/lat_per_m:.0f}m N "
           f"[source={terrain_source}]")
+    print(f"  [patch_bbox] lat[{patch_bbox_latlon[0]:.7f},{patch_bbox_latlon[1]:.7f}] "
+          f"lon[{patch_bbox_latlon[2]:.7f},{patch_bbox_latlon[3]:.7f}]")
 
     h_res_dem = res_lat / lat_per_m   # DEMセル = 何m か
 
@@ -702,7 +710,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         building_id_grid = None        # P2: 建物ごとの整数ラベル
         building_wall_keys = None      # P2: 建物 id → 壁ブロックキー
         building_roof_keys = None      # P2: 建物 id → 屋根ブロックキー(fallback)
-        building_style_keys = None     # 建物 id → スタイル(house/building/factory)
+        building_roof_solid = None     # 建物 id → 屋根を型単色化しオルソ焼込無効(新設建物)
+        building_style_keys = None     # 建物 id → スタイル(wood_house/apartment/shop/rc/...)
+        building_facade_by_id = None   # 建物 id → 外壁装飾スペック(アーキタイプ由来)
         if use_osm:
             from tellus_data import fetch_osm_buildings_roads
             osm = fetch_osm_buildings_roads(
@@ -735,6 +745,21 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                     lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
                 )
                 _blds = _fgd["buildings"]; _roads = _fgd["roads"]
+            # 現況補正: 解体済み建物を除去 → 新設建物を追加（FGD/building_list どちらにも適用）
+            if remove_bld_polys:
+                from shapely.geometry import Polygon as _Poly
+                _rm = [_Poly([(lo, la) for la, lo in ring]) for ring in remove_bld_polys]
+                def _in_rm(coords):
+                    if len(coords) < 3:
+                        return False
+                    c = _Poly([(lo, la) for la, lo in coords]).centroid
+                    return any(c.within(p) for p in _rm)
+                _n0 = len(_blds)
+                _blds = [b for b in _blds if not _in_rm(b.get("coords", []))]
+                print(f"  [bld-fix] 除去: {_n0} -> {len(_blds)} 棟（解体済み {_n0 - len(_blds)} 棟を削除）")
+            if add_bld_list:
+                _blds = _blds + add_bld_list
+                print(f"  [bld-fix] 追加: +{len(add_bld_list)} 棟（新設）→ 計 {len(_blds)} 棟")
             factor = max(1, round(h_res / h_res_dem))
             nz_g = dem_patch.shape[0] // factor
             nx_g = dem_patch.shape[1] // factor
@@ -778,7 +803,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_id_grid = bmaps["id"]
             building_wall_keys = bmaps["wall_keys"]
             building_roof_keys = bmaps["roof_keys"]
+            building_roof_solid = bmaps.get("roof_solid")
             building_style_keys = bmaps.get("style_keys")
+            building_facade_by_id = bmaps.get("facade")
             _bh_in = building_height_block[np.isfinite(building_height_block)]
             _med = float(np.median(_bh_in)) if _bh_in.size else 0.0
             _src = "plateau/osm" if building_list is not None else "fgd"
@@ -807,14 +834,45 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         bridges_render = None
         if bridges_json:
             from bridge_osm import load_bridges
+            import math as _math
+            _ctx_m = 650.0
+            _mid_lat = 0.5 * (patch_bbox_latlon[0] + patch_bbox_latlon[1])
+            _ctx_lat = _ctx_m / 111320.0
+            _ctx_lon = _ctx_m / (111320.0 * max(0.2, _math.cos(_math.radians(_mid_lat))))
+            _bridge_bbox = (
+                max(float(dem_info["lat_min"]), patch_bbox_latlon[0] - _ctx_lat),
+                min(float(dem_info["lat_max"]), patch_bbox_latlon[1] + _ctx_lat),
+                max(float(dem_info["lon_min"]), patch_bbox_latlon[2] - _ctx_lon),
+                min(float(dem_info["lon_max"]), patch_bbox_latlon[3] + _ctx_lon),
+            )
             bridges_render = load_bridges(
                 bridges_json,
+                lat_min=_bridge_bbox[0], lat_max=_bridge_bbox[1],
+                lon_min=_bridge_bbox[2], lon_max=_bridge_bbox[3],
+            )
+            print(f"  [bridge] OSM 橋 {len(bridges_render)} 本を patch 周辺({_ctx_m:.0f}m)に配置"
+                  + (f"（例: {', '.join(b['name'] for b in bridges_render if b['name'])[:60]}）"
+                     if any(b['name'] for b in bridges_render) else ""))
+            # 端アンカー高を全域DEMで事前計算（--tiles 分割で橋端点がタイル外に出てもデッキが
+            # 地表へ降下しないよう、全タイルが同一の高さを参照＝高架が一貫して連続平坦飛行する）。
+            from terrain_render import assign_global_bridge_anchors
+            assign_global_bridge_anchors(
+                bridges_render, dem_info["dem"],
+                dem_info["lat_max"], dem_info["lon_min"],
+                dem_info["res_lat"], dem_info["res_lon"],
+                h_res_block_m=h_res, scale_land=(v_exag / max(v_res, 1e-6)),
+                lift=(6 if legend_layer else 1), sea_level_m=sea_level_m)
+
+        # OSM トンネル（tunnel=yes）を patch 範囲で読む（橋と同じ Overpass geom JSON 形式）
+        tunnels_render = None
+        if tunnels_json:
+            from bridge_osm import load_bridges as _load_ways
+            tunnels_render = _load_ways(
+                tunnels_json,
                 lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
                 lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
             )
-            print(f"  [bridge] OSM 橋 {len(bridges_render)} 本を patch 内に配置"
-                  + (f"（例: {', '.join(b['name'] for b in bridges_render if b['name'])[:60]}）"
-                     if any(b['name'] for b in bridges_render) else ""))
+            print(f"  [tunnel] OSM トンネル {len(tunnels_render)} 本を patch 内で検出")
 
         # OSM 送電線/鉄塔（power=line/tower）を patch 範囲で読む
         power_lines = power_towers = None
@@ -827,6 +885,20 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             )
             power_lines, power_towers = _pw["lines"], _pw["towers"]
             print(f"  [power] OSM 送電線 {len(power_lines)} 本 / 鉄塔・電柱 {len(power_towers)} 基を配置")
+
+        # FG-GML 鉄道中心線（RailCL）を patch 範囲で読む
+        rail_render = None
+        if fgd_rail_xml:
+            from fgd_vector import load_rail
+            rail_render = []
+            for rx in str(fgd_rail_xml).split(","):
+                rx = rx.strip()
+                if rx and Path(rx).exists():
+                    rail_render += load_rail(
+                        rx, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                        lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                    )
+            print(f"  [rail] FG-GML RailCL {len(rail_render)} 本を敷設")
 
         # OSM 駐車場（amenity=parking）を patch 範囲で読む
         parking_render = None
@@ -902,14 +974,19 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_id=building_id_grid,
             building_wall_keys=building_wall_keys,
             building_roof_keys=building_roof_keys,
+            building_roof_solid=building_roof_solid,
             building_style_keys=building_style_keys,
+            building_facade_by_id=building_facade_by_id,
             hollow_buildings=hollow_buildings,
             legend_layer=legend_layer,
             color_building_roofs=surface_ortho,
+            terrain_skirt_cells=terrain_skirt_cells,
             surface_grid_override=surface_override,
             bridges=bridges_render,
+            tunnels=tunnels_render,
             powerlines=power_lines,
             power_towers=power_towers,
+            rails=rail_render,
             parkings=parking_render,
             ortho_rgb=ortho_rgb,
             evac_facilities=evac_render,
@@ -988,6 +1065,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             from anvil_export import write_anvil_world
             ox, oz = (int(anvil_offset[0]), int(anvil_offset[1])) if anvil_offset else (0, 0)
             write_anvil_world(blocks, size, anvil_out, x_offset=ox, z_offset=oz,
+                              y_offset=int(world_base_y),
                               merge=bool(anvil_merge), level_name=anvil_level_name,
                               level_template=anvil_level_template)
         else:

@@ -500,19 +500,95 @@ def building_style_for_type(tp: str) -> str:
     return "house"   # 普通建物 / 住宅 / 木造住宅 / 不明
 
 
+# ── 建物アーキタイプ（外壁装飾用）─────────────────────────────────────────────
+#   御坊は OSM に階数/種別/roof情報がほぼ無い(building=yes 97%)。そこで
+#   屋根形状(=LiDAR DSM の起伏 relief) × 高さ × footprint面積 × FGD種別 を
+#   「建物種別の代理特徴」にしてアーキタイプを推定し、種別ごとの外壁スタイル
+#   (壁材/トリム/窓/窓パターン/parapet/店頭/床ライン)を割り当てる。屋根スラブ・
+#   内装は現状維持(ユーザ方針)。arnis の facade 表現(角柱/床帯/連窓/parapet)を移植。
+ARCHETYPE_STYLE = {
+    # archetype:    wall                     trim                   window                       style           parapet shopfront floor_band
+    "wood_house":   dict(wall="white_terracotta",     trim="stripped_oak_log",    window="glass",                  style="wood_house",    parapet=0, shopfront=False, floor_band=False),
+    "apartment":    dict(wall="white_concrete",       trim="light_gray_concrete", window="light_blue_stained_glass", style="apartment",   parapet=1, shopfront=False, floor_band=True),
+    "shop":         dict(wall="light_gray_terracotta",trim="gray_terracotta",     window="glass",                  style="shop",          parapet=1, shopfront=True,  floor_band=True),
+    "rc_building":  dict(wall="light_gray_concrete",  trim="white_concrete",      window="light_blue_stained_glass", style="rc",          parapet=2, shopfront=False, floor_band=True),
+    "warehouse":    dict(wall="gray_concrete",        trim="andesite",            window="glass",                  style="warehouse",     parapet=1, shopfront=False, floor_band=False),
+    "institutional":dict(wall="white_concrete",       trim="light_gray_terracotta",window="glass",                 style="institutional", parapet=1, shopfront=False, floor_band=True),
+}
+
+_WAREHOUSE_FGD = ("普通無壁舎", "堅ろう無壁舎", "工場", "倉庫", "農業施設")
+_RC_FGD = ("堅ろう建物", "高層建物", "商業ビル", "公共", "ランドマーク", "マンション", "宿泊")
+
+# 御坊の約95%を占める wood_house の外壁/トリムが white_terracotta + stripped_oak_log 一色に
+# なるのを防ぐため、落ち着いた住宅外壁の候補から **座標決定的に** 多様化する。
+#   - 決定的: footprint 重心(緯度経度)のハッシュで選ぶ → 同じ土地・建物なら毎回同結果。
+#   - 反偏り: splitmix64 ミックス + 均等 mod でほぼ一様分布。
+#   - 反隣接(ゆるめ): 重心ハッシュは非相関なので隣家同士は概ね別材になる(絶対回避はしない)。
+#   - 壁とトリムは別ソルトで独立に選ぶ → 万一壁が一致しても見た目が被りにくい。
+# 他アーキタイプ(apartment/shop/rc/warehouse/institutional)は対象外（方針: 変更不要）。
+_HOUSE_WALL_VARIANTS = ("white_terracotta", "light_gray_terracotta", "white_concrete",
+                        "sandstone", "light_gray_concrete", "clay")
+_HOUSE_TRIM_VARIANTS = ("stripped_oak_log", "oak_log", "spruce_log", "dark_oak_planks")
+
+
+def _det_hash64(*vals) -> int:
+    """プロセス非依存の決定的整数ハッシュ（splitmix64 ミックス）。Python の hash() は
+    文字列がプロセス毎ソルトで非決定なので使わない。"""
+    M = (1 << 64) - 1
+    h = 0x9E3779B97F4A7C15
+    for v in vals:
+        h = ((h ^ (int(v) & M)) * 0xBF58476D1CE4E5B9) & M
+        h ^= h >> 30
+        h = (h * 0x94D049BB133111EB) & M
+        h ^= h >> 27
+    return h & M
+
+
+def _house_facade_variant(spec: dict, ext) -> dict:
+    """wood_house の壁/トリムを footprint 重心(緯度経度)から決定的に選んだ spec を返す。"""
+    arr = np.asarray(ext, dtype=np.float64)
+    qlat = int(round(float(arr[:, 0].mean()) * 1e5))   # ≈1m 量子化した重心緯度
+    qlon = int(round(float(arr[:, 1].mean()) * 1e5))   # 〃 経度
+    wall = _HOUSE_WALL_VARIANTS[_det_hash64(qlat, qlon, 0xA17) % len(_HOUSE_WALL_VARIANTS)]
+    trim = _HOUSE_TRIM_VARIANTS[_det_hash64(qlat, qlon, 0xB29) % len(_HOUSE_TRIM_VARIANTS)]
+    return {**spec, "wall": wall, "trim": trim}
+
+
+def building_archetype(tp: str, h_m: float, relief_m: float, area_m2: float) -> str:
+    """屋根形状(relief)×高さ×規模×FGD種別から建物アーキタイプを推定。
+    relief_m = 屋根面の起伏(DSM p90-p10): 小さい=陸屋根, 大きい=勾配(切妻/寄棟)。"""
+    flat = relief_m < 1.5
+    if tp in _WAREHOUSE_FGD:
+        return "warehouse"
+    if tp in _RC_FGD or h_m >= 11.0:
+        return "institutional" if (area_m2 >= 700 and h_m < 13) else "rc_building"
+    # ここから先は 普通建物/住宅系(=御坊の約95%)を 形状×規模×高さ で細分
+    if area_m2 >= 600 and flat:
+        return "institutional"
+    if flat and area_m2 >= 300 and h_m < 8.0:
+        return "warehouse"                 # 大きく平らで低い=倉庫/作業場
+    if flat and area_m2 >= 100:
+        return "shop"
+    if h_m >= 6.5 and area_m2 >= 110:
+        return "apartment"
+    return "wood_house"
+
+
 def _is_window(style: str, r: int, fh: int, run: int) -> bool:
     """周壁セルが窓(ガラス)になるか。r=階内の高さ位置(0=床ライン), fh=階高,
-    run=壁が走る向きの座標。窓は3マスおき＝窓と窓の間に最低2マスの壁を必ず残す。
-    家=各階に窓 / ビル=全階に連窓 / 工場=高所のハイサイド窓。"""
-    if r <= 0 or r >= fh:                       # 床/天井ラインには窓を置かない
+    run=壁が走る向きの座標。窓と窓の間に最低1〜2マスの壁を残す。アーキタイプ別:
+    rc=全高の縦連窓 / apartment=各階3行 / shop・institutional・wood_house=各階2行 /
+    warehouse=高所ハイサイド窓のみ。"""
+    if r <= 0 or r >= fh:                        # 床/天井ラインには窓を置かない
         return False
-    if run % 3 != 0:                            # 横方向は3マスおき（窓の間に最低2マスの壁）
-        return False
-    if style == "building":
-        return True                             # 全階に窓
-    if style == "factory":
-        return r in (fh - 2, fh - 3)            # 高所のハイサイド窓
-    return r in (1, 2)                          # 戸建: 各階に窓
+    if style in ("rc", "building"):              # ビル: 縦に連なるガラス列(3マスおき・全高)
+        return run % 3 == 0
+    if style in ("warehouse", "factory"):        # 倉庫/工場: 高所のハイサイド窓(疎)
+        return (run % 4 == 0) and (r in (fh - 2, fh - 3))
+    if style == "apartment":                     # 集合住宅: 各階 下3行に窓
+        return (run % 3 == 0) and (r in (1, 2, 3))
+    # shop / institutional / wood_house / house(既定): 各階 下2行に窓
+    return (run % 3 == 0) and (r in (1, 2))
 
 
 def _rasterize_lod2_roof(roof3d, patch_bbox_latlon, grid_h, grid_w, x0, y0, x1, y1):
@@ -575,6 +651,13 @@ def build_building_maps(
     wall_keys: list[str] = []
     roof_keys: list[str] = []
     style_keys: list[str] = []
+    facade_keys: list[dict] = []          # 建物 id → 外壁装飾スペック(アーキタイプ由来)
+    roof_solid_keys: list[bool] = []      # 建物 id → 屋根を型単色にしオルソ焼込を無効化(新設建物用)
+    # 1セルの実寸(㎡)= アーキタイプ判定の footprint 面積に使う
+    _la0, _la1, _lo0, _lo1 = patch_bbox_latlon
+    _cell_ns = (_la1 - _la0) * 111000.0 / max(grid_h, 1)
+    _cell_ew = (_lo1 - _lo0) * 111000.0 * float(np.cos(np.radians(0.5 * (_la0 + _la1)))) / max(grid_w, 1)
+    _cell_m2 = max(_cell_ns * _cell_ew, 1e-6)
     bid = 0
     for b in buildings:
         ext = b.get("coords")
@@ -603,12 +686,20 @@ def build_building_maps(
         _hm = b.get("tags", {}).get("height_m")
         floor = float(_hm if _hm is not None else 6.0) * type_floor_frac
         h = floor
+        relief = 2.0 if tp in HIP_ROOF_TYPES else 0.6   # DSM無し時の推定(勾配/陸屋根)
         if dsm_h_block is not None:
             vals = dsm_h_block[y0:y1, x0:x1][ins]
             vals = vals[np.isfinite(vals)]
             if vals.size:
                 h = max(float(np.percentile(vals, pct)), floor)
+            if vals.size >= 4:                          # 屋根面の起伏=形状の代理(陸屋根/勾配)
+                relief = float(np.percentile(vals, 90) - np.percentile(vals, 10))
         h = max(h, min_h_m)
+        area_m2 = float(int(ins.sum()) * _cell_m2)
+        arch = building_archetype(tp, h, relief, area_m2)
+        spec = ARCHETYPE_STYLE[arch]
+        if arch == "wood_house":                 # 壁/トリムを座標決定的に多様化（他種別は不変）
+            spec = _house_facade_variant(spec, ext)
         sub_m = mask[y0:y1, x0:x1]; sub_m[ins] = True
         # 屋根形状: 普通建物(住宅)は寄棟風の勾配屋根(縁=壁top, 内側ほど高い)。
         # 堅ろう建物(RC)・無壁舎(倉庫)は陸屋根(フラット)のまま。
@@ -629,12 +720,16 @@ def build_building_maps(
         else:
             sub_h[ins] = h
         sub_i = idmap[y0:y1, x0:x1]; sub_i[ins] = bid
-        wall_keys.append(BUILDING_WALL_BY_TYPE.get(tp, DEFAULT_WALL_KEY))
+        # 壁材・窓スタイルはアーキタイプ由来。屋根材は従来どおり type 由来(屋根は現状維持)。
+        wall_keys.append(spec["wall"])
         roof_keys.append(BUILDING_ROOF_BY_TYPE.get(tp, DEFAULT_ROOF_KEY))
-        style_keys.append(building_style_for_type(tp))
+        style_keys.append(spec["style"])
+        facade_keys.append(spec)
+        roof_solid_keys.append(bool(b.get("tags", {}).get("roof_solid")))
         bid += 1
     return {"mask": mask, "height": hmap, "id": idmap,
-            "wall_keys": wall_keys, "roof_keys": roof_keys, "style_keys": style_keys}
+            "wall_keys": wall_keys, "roof_keys": roof_keys, "style_keys": style_keys,
+            "facade": facade_keys, "roof_solid": roof_solid_keys}
 
 
 def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
@@ -685,13 +780,57 @@ def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
             return 14.0
         return 12.0
 
-    def pylon(ix, iz, gy, top, arm):
-        for fy in range(gy + 1, top + 1):
-            put(ix, fy, iz, pylon_key)
-        if arm:                                   # 頂部クロスアーム（鉄塔シルエット）
-            for d in (-2, -1, 1, 2):
-                put(ix + d, top, iz, pylon_key)
-                put(ix, top, iz + d, pylon_key)
+    def pylon(ix, iz, gy, top, kind="pole"):
+        """arnis 風の送電構造物（src/element_processing/power.rs 移植）。
+        kind と実高さで形状・寸法を変える：高い/tower=テーパー格子鉄塔、低い/pole=単柱。
+        パレット制約で IRON_BLOCK→light_gray_concrete, 格子/碍子→iron_bars, 基礎→gray_concrete,
+        腕木→stripped_oak_log に対応付け。"""
+        H = max(int(top - gy), 1)                 # 構造高さ[block]
+        h_m = H / max(scale_land, 1e-6)            # 実高さ[m]
+        lattice = (kind == "tower") or (h_m >= 16.0)
+        if lattice:
+            bw = int(round(min(max(h_m / 9.0, 1.0), 4.0)))   # 基部ハーフ幅(高いほど広い)
+            tw = 1                                            # 頂部ハーフ幅
+            arm_len = int(round(min(max(h_m / 7.0, 2.0), 6.0)))
+            brace = max(int(round(5 * scale_land)), 3)        # 水平ブレース間隔
+            arm_h = top - max(int(round(4 * scale_land)), 2)  # 上段アーム高
+            # テーパー4脚 + 水平/中央対角ブレース
+            for y in range(gy + 1, top + 1):
+                p = (y - gy) / H
+                cw = int(round(bw - (bw - tw) * p))
+                if cw < 1:
+                    put(ix, y, iz, "light_gray_concrete")     # 頂部付近は単柱化
+                    continue
+                for dx, dz in ((-cw, -cw), (cw, -cw), (-cw, cw), (cw, cw)):
+                    put(ix + dx, y, iz + dz, "light_gray_concrete")
+                lvl = y - gy
+                if lvl % brace == 0 and y < top - 2:          # 水平ブレース
+                    for d in range(-cw, cw + 1):
+                        put(ix + d, y, iz - cw, "iron_bars"); put(ix + d, y, iz + cw, "iron_bars")
+                        put(ix - cw, y, iz + d, "iron_bars"); put(ix + cw, y, iz + d, "iron_bars")
+                elif lvl % brace in (1, brace - 1):           # 中央対角(ラティス感)
+                    put(ix, y, iz, "iron_bars")
+            # クロスアーム2段 + 端部碍子
+            for ah, al in ((arm_h, arm_len),
+                           (arm_h - max(int(round(5 * scale_land)), 3), max(arm_len - 1, 1))):
+                if ah <= gy + 2:
+                    continue
+                for d in range(-al, al + 1):
+                    put(ix + d, ah, iz, "light_gray_concrete")
+                put(ix - al, ah + 1, iz, "iron_bars"); put(ix + al, ah + 1, iz, "iron_bars")
+            put(ix, top, iz, "iron_bars")                     # 頂部(避雷針代替)
+            for dx in range(-bw, bw + 1):                     # 基礎
+                for dz in range(-bw, bw + 1):
+                    put(ix + dx, gy, iz + dz, "gray_concrete")
+        else:
+            for y in range(gy + 1, top + 1):                  # コンクリート単柱
+                put(ix, y, iz, "light_gray_concrete")
+            al = 2                                            # 腕木(横木)
+            for d in range(-al, al + 1):
+                put(ix + d, top, iz, "stripped_oak_log")
+            put(ix - al, top + 1, iz, "iron_bars")            # 端部+中央碍子
+            put(ix + al, top + 1, iz, "iron_bars")
+            put(ix, top + 1, iz, "iron_bars")
 
     pylon_cells: set = set()
 
@@ -709,7 +848,8 @@ def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
             vert_top[(ix, iz)] = gy + bh
             if (ix, iz) not in pylon_cells:
                 pylon_cells.add((ix, iz))
-                pylon(ix, iz, gy, gy + bh, arm=(bh >= 18))
+                pylon(ix, iz, gy, gy + bh,
+                      kind=("tower" if (bh / max(scale_land, 1e-6)) >= 16.0 else "pole"))
         # 径間ごとに架線（カテナリ）。両端鉄塔頂を線形補間し sag を引く
         for (x0, z0), (x1, z1) in zip(pts, pts[1:]):
             g0, g1 = ground_y(x0, z0), ground_y(x1, z1)
@@ -741,10 +881,171 @@ def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
             continue
         pylon_cells.add((ix, iz))
         is_tower = tw.get("kind") == "tower"
-        h_m = 30.0 if is_tower else 10.0
-        pylon(ix, iz, gy, gy + int(round(h_m * scale_land)), arm=is_tower)
+        h_m = 18.0 if is_tower else 10.0          # 単独柱: tower=小型格子鉄塔/pole=単柱
+        pylon(ix, iz, gy, gy + int(round(h_m * scale_land)),
+              kind=("tower" if is_tower else "pole"))
 
     return ymax[0]
+
+
+def add_rail_blocks(blocks, rails, patch_bbox_latlon, nz, nx, *,
+                    y_surf_land, sea_mask=None,
+                    ballast_key="gravel", sleeper_key="spruce_log",
+                    half_width: int = 1, sleeper_step: int = 2) -> int:
+    """FG-GML RailCL（鉄道中心線）を **道床(gravel)＋枕木(spruce_log)＋本物のレール(minecraft:rail)** で
+    立体化。arnis railways.rs の at-grade rail を 0.667m/block 用に幅を持たせて移植：
+    中心線セル列に沿って幅 (2*half_width+1) の道床を敷き、枕木を sleeper_step セル毎に渡し、
+    **中心線上に minecraft:rail を1本通す**（鉄格子=縦柵ではレール感が無いため実ブロックに変更）。
+    レール向き(shape)は前後の連結セル方向から決め、直線(ns/ew)・曲線(ne/nw/se/sw)を出し分ける。
+    曲線で連結が切れないよう中心線は 4 近傍連結に整える。種別分岐は持たず地表敷設のみ。
+    返り値: 置いた最大 y。"""
+    import math
+    seen: set = set()
+    ymax = [0]
+    # 近傍セル方向（grid: +x=東 / +z=南）→ 方位名。rail の shape 名は連結 2 方向を表す。
+    _DIRNAME = {(1, 0): "east", (-1, 0): "west", (0, 1): "south", (0, -1): "north"}
+    _SHAPE_KEY = {
+        frozenset({"north", "south"}): "rail_ns", frozenset({"east", "west"}): "rail_ew",
+        frozenset({"north"}): "rail_ns", frozenset({"south"}): "rail_ns",
+        frozenset({"east"}): "rail_ew",  frozenset({"west"}): "rail_ew",
+        frozenset({"north", "east"}): "rail_ne", frozenset({"north", "west"}): "rail_nw",
+        frozenset({"south", "east"}): "rail_se", frozenset({"south", "west"}): "rail_sw",
+    }
+
+    def put(ix, iy, iz, key):
+        if not (0 <= ix < nx and 0 <= iz < nz) or iy < 0 or iy > 500:
+            return
+        k = (ix, iy, iz)
+        if k in seen:
+            return
+        seen.add(k)
+        if iy > ymax[0]:
+            ymax[0] = iy
+        blocks.append(nbtlib.Compound({
+            "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(iy), nbtlib.Int(iz)]),
+            "state": block_id(key),
+        }))
+
+    def ground_y(x, z):
+        i, j = int(round(x)), int(round(z))
+        if 0 <= j < nz and 0 <= i < nx and np.isfinite(y_surf_land[j, i]):
+            return int(y_surf_land[j, i])
+        return None
+
+    def four_connect(cs):
+        """連続セル列を 4 近傍連結へ（斜め/飛びは x→z の順に 1 セルずつ階段で埋める）。
+        これで隣接レールが必ず辺で接し、curved shape と連結が成立する。"""
+        path: list = []
+        for c in cs:
+            if not path:
+                path.append(c); continue
+            px, pz = path[-1]
+            cx, cz = c
+            if (cx, cz) == (px, pz):
+                continue
+            sgx = 1 if cx > px else (-1 if cx < px else 0)
+            sgz = 1 if cz > pz else (-1 if cz < pz else 0)
+            while (px, pz) != (cx, cz):
+                if px != cx:
+                    px += sgx
+                else:
+                    pz += sgz
+                path.append((px, pz))
+        return path
+
+    for R in (rails or []):
+        pts = [_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, nz, nx) for la, lo in R["coords"]]
+        # 中心線を連続セル列へ（セグメントごとに線形補間し重複除去）
+        cells: list = []
+        for (x0, z0), (x1, z1) in zip(pts, pts[1:]):
+            dist = math.hypot(x1 - x0, z1 - z0)
+            n = int(dist) + 1
+            for t in range(n + 1):
+                f = t / n if n > 0 else 0.0
+                c = (int(round(x0 + (x1 - x0) * f)), int(round(z0 + (z1 - z0) * f)))
+                if not cells or cells[-1] != c:
+                    cells.append(c)
+        path = four_connect(cells)
+        for idx, (ix, iz) in enumerate(path):
+            gy = ground_y(ix, iz)
+            if gy is None:
+                continue
+            if sea_mask is not None and sea_mask[iz, ix]:
+                continue
+            # 進行方向（次優先, 端は前）→ 垂直ベクトル（道床/枕木の横展開に使う）
+            if idx + 1 < len(path):
+                jx, jz = path[idx + 1]
+            elif idx > 0:
+                jx, jz = path[idx - 1]
+            else:
+                jx, jz = ix + 1, iz
+            ddx, ddz = jx - ix, jz - iz
+            mag = math.hypot(ddx, ddz) or 1.0
+            px, pz = -ddz / mag, ddx / mag
+            # 道床（枕木セルは木、それ以外は砂利）を幅いっぱいに
+            bed = sleeper_key if (idx % sleeper_step == 0) else ballast_key
+            for w in range(-half_width, half_width + 1):
+                put(int(round(ix + px * w)), gy, int(round(iz + pz * w)), bed)
+            # レール本体（中心線上に minecraft:rail を1本, 道床の1段上）。
+            # shape は前後の連結セル方向から決定 → 直線/曲線を自動で出し分け。
+            dirs = []
+            if idx > 0:
+                dirs.append(_DIRNAME.get((path[idx - 1][0] - ix, path[idx - 1][1] - iz)))
+            if idx + 1 < len(path):
+                dirs.append(_DIRNAME.get((path[idx + 1][0] - ix, path[idx + 1][1] - iz)))
+            rkey = _SHAPE_KEY.get(frozenset(d for d in dirs if d), "rail_ns")
+            put(ix, gy + 1, iz, rkey)
+    return ymax[0]
+
+
+def assign_global_bridge_anchors(bridges, dem_full, lat_max, lon_min, res_lat, res_lon,
+                                 *, h_res_block_m, scale_land, lift, sea_level_m=0.0):
+    """各橋の端アンカー高 b["startS"]/["endS"] を **全域DEM** から計算して付与する（in-place）。
+
+    add_bridge_blocks の end_base はタイルローカル grid を見るため、--tiles 分割で長い高架が複数
+    タイルにまたがると、橋端点を含まない中間タイルで端点が範囲外→ terrain_y=1 にフォールバックし、
+    デッキが地表付近まで降下していた。本関数は分割前に全域DEMで端アンカー(端点から橋の外向き
+    0..45block の陸地形 median 標高→ブロックY)を1回だけ計算し、全タイルが同一の高さを参照できる
+    ようにする。y_surf_land = max(1, 標高×scale_land) + lift（terrain_render の地表Yと同式）。
+    """
+    import math
+    H, W = dem_full.shape
+    M_PER_DEG_LAT = 111320.0
+    h_res_dem = max(res_lat * M_PER_DEG_LAT, 1e-6)        # DEM 1セルの m（lat方向）
+    step = max(1, int(round(h_res_block_m / h_res_dem)))  # 1 block = step DEMセル
+
+    def cell(lat, lon):
+        return int(round((lat_max - lat) / res_lat)), int(round((lon - lon_min) / res_lon))  # (row,col)
+
+    def ysl(row, col):
+        if 0 <= row < H and 0 <= col < W:
+            v = dem_full[row, col]
+            if np.isfinite(v) and v > sea_level_m:        # 陸のみ（水上は橋台高に使わない）
+                return max(1, int(v * scale_land)) + lift
+        return None
+
+    def anchor(p_end, p_in):
+        r0, c0 = cell(p_end[0], p_end[1]); r1, c1 = cell(p_in[0], p_in[1])
+        dr, dc = r0 - r1, c0 - c1                          # 外向き（橋の延長＝奥の道路方向）
+        L = math.hypot(dr, dc)
+        if L > 1e-6:
+            dr, dc = dr / L, dc / L
+        ys = []
+        for d in range(0, 46):                            # 端から外側 0..45 block の陸地形
+            v = ysl(int(round(r0 + dr * d * step)), int(round(c0 + dc * d * step)))
+            if v is not None:
+                ys.append(v)
+        if not ys:
+            v = ysl(r0, c0)
+            return int(v) if v is not None else 1
+        return int(round(np.median(ys)))
+
+    for b in bridges:
+        c = b.get("coords") or []
+        if len(c) < 2:
+            continue
+        b["startS"] = anchor(c[0], c[1])
+        b["endS"] = anchor(c[-1], c[-2])
 
 
 def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
@@ -752,7 +1053,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                       scale_land, h_res_block_m, surf_block=None,
                       deck_key="andesite", pier_key="andesite",
                       cap_key="andesite", rail_key="andesite",
-                      arch_rise_m=0.0, y_flood_top=None) -> int:
+                      arch_rise_m=0.0, y_flood_top=None, road_mask=None) -> int:
     """OSM 橋（polyline + layer + road_class + width）を Tellus 流に立体化して blocks へ追加。
 
     桁Y(station) = max(両岸補間 baseline + ramp(layer×arch_rise_m),  局所地形/水面 + ramp(clearance))
@@ -763,6 +1064,9 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     返り値: 置いた最大 y（max_y 更新用）。
     """
     import math
+    _BDBG = bool(__import__("os").environ.get("BRIDGE_DEBUG"))
+    _BDUMP = __import__("os").environ.get("BRIDGE_DUMP")   # 指定で高さプロファイルを npz 出力
+    _dump_recs = []
     MAX_RISE_M, RAMP_HV = 10.0, 4.0
     CLEAR_M = {"main": 6.0, "normal": 5.0, "dirt": 3.0}
     PIER_SPACING_M = 16.0
@@ -819,25 +1123,33 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         return full * (s / half) if s <= half else full * ((total - s) / half)
 
     def end_base(end_pt, in_pt):
-        # 橋端 → 外向き（橋の延長＝奥に続く道路の方向）へ陸地形をサンプルし中央値で安定化。
+        # 橋端 → 外向き（橋の延長＝奥に続く道路の方向）へ陸地形をサンプルしてバンク高を決める。
         # 端ピンポイント依存をやめ、データ境界/水面/穴での baseline 破綻や橋台手前の瘤を防ぐ。
+        # 「もっと奥まで見て高さを決める」: 0..45 block(≈30m) まで見て、橋が着地すべき高い陸地
+        # （堤防/丘の道路高）を拾えるよう中央値だけでなく上側(75%tile)も考慮して安定化。
         dx, dz = end_pt[0] - in_pt[0], end_pt[1] - in_pt[1]
         L = math.hypot(dx, dz)
         if L > 1e-6:
             dx, dz = dx / L, dz / L
         ys = []
-        for d in range(0, 26):    # 端から外側 0..25 block（奥に続く道路方向）の陸地形
+        for d in range(0, 46):    # 端から外側 0..45 block（奥に続く道路方向）の陸地形
             i, j = col(end_pt[0] + dx * d, end_pt[1] + dz * d)
             if 0 <= j < nz and 0 <= i < nx and not sea_mask[j, i] and np.isfinite(y_surf_land[j, i]):
                 ys.append(int(y_surf_land[j, i]))
-        return int(np.median(ys)) if ys else terrain_y(*end_pt)
+        if not ys:
+            return terrain_y(*end_pt)
+        # 奥に続く道路の代表地形高（中央値）。チェーン両端の着地高に使うので過大評価しない。
+        return int(round(np.median(ys)))
 
     # ── 軸7-1: 各橋の幾何を前計算（pts/seg/total/baseline/has_water/min_deck） ──
     infos = []
     for b in bridges:
         pts = [_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, nz, nx) for la, lo in b["coords"]]
         rc = b.get("road_class", "normal")
-        half_w = max(0, int(round((float(b.get("width_m") or 5.5) / max(h_res_block_m, 0.1)) / 2.0)))
+        _wm = float(b.get("width_m") or 5.5)
+        if "link" in (b.get("highway") or ""):     # IC ランプは本線と同じ9m指定でも実態は単車線
+            _wm = min(_wm, 5.5)
+        half_w = max(0, int(round((_wm / max(h_res_block_m, 0.1)) / 2.0)))
         layer = int(b.get("layer", 1))
         seg, total = [], 0.0
         for (x0, z0), (x1, z1) in zip(pts, pts[1:]):
@@ -845,8 +1157,12 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         if total < 2.0:
             infos.append(None)
             continue
-        startS = end_base(pts[0], pts[1] if len(pts) > 1 else pts[0])
-        endS = end_base(pts[-1], pts[-2] if len(pts) > 1 else pts[-1])
+        # 端アンカー高。全域で事前計算した b["startS"]/["endS"] があれば優先（タイル分割で橋端点が
+        # タイル外に出ても降下しない＝高架が複数タイルにまたがっても一貫した高さで連続平坦飛行）。
+        # 無ければ従来どおりタイルローカル地形から end_base（単一タイル内に収まる橋はこれで十分）。
+        _gs = b.get("startS"); _ge = b.get("endS")
+        startS = int(_gs) if _gs is not None else end_base(pts[0], pts[1] if len(pts) > 1 else pts[0])
+        endS = int(_ge) if _ge is not None else end_base(pts[-1], pts[-2] if len(pts) > 1 else pts[-1])
         rise_full = min(layer * arch_rise_m, MAX_RISE_M) * scale_land
         clear_full = CLEAR_M.get(rc, 5.0) * scale_land
         # スパンが水を渡るか（渡る時だけ水面+clearance を最低デッキ高に）
@@ -863,75 +1179,270 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         infos.append(dict(pts=pts, seg=seg, total=total, startS=startS, endS=endS,
                           rise_full=rise_full, clear_full=clear_full, has_water=has_water,
                           min_deck=min_deck, half_w=half_w, rc=rc, layer=layer,
+                          highway=(b.get("highway") or ""),
                           name=(b.get("name") or "").strip()))
 
-    # ── 軸7-1: UnionFind で橋wayをグルーピング（①端点共有+同layer ②同一の非空name）──
-    parent = list(range(len(infos)))
-    def _find(a):
-        while parent[a] != a:
-            parent[a] = parent[parent[a]]; a = parent[a]
-        return a
-    ENDPOINT_TOL = max(2.0, 3.0 / max(h_res_block_m, 0.1))   # ~3m 以内の端点共有を連結とみなす
-    for i in range(len(infos)):
-        if infos[i] is None:
-            continue
-        ei = (infos[i]["pts"][0], infos[i]["pts"][-1])
-        for j in range(i + 1, len(infos)):
-            if infos[j] is None:
+    # ── 橋wayをチェーン再構成（ほぼ直線で連なる way 群を1本の連続橋に）。
+    #   方針: 分割/途切れた橋群でも「ほぼ直線でつながる」なら1チェーンとみなし、
+    #   **チェーン両端の高さだけ**を見て端から端へ線形にデッキを通す（途中で地形に追従して
+    #   川底へ落とさない）。実橋も高所→低所へ緩く傾斜するので両端線形は違和感が小さく、
+    #   恩恵(谷で浮き続ける)を受ける橋は少数。並走する上下線は端点間ベクトルが進行方向と
+    #   直交するため別チェーンに分かれる。──
+    ENDPOINT_TOL = max(2.0, 3.0 / max(h_res_block_m, 0.1))
+    MAX_LINK = 130.0 / max(h_res_block_m, 0.1)        # 連結する隙間上限(block, ≈130m)
+    MAX_LINK_NAME = 400.0 / max(h_res_block_m, 0.1)   # 同一道路名は橋間の地上区間(OSM非bridge)越えで連結
+    COS_LINK = math.cos(math.radians(30.0))           # 直線継続とみなす角度許容(過剰グループ化抑制)
+
+    def _udir(p_from, p_to):
+        dx, dz = p_to[0] - p_from[0], p_to[1] - p_from[1]
+        L = math.hypot(dx, dz)
+        return (dx / L, dz / L) if L > 1e-6 else (0.0, 0.0)
+
+    def _is_link(i):                                   # IC ランプ(motorway_link 等)か
+        return "link" in (infos[i]["highway"] or "")
+
+    def _name_tokens(i):
+        return {s.strip() for s in (infos[i]["name"] or "").replace("；", ";").split(";") if s.strip()}
+
+    def _same_road(i, j):
+        # 「阪和自動車道」と「阪和自動車道;湯浅御坊道路」のような併記差も同一路線として扱う。
+        a, b = _name_tokens(i), _name_tokens(j)
+        return bool(a and b and (a & b))
+
+    valid = [i for i in range(len(infos)) if infos[i] is not None]
+    def _epos(i, e):
+        return infos[i]["pts"][0] if e == 0 else infos[i]["pts"][-1]
+    def _eout(i, e):                                  # 端点の外向き単位ベクトル
+        P = infos[i]["pts"]
+        return _udir(P[1], P[0]) if e == 0 else _udir(P[-2], P[-1])
+
+    eps = [(i, e) for i in valid for e in (0, 1)]
+    epidx = {ep: k for k, ep in enumerate(eps)}
+    cands = []
+    for a in range(len(eps)):
+        ia, ea = eps[a]
+        for b in range(a + 1, len(eps)):
+            ib, eb = eps[b]
+            if ia == ib or infos[ia]["layer"] != infos[ib]["layer"]:
                 continue
-            same_name = bool(infos[i]["name"]) and infos[i]["name"] == infos[j]["name"]
-            share = False
-            if infos[i]["layer"] == infos[j]["layer"]:
-                for pa in ei:
-                    for pb in (infos[j]["pts"][0], infos[j]["pts"][-1]):
-                        if math.hypot(pa[0] - pb[0], pa[1] - pb[1]) <= ENDPOINT_TOL:
-                            share = True
-            if same_name or share:
-                ra, rb = _find(i), _find(j)
-                if ra != rb:
-                    parent[ra] = rb
-
-    # ── 軸7-2: グループ単位で平坦判定。端点地形差(dip) < 4block の多way橋だけ共有フラット
-    #    デッキ(=最高バンク/水面+clearance)に統一。dip 大（自然な谷/起伏）なら per-way のまま
-    #    地形に沿わせる。これで分割 way の継ぎ目段差を消しつつ、谷で浮く不自然さも防ぐ。──
-    from collections import defaultdict as _dd
-    groups = _dd(list)
-    for i in range(len(infos)):
-        if infos[i] is not None:
-            groups[_find(i)].append(i)
-    DIP_THR = 4.0 * scale_land
-    for _g, members in groups.items():
-        if len(members) < 2:
+            if _is_link(ia) != _is_link(ib):           # 本線とランプは別チェーンに分ける
+                continue
+            pa, pb = _epos(ia, ea), _epos(ib, eb)
+            gv = (pb[0] - pa[0], pb[1] - pa[1])
+            gl = math.hypot(*gv)
+            # 同一道路名(阪和道など本線)は橋区間の間の地上区間を越えて連結。角度(直線継続)は維持する
+            # ので上下線(進行方向と直交)・分岐は連結しない。
+            _same = (not _is_link(ia)) and _same_road(ia, ib)
+            if gl > (MAX_LINK_NAME if _same else MAX_LINK):
+                continue
+            if gl > ENDPOINT_TOL:                     # 近接共有でなければ直線継続を要求
+                gu = (gv[0] / gl, gv[1] / gl)
+                da, db = _eout(ia, ea), _eout(ib, eb)
+                if da[0] * gu[0] + da[1] * gu[1] < COS_LINK:
+                    continue
+                if db[0] * (-gu[0]) + db[1] * (-gu[1]) < COS_LINK:
+                    continue
+            cands.append((gl, a, b))
+    cands.sort(key=lambda c: c[0])
+    linked = {}
+    for gl, a, b in cands:                            # 端点1対1で貪欲連結（近い順）
+        if a in linked or b in linked:
             continue
-        ebs = []
-        for i in members:
-            ebs += [infos[i]["startS"], infos[i]["endS"]]
-        if max(ebs) - min(ebs) >= DIP_THR:
-            continue                                  # 谷/起伏 → 地形追従（per-way 維持）
-        hw = any(infos[i]["has_water"] for i in members)
-        g_min_deck = (max(int(y_sea_surface) + infos[i]["clear_full"] for i in members)
-                      if hw else -1.0e9)
-        g_deck = max(ebs)
-        if hw:
-            g_deck = max(g_deck, g_min_deck)
-        for i in members:                             # 共有フラットデッキに上書き
-            infos[i]["startS"] = g_deck
-            infos[i]["endS"] = g_deck
-            infos[i]["min_deck"] = g_min_deck
+        linked[a] = b; linked[b] = a
 
-    # ── レンダリング（本体は従来どおり。設定は infos から、グループは上書き済み）──
-    for info in infos:
-        if info is None:
-            continue
-        pts = info["pts"]; seg = info["seg"]; total = info["total"]
-        startS = info["startS"]; endS = info["endS"]
-        rise_full = info["rise_full"]; min_deck = info["min_deck"]
-        half_w = info["half_w"]; rc = info["rc"]
-        pier_step = max(4.0, PIER_SPACING_M / max(h_res_block_m, 0.1))
-        next_pier = pier_step
+    # チェーン構築: 自由端(リンク無し端点)から辿る → (way, flip) の順序列
+    seen = set()
+    chains = []
+    def _chain_from(startk):
+        order = []
+        k = startk
+        while True:
+            i, e = eps[k]
+            if i in seen:
+                break
+            seen.add(i)
+            order.append((i, e == 1))                 # 端(1)から入ったら反転して通す
+            nb = linked.get(epidx[(i, 1 - e)])        # 反対の端から出る
+            if nb is None:
+                break
+            k = nb
+        return order
+    for k, (i, e) in enumerate(eps):
+        if i not in seen and k not in linked:         # 自由端から
+            ch = _chain_from(k)
+            if ch:
+                chains.append(ch)
+    for k, (i, e) in enumerate(eps):                  # 残り(リンクが閉路)
+        if i not in seen:
+            ch = _chain_from(k)
+            if ch:
+                chains.append(ch)
+
+    if _BDBG:
+        _dropped = [b.get("name", "") for b, inf in zip(bridges, infos) if inf is None]
+        print(f"[bridge] ways={len(bridges)} valid={len(valid)} "
+              f"dropped(total<2)={len(_dropped)} chains={len(chains)} "
+              f"links={len(linked)//2}")
+
+    # ── デッキ高の解析式（_render_span と「派生元の橋の高さ」問い合わせで共有） ──
+    def _deck_dy(station, total, startS, endS, rise_full, min_deck):
+        base = startS + (endS - startS) * (station / total) if total > 1e-6 else startS
+        # 水面クリアランス: 両端の道路高から 4:1 で立ち上がり min_deck で頭打ち。
+        lift = min(min_deck,
+                   startS + station / RAMP_HV,
+                   endS + (total - station) / RAMP_HV)
+        return int(round(max(base + ramp(station, total, rise_full), lift)))
+
+    def _chain_profile(mpts, seglen, startS, endS, rise_full, min_deck, kind):
+        # 検証用: 実レンダと同じ _deck_profile の deck 高＋直下地形/水面/橋脚底をサンプル。
+        total = sum(seglen)
+        cxs, czs, sts, dys = _deck_profile(mpts, seglen, total, startS, endS,
+                                           rise_full, min_deck)
+        terr = [terrain_y(cxs[i], czs[i]) for i in range(len(sts))]
+        flr = [floor_y(cxs[i], czs[i]) for i in range(len(sts))]
+        wss = []
+        for i in range(len(sts)):
+            ci, cj = col(cxs[i], czs[i])
+            _sea = (0 <= cj < nz and 0 <= ci < nx and sea_mask[cj, ci])
+            wss.append(int(y_sea_surface) if _sea else -9999)
+        return dict(kind=kind, station=np.array(sts), x=np.array(cxs), z=np.array(czs),
+                    dy=np.array(dys), terr=np.array(terr), floor=np.array(flr),
+                    wsurf=np.array(wss),
+                    startS=float(startS), endS=float(endS), total=float(total),
+                    min_deck=float(min_deck))
+
+    # 橋デッキ/路面に使われる灰色系(衛星が橋を写し込むと橋下に出る色)。補完では避けたい。
+    _ROADISH = {"andesite", "gray_concrete", "light_gray_concrete", "stone", "smooth_stone",
+                "black_concrete", "cyan_concrete", "polished_andesite", "gravel", "cobblestone"}
+
+    def _surf_at(ix, iz):                              # 地表色(水/海でない自然色)を返す, 無ければ None
+        if surf_block is None or not (0 <= iz < nz and 0 <= ix < nx):
+            return None
+        sk = surf_block[iz, ix]
+        if sk and sk != "water" and not sea_mask[iz, ix]:
+            return sk
+        return None
+
+    def _fill_color(cx, cz, ox, oz, lhw):
+        # 橋下の乾いた地表に塗る「周囲色」。橋脇を外側へ探索し、道路灰色でない自然色を優先採用。
+        fallback = None
+        for off in range(lhw + 2, lhw + 12):
+            for sgn in (1, -1):
+                s = _surf_at(*col(cx + ox * off * sgn, cz + oz * off * sgn))
+                if s is None:
+                    continue
+                if s not in _ROADISH:
+                    return s                            # 自然色(草/土/砂等)が見つかれば即採用
+                if fallback is None:
+                    fallback = s
+        return fallback                                 # 自然色が無ければ最寄りの灰色
+
+    def _road_halfw(cx, cz, ox, oz, fallback):
+        # デッキ半幅を「直下の地表道路レンダ(road_mask)の実幅」に合わせる。中心(±2)に道路が無ければ
+        # width_m 由来 fallback。連続走査で道路の途切れまでを左右に測り、交差点での膨張は 2×fallback で頭打ち。
+        if road_mask is None:
+            return fallback
+        ci, cj = col(cx, cz)
+        on_road = (0 <= cj < nz and 0 <= ci < nx and road_mask[cj, ci])
+        if not on_road:
+            for s in (1, -1, 2, -2):
+                ix, iz = col(cx + ox * s, cz + oz * s)
+                if 0 <= iz < nz and 0 <= ix < nx and road_mask[iz, ix]:
+                    on_road = True
+                    break
+            if not on_road:
+                return fallback
+        cap = fallback * 2 + 2
+        rp = rm = 0
+        for w in range(1, cap + 1):
+            ix, iz = col(cx + ox * w, cz + oz * w)
+            if 0 <= iz < nz and 0 <= ix < nx and road_mask[iz, ix]:
+                rp = w
+            else:
+                break
+        for w in range(1, cap + 1):
+            ix, iz = col(cx - ox * w, cz - oz * w)
+            if 0 <= iz < nz and 0 <= ix < nx and road_mask[iz, ix]:
+                rm = w
+            else:
+                break
+        hw = (rp + rm + 1) // 2
+        # road_mask は「細くする方向のみ」採用(nominal=width_m半幅を超えない)。交差点の膨張を防ぐ。
+        return max(1, min(hw, fallback)) if hw > 0 else fallback
+
+    # ── デッキ高プロファイル: 解析デッキ raw=_deck_dy を、直下フットプリント(幅方向)の最高
+    #    ground(水面 or 地形トップ)より下げない＝埋没/水没を防ぐ。ただし「超過分 excess=ground-raw」
+    #    だけを 1/RAMP_HV 勾配で envelope し raw に足す（dy=raw+excess）。これにより:
+    #      ・端や平坦高所橋では ground<=raw → excess0 → raw のまま着地/平坦飛行を保持（コブ/+1段差なし）
+    #      ・谷/低地/境界に潰れていた橋(従来 Y1)は excess が滑らかに持ち上げて連続・可視化
+    #    境界外(OOB)サンプルは ground 評価から除外（terrain_y の OOB=1 で低く潰れるのを防ぐ）。
+    def _deck_profile(mpts, seg, total, startS, endS, rise_full, min_deck, lhw=1):
+        cxs, czs, sts, oxs, ozs = [], [], [], [], []
         s_acc = 0.0
         for si in range(len(seg)):
-            (x0, z0), (x1, z1) = pts[si], pts[si + 1]
+            (x0, z0), (x1, z1) = mpts[si], mpts[si + 1]
+            L = seg[si]
+            if L < 1e-6:
+                continue
+            ox, oz = -(z1 - z0) / L, (x1 - x0) / L
+            n = max(1, int(L / 0.5))
+            for k in range(n + 1):
+                t = k / n
+                cxs.append(x0 + (x1 - x0) * t); czs.append(z0 + (z1 - z0) * t)
+                sts.append(s_acc + L * t); oxs.append(ox); ozs.append(oz)
+            s_acc += L
+        m = len(sts)
+        raw = [float(_deck_dy(sts[i], total, startS, endS, rise_full, min_deck))
+               for i in range(m)]
+        excess = [0.0] * m
+        for i in range(m):
+            g = None
+            for w in (-lhw, -lhw * 0.5, 0.0, lhw * 0.5, lhw):
+                ci, cj = col(cxs[i] + oxs[i] * w, czs[i] + ozs[i] * w)
+                if 0 <= cj < nz and 0 <= ci < nx:
+                    gw = int(y_sea_surface) if sea_mask[cj, ci] else int(y_surf_land[cj, ci])
+                    g = gw if g is None else max(g, gw)
+            if g is not None:
+                excess[i] = max(0.0, g - raw[i])
+        # excess(床超過分)だけを 1/RAMP_HV 勾配で envelope（前後2パス）。raw は素のまま。
+        for i in range(1, m):
+            excess[i] = max(excess[i], excess[i - 1] - abs(sts[i] - sts[i - 1]) / RAMP_HV)
+        for i in range(m - 2, -1, -1):
+            excess[i] = max(excess[i], excess[i + 1] - abs(sts[i + 1] - sts[i]) / RAMP_HV)
+        return cxs, czs, sts, [int(round(raw[i] + excess[i])) for i in range(m)]
+
+    # ── レンダリング本体: 1スパン=連続ポリラインを startS→endS 線形デッキで立体化。
+    #    head_ext/tail_ext = 端の延長区間長(station)。延長部は柵を生成しない(道路へ自然に接続)。──
+    def _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc,
+                     head_ext=0.0, tail_ext=0.0):
+        seg = [math.hypot(mpts[s + 1][0] - mpts[s][0], mpts[s + 1][1] - mpts[s][1])
+               for s in range(len(mpts) - 1)]
+        total = sum(seg)
+        if total < 2.0:
+            return [], []
+        pier_step = max(4.0, PIER_SPACING_M / max(h_res_block_m, 0.1))
+        next_pier = pier_step
+        # デッキ幅は「直下道路実幅の一番大きい部分」で全長統一(#1)。事前スキャンで最大半幅を求める
+        # (nominal=width_m半幅が上限)。くびれ/ジャギを無くし均一幅にする。
+        uniform_hw = 1
+        for si in range(len(seg)):
+            (x0, z0), (x1, z1) = mpts[si], mpts[si + 1]
+            L = seg[si]
+            if L < 1e-6:
+                continue
+            ox, oz = -(z1 - z0) / L, (x1 - x0) / L
+            n = max(1, int(L / 0.5))
+            for k in range(n + 1):
+                t = k / n
+                uniform_hw = max(uniform_hw, _road_halfw(
+                    x0 + (x1 - x0) * t, z0 + (z1 - z0) * t, ox, oz, half_w))
+        lhw = max(1, uniform_hw)
+        _, _, _prof_sts, dyt = _deck_profile(mpts, seg, total, startS, endS,
+                                             rise_full, min_deck, lhw)
+        idx = 0
+        s_acc = 0.0
+        for si in range(len(seg)):
+            (x0, z0), (x1, z1) = mpts[si], mpts[si + 1]
             L = seg[si]
             if L < 1e-6:
                 continue
@@ -942,14 +1453,12 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                 t = k / n
                 cx, cz = x0 + (x1 - x0) * t, z0 + (z1 - z0) * t
                 station = s_acc + L * t
-                base = startS + (endS - startS) * (station / total)
-                # 水面クリアランス: 両端の道路高から 4:1 で立ち上がり min_deck で頭打ち。
-                # 端付近の地形に依存しないので橋台手前の不自然な瘤が出ない。
-                lift = min(min_deck,
-                           startS + station / RAMP_HV,
-                           endS + (total - station) / RAMP_HV)
-                dy = int(round(max(base + ramp(station, total, rise_full), lift)))
-                for w in range(-half_w, half_w + 1):
+                in_ext = (station < head_ext - 1e-6) or (station > total - tail_ext + 1e-6)
+                dy = dyt[idx]; idx += 1
+                # 斜め橋でデッキに 1×1 ピンホールが空くのを防ぐため、法線方向を 0.5 step で走査。
+                half_steps = max(1, int(round(lhw / 0.5)))
+                for wi in range(-half_steps, half_steps + 1):
+                    w = wi * 0.5
                     ix, iz = col(cx + ox * w, cz + oz * w)
                     top_key = deck_key
                     if surf_block is not None and 0 <= iz < nz and 0 <= ix < nx:
@@ -958,34 +1467,579 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                             top_key = sk            # 上面=衛星写真の路面色
                     put(ix, dy, iz, top_key)
                     put(ix, dy - 1, iz, deck_key)   # 下面=安山岩(構造)
-                    if abs(w) == half_w and half_w >= 1:
-                        put(ix, dy + 1, iz, rail_key)
+                    if abs(wi) == half_steps and lhw >= 1 and not in_ext:
+                        put(ix, dy + 1, iz, rail_key)   # 延長部(in_ext)は柵なし
                 if station >= next_pier and not (si == 0 and k == 0):
                     next_pier += pier_step
                     fy = floor_y(cx, cz)
                     if dy - 2 > fy:
-                        shafts = (-half_w + 1, half_w - 1) if (rc == "main" and half_w >= 2) else (0,)
+                        shafts = (-lhw + 1, lhw - 1) if (rc == "main" and lhw >= 2) else (0,)
                         for w in shafts:
                             ix, iz = col(cx + ox * w, cz + oz * w)
                             for yy in range(fy, dy - 1):
                                 put(ix, yy, iz, pier_key)
                             put(ix, dy - 1, iz, cap_key)
-                # 橋下を「橋を抜いた高さ（周辺の洪水水位/水面）」まで water で埋める。
-                # デッキ・橋脚は既に put 済み(seen)なので上書きされず、橋脚の間だけ水が入る。
+                # 橋下の処理（列ごと）: 実際に水がある列のみ「その列の水面まで」水柱、
+                #   乾いた陸の列は衛星が橋を写し込んだ路面色を、橋脇の周囲色で上書き補完する。
+                #   水位はバンド最大でなく列ごとの実水面で決める(端の高地に引っ張られた異常水位を防ぐ)。
                 if y_flood_top is not None:
-                    wt = -1
-                    for w in range(-half_w - 3, half_w + 4):
+                    fill_col = _fill_color(cx, cz, ox, oz, lhw)
+                    for w in range(-lhw, lhw + 1):
                         ix2, iz2 = col(cx + ox * w, cz + oz * w)
-                        if 0 <= iz2 < nz and 0 <= ix2 < nx:
-                            wt = max(wt, int(y_flood_top[iz2, ix2]))
-                            if sea_mask[iz2, ix2]:
-                                wt = max(wt, int(y_sea_surface))
-                    g = floor_y(cx, cz)
-                    for wy in range(g + 1, min(int(dy) - 1, wt) + 1):
-                        for w in range(-half_w, half_w + 1):
-                            ix2, iz2 = col(cx + ox * w, cz + oz * w)
-                            put(ix2, wy, iz2, "water")
+                        if not (0 <= iz2 < nz and 0 <= ix2 < nx):
+                            continue
+                        if sea_mask[iz2, ix2]:
+                            gcol = int(y_sea_floor[iz2, ix2])
+                            wt = max(int(y_flood_top[iz2, ix2]), int(y_sea_surface))
+                        elif int(y_flood_top[iz2, ix2]) > int(y_surf_land[iz2, ix2]):
+                            gcol = int(y_surf_land[iz2, ix2])
+                            wt = int(y_flood_top[iz2, ix2])
+                        else:
+                            gcol = int(y_surf_land[iz2, ix2]); wt = -1   # 乾いた陸
+                        top_w = min(int(dy) - 2, wt)
+                        if top_w > gcol:
+                            for wy in range(gcol + 1, top_w + 1):
+                                put(ix2, wy, iz2, "water")
+                        elif fill_col is not None and gcol < int(dy) - 1:
+                            put(ix2, gcol, iz2, fill_col)   # 橋下地表トップを周囲色で補完
             s_acc += L
+        return _prof_sts, dyt          # 実デッキ高プロファイル(ランプ接続=_parent_at で参照)
+
+    # ── チェーン → マージ済みポリライン / 属性 / 端延長 / 射影 のヘルパ ──
+    def _seglens(mpts):
+        return [math.hypot(mpts[s + 1][0] - mpts[s][0], mpts[s + 1][1] - mpts[s][1])
+                for s in range(len(mpts) - 1)]
+
+    def _build_mpts(ch):
+        # チェーン内の way を順に連結（flip）してマージ済みポリラインへ。ギャップは直線セグメント。
+        mpts = []
+        for (i, flip) in ch:
+            P = infos[i]["pts"]
+            sp = P[::-1] if flip else P
+            if mpts and math.hypot(mpts[-1][0] - sp[0][0], mpts[-1][1] - sp[0][1]) < 1e-6:
+                mpts += sp[1:]
+            else:
+                mpts += sp
+        return mpts
+
+    def _chain_attrs(ch):
+        has_water = any(infos[i]["has_water"] for (i, _) in ch)
+        clear_full = max(infos[i]["clear_full"] for (i, _) in ch)
+        rise_full = max(infos[i]["rise_full"] for (i, _) in ch)
+        half_w = max(infos[i]["half_w"] for (i, _) in ch)
+        rc = "main" if any(infos[i]["rc"] == "main" for (i, _) in ch) else infos[ch[0][0]]["rc"]
+        min_deck = (int(y_sea_surface) + clear_full) if has_water else -1.0e9
+        return rise_full, half_w, rc, min_deck
+
+    EXTEND_MAX = 40                                    # 端の最大延長(block)
+    def _extend_to_highest(end_pt, in_pt):
+        # 端点から外向き(奥に続く道路方向)へ d=0..EXTEND_MAX block 走査し、その区間の最高地形(=道路)点に着地。
+        # 「元データから延長して一番高い道路地点から橋をはやす」。チェーン分割後に適用するので
+        # この延長部はグループ化の対象外（既に linked/chains 確定後）。川底/低所への降下を防ぐ。
+        dx, dz = end_pt[0] - in_pt[0], end_pt[1] - in_pt[1]
+        L = math.hypot(dx, dz)
+        if L < 1e-6:
+            return end_pt, terrain_y(*end_pt)
+        dx, dz = dx / L, dz / L
+        best_pt, best_h = None, None
+        for d in range(0, EXTEND_MAX + 1):
+            x, z = end_pt[0] + dx * d, end_pt[1] + dz * d
+            i, j = col(x, z)
+            if not (0 <= j < nz and 0 <= i < nx):
+                break
+            if sea_mask[j, i] or not np.isfinite(y_surf_land[j, i]):
+                continue
+            h = int(y_surf_land[j, i])
+            if best_h is None or h > best_h:
+                best_h, best_pt = h, (x, z)
+        if best_h is None:
+            return end_pt, terrain_y(*end_pt)
+        return best_pt, best_h
+
+    def _project(mpts, seglen, q):
+        # q をポリラインへ射影 → (station, 距離^2)
+        best_s, best_d2, s_acc = 0.0, 1.0e18, 0.0
+        for s in range(len(mpts) - 1):
+            (x0, z0), (x1, z1) = mpts[s], mpts[s + 1]
+            L = seglen[s]
+            if L < 1e-6:
+                continue
+            t = ((q[0] - x0) * (x1 - x0) + (q[1] - z0) * (z1 - z0)) / (L * L)
+            t = min(1.0, max(0.0, t))
+            px, pz = x0 + (x1 - x0) * t, z0 + (z1 - z0) * t
+            d2 = (q[0] - px) ** 2 + (q[1] - pz) ** 2
+            if d2 < best_d2:
+                best_d2, best_s = d2, s_acc + L * t
+            s_acc += L
+        return best_s, best_d2
+
+    def _ext_head(mpts):                               # 始端を延長 → (新mpts, 延長長, 高さ)
+        e, h = _extend_to_highest(mpts[0], mpts[1])
+        d = math.hypot(e[0] - mpts[0][0], e[1] - mpts[0][1])
+        return (([e] + mpts) if d > 1e-6 else mpts), d, h
+
+    def _ext_tail(mpts):                               # 終端を延長 → (新mpts, 延長長, 高さ)
+        e, h = _extend_to_highest(mpts[-1], mpts[-2])
+        d = math.hypot(e[0] - mpts[-1][0], e[1] - mpts[-1][1])
+        return ((mpts + [e]) if d > 1e-6 else mpts), d, h
+
+    # ── 本線高架(motorway/trunk 等)を先に描き、各チェーンのデッキ高プロファイルを保持。
+    #    その後 IC ランプ(motorway_link 等)を描き、本線へ接続する側の端を「派生元の橋の高さ」に
+    #    合わせる（反対端は最高点へ延長）。──
+    main_specs = []
+    for ch in chains:
+        if any(_is_link(i) for (i, _) in ch):
+            continue
+        raw_mpts = _build_mpts(ch)
+        if len(raw_mpts) < 2:
+            continue
+        rise_full, half_w, rc, min_deck = _chain_attrs(ch)
+        join_head, join_tail = raw_mpts[0], raw_mpts[-1]
+        join_head_dir = _udir(raw_mpts[1], raw_mpts[0])
+        join_tail_dir = _udir(raw_mpts[-2], raw_mpts[-1])
+        mpts = list(raw_mpts)
+        mpts, head_ext, h0 = _ext_head(mpts)
+        mpts, tail_ext, h1 = _ext_tail(mpts)
+        # チェーン両端の高さ。_extend_to_highest はタイルローカル y_surf_land を見るため、--tiles 分割で
+        # チェーン端点がタイル外に出ると地表(terrain_y=1)にフォールバックし、デッキ全体が地表へ降下する
+        # （チェーン内 way 同士は線形補間で連続するが、グループ全体が地表に沈む）。チェーン端 way の
+        # 全域アンカー（assign_global_bridge_anchors が infos に付与した startS/endS, flip 考慮）を優先。
+        _i0, _f0 = ch[0]; _iL, _fL = ch[-1]
+        _g0 = infos[_i0]["endS"] if _f0 else infos[_i0]["startS"]   # チェーン始端 way の自由端アンカー
+        _g1 = infos[_iL]["startS"] if _fL else infos[_iL]["endS"]   # チェーン終端 way の自由端アンカー
+        startS = int(_g0) if _g0 is not None else h0                # 全域アンカー優先(タイル間で一貫＝境界段差を防止)
+        endS = int(_g1) if _g1 is not None else h1
+        seglen = _seglens(mpts)
+        main_specs.append(dict(ch=ch, mpts=mpts, seglen=seglen, total=sum(seglen),
+                               startS=startS, endS=endS, rise_full=rise_full,
+                               min_deck=min_deck, half_w=half_w, rc=rc,
+                               head_ext=head_ext, tail_ext=tail_ext,
+                               join_head=join_head, join_tail=join_tail,
+                               join_head_dir=join_head_dir, join_tail_dir=join_tail_dir,
+                               layer=infos[ch[0][0]]["layer"],
+                               tokens=set().union(*(_name_tokens(i) for (i, _) in ch))))
+
+    # チェーン自体を連結できなかった接続点でも、同一路線の本線端が近ければ端高を揃える。
+    # OSM の bridge=yes が IC/JCT や短い地上区間で複数 way に分かれると、片側だけ地形medianに
+    # 落ちて「橋が切れた段差」に見える。ジオメトリは分けたまま、接続点の高さだけ高い方へ寄せる。
+    HEIGHT_JOIN_TOL = 60.0 / max(h_res_block_m, 0.1)
+    COS_HEIGHT_LINK = math.cos(math.radians(75.0))
+    endpoints = []
+    for si, sp in enumerate(main_specs):
+        endpoints.append((si, "startS", sp["join_head"], sp["join_head_dir"]))
+        endpoints.append((si, "endS", sp["join_tail"], sp["join_tail_dir"]))
+    for a in range(len(endpoints)):
+        ia, ka, pa, da = endpoints[a]
+        for b in range(a + 1, len(endpoints)):
+            ib, kb, pb, db = endpoints[b]
+            if ia == ib:
+                continue
+            A, B = main_specs[ia], main_specs[ib]
+            if A["layer"] != B["layer"] or not (A["tokens"] and B["tokens"] and (A["tokens"] & B["tokens"])):
+                continue
+            gv = (pb[0] - pa[0], pb[1] - pa[1])
+            gl = math.hypot(*gv)
+            if gl > HEIGHT_JOIN_TOL:
+                continue
+            if gl > ENDPOINT_TOL:
+                gu = (gv[0] / gl, gv[1] / gl)
+                if da[0] * gu[0] + da[1] * gu[1] < COS_HEIGHT_LINK:
+                    continue
+                if db[0] * (-gu[0]) + db[1] * (-gu[1]) < COS_HEIGHT_LINK:
+                    continue
+            # 分岐点では両チェーン端が同じ地形median(地表)に落ち、max(A,B) では更新されないことがある。
+            # 各チェーンの反対端(高架側)も見て、接続点を高架高へ引き上げる(地表に沈む接続を防ぐ)。
+            _ao = A["endS"] if ka == "startS" else A["startS"]
+            _bo = B["endS"] if kb == "startS" else B["startS"]
+            h = max(int(A[ka]), int(B[kb]), int(_ao), int(_bo))
+            if h > A[ka] or h > B[kb]:
+                if _BDBG:
+                    print(f"[bridge] JOIN height {ia}.{ka}<->{ib}.{kb} "
+                          f"dist={gl:.0f}b {A[ka]}/{B[kb]} -> {h}")
+                A[ka] = B[kb] = h
+
+    # 同一路線の上下線は横並びで別チェーンに残す必要があるが、橋台の高さは揃っていないと
+    # 片側だけ地表アンカーへ落ちて大きな段差に見える。ジオメトリは連結せず、近接・平行な
+    # main チェーン端だけ高い方へ同期する。
+    COS_PARALLEL_HEIGHT = math.cos(math.radians(30.0))
+    for a in range(len(endpoints)):
+        ia, ka, pa, da = endpoints[a]
+        for b in range(a + 1, len(endpoints)):
+            ib, kb, pb, db = endpoints[b]
+            if ia == ib:
+                continue
+            A, B = main_specs[ia], main_specs[ib]
+            if A["rc"] != "main" or B["rc"] != "main":
+                continue
+            if A["layer"] != B["layer"] or not (A["tokens"] and B["tokens"] and (A["tokens"] & B["tokens"])):
+                continue
+            gl = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+            if gl > HEIGHT_JOIN_TOL:
+                continue
+            if abs(da[0] * db[0] + da[1] * db[1]) < COS_PARALLEL_HEIGHT:
+                continue
+            h = max(int(A[ka]), int(B[kb]))
+            if h > A[ka] or h > B[kb]:
+                if _BDBG:
+                    print(f"[bridge] PARALLEL height {ia}.{ka}<->{ib}.{kb} "
+                          f"dist={gl:.0f}b {A[ka]}/{B[kb]} -> {h}")
+                A[ka] = B[kb] = h
+
+    main_params = []
+    for sp in main_specs:
+        ch = sp["ch"]
+        mpts, seglen = sp["mpts"], sp["seglen"]
+        startS, endS = int(sp["startS"]), int(sp["endS"])
+        rise_full, min_deck = sp["rise_full"], sp["min_deck"]
+        half_w, rc = sp["half_w"], sp["rc"]
+        head_ext, tail_ext = sp["head_ext"], sp["tail_ext"]
+        psts, pdy = _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc,
+                                 head_ext, tail_ext)
+        main_params.append(dict(mpts=mpts, seglen=seglen, total=sp["total"],
+                                startS=startS, endS=endS, rise_full=rise_full,
+                                min_deck=min_deck, psts=psts, pdy=pdy))
+        if _BDBG:
+            _tot = sp["total"]
+            _names = sorted({infos[i]["name"] for (i, _) in ch if infos[i]["name"]})
+            _steps = [abs(pdy[k + 1] - pdy[k]) for k in range(len(pdy) - 1)] or [0]
+            _samp = [pdy[int(round(j * (len(pdy) - 1) / 10))] for j in range(11)] if pdy else []
+            print(f"[bridge] MAIN ways={[i for i,_ in ch]} layer={infos[ch[0][0]]['layer']} "
+                  f"rc={rc} L={_tot:.0f}b startS={startS} endS={endS} min_deck={min_deck:.0f} "
+                  f"has_water={min_deck>-1e8} head_ext={head_ext:.0f} tail_ext={tail_ext:.0f} "
+                  f"maxstep={max(_steps):.0f} dy@={_samp} names={_names}")
+        if _BDUMP:
+            _dump_recs.append(_chain_profile(mpts, seglen, startS, endS, rise_full,
+                                             min_deck, "main"))
+
+    JOIN_TOL = 40.0 / max(h_res_block_m, 0.1)         # ランプ端が本線へ接続とみなす距離(block, ≈40m)
+
+    def _parent_at(q):
+        # q に最も近い本線高架の「実デッキ高」（床/勾配で嵩上げ後の psts/pdy を補間）。
+        #   解析値 _deck_dy ではなく実レンダ高を返すことで、嵩上げされた本線へランプが段差なく接続。
+        best_dy, best_d2 = None, JOIN_TOL * JOIN_TOL
+        for pp in main_params:
+            s, d2 = _project(pp["mpts"], pp["seglen"], q)
+            if d2 < best_d2:
+                best_d2 = d2
+                if pp["psts"]:
+                    best_dy = int(round(float(np.interp(s, pp["psts"], pp["pdy"]))))
+                else:
+                    best_dy = _deck_dy(s, pp["total"], pp["startS"], pp["endS"],
+                                       pp["rise_full"], pp["min_deck"])
+        return best_dy, best_d2
+
+    for ch in chains:
+        if not any(_is_link(i) for (i, _) in ch):
+            continue
+        mpts = _build_mpts(ch)
+        if len(mpts) < 2:
+            continue
+        rise_full, half_w, rc, min_deck = _chain_attrs(ch)
+        dy0, d0 = _parent_at(mpts[0])
+        dy1, d1 = _parent_at(mpts[-1])
+        head_ext = tail_ext = 0.0
+        if dy0 is not None and (dy1 is None or d0 <= d1):
+            startS = dy0                              # 接続端=派生元の橋の高さ（延長しない）
+            mpts, tail_ext, endS = _ext_tail(mpts)
+        elif dy1 is not None:
+            endS = dy1
+            mpts, head_ext, startS = _ext_head(mpts)
+        else:                                         # 本線未接続: 通常チェーン同様に両端延長
+            mpts, head_ext, startS = _ext_head(mpts)
+            mpts, tail_ext, endS = _ext_tail(mpts)
+        _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc, head_ext, tail_ext)
+        if _BDBG or _BDUMP:
+            _sl = _seglens(mpts); _tot = sum(_sl)
+            if _BDBG:
+                _pr = [_deck_dy(s, _tot, startS, endS, rise_full, min_deck)
+                       for s in np.linspace(0, _tot, 11)]
+                _stp = max(abs(_pr[k + 1] - _pr[k]) for k in range(len(_pr) - 1)) if _tot else 0
+                print(f"[bridge] RAMP ways={[i for i,_ in ch]} L={_tot:.0f}b "
+                      f"startS={startS} endS={endS} head_ext={head_ext:.0f} "
+                      f"tail_ext={tail_ext:.0f} maxstep={_stp:.0f} dy@={_pr}")
+            if _BDUMP:
+                _dump_recs.append(_chain_profile(mpts, _sl, startS, endS, rise_full,
+                                                 min_deck, "ramp"))
+    if _BDUMP and _dump_recs:
+        np.savez(_BDUMP, recs=np.array(_dump_recs, dtype=object))
+        print(f"[bridge] dumped {len(_dump_recs)} chains → {_BDUMP}")
+    return ymax[0]
+
+
+def add_tunnel_blocks(blocks, tunnels, patch_bbox_latlon, nz, nx, *,
+                      y_surf_land, h_res_block_m, surf_block=None, sea_mask=None,
+                      road_mask=None,
+                      floor_key="gray_concrete", base_key="stone",
+                      light_key="sea_lantern", line_key="white_concrete") -> int:
+    """OSM トンネル（tunnel=yes の highway/railway polyline）を地形に刳り貫いて生成。
+    橋の逆処理: 両坑口の道路高を線形補間した床高に、道路幅×アーチ断面の空気トンネルを
+    掘る（=air を後勝ちで上書き）。全長を密閉(床+路盤+アーチ天井(石2厚)+壁(石2厚)+灯り)、
+    路面に白線。上の地表に写り込んだ道路色を周囲色で消す(#4)。坑口の手前 EXT block を延長
+    し道路との障害物を除去(#3)、ただし交叉点に当たる手前で止める。床傾斜は範囲外含む全way端
+    で決める(#5)。延長部も壁・天井で密閉。返り値: 触れた最大 y。
+    """
+    import math
+    WALL_H = 4                      # アーチの直壁部の高さ(block)
+    CLEAR = 8                       # アーチ頂部(中央)の内空高(block)
+    EXT = 20                        # 坑口より手前へ延長する長さ(block, 交叉点手前で短縮)
+    SHELL = 2                       # 壁・天井・路盤の厚さ(block)
+    seen: set = set()
+    seen_light: set = set()
+    ymax = [0]
+    ROADISH = {"andesite", "gray_concrete", "light_gray_concrete", "stone", "smooth_stone",
+               "black_concrete", "cyan_concrete", "polished_andesite", "gravel", "cobblestone"}
+
+    def put(ix, iy, iz, key):
+        if not (0 <= ix < nx and 0 <= iz < nz) or iy < 0 or iy > 500:
+            return
+        k = (ix, iy, iz)
+        if k in seen:
+            return
+        seen.add(k)
+        if key != "air" and iy > ymax[0]:
+            ymax[0] = iy
+        blocks.append(nbtlib.Compound({
+            "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(iy), nbtlib.Int(iz)]),
+            "state": block_id(key),
+        }))
+
+    def col(x, z):
+        return int(round(x)), int(round(z))
+
+    def terr(x, z):
+        i, j = col(x, z)
+        if 0 <= j < nz and 0 <= i < nx and np.isfinite(y_surf_land[j, i]):
+            return int(y_surf_land[j, i])
+        return None
+
+    def arch_h(w, half_w):
+        # 断面: |w|=0で CLEAR、端で WALL_H の半楕円アーチ天井高
+        if half_w <= 0:
+            return CLEAR
+        r = min(1.0, abs(w) / (half_w + 1e-9))
+        return WALL_H + int(round((CLEAR - WALL_H) * math.sqrt(max(0.0, 1.0 - r * r))))
+
+    def fill_color(cx, cz, ox, oz, half_w):
+        # 地表補完色: 走廊の外側を探索し道路灰色(ROADISH)でない自然色を優先（橋の _fill_color 相当）
+        if surf_block is None:
+            return None
+        fb = None
+        for off in range(half_w + 2, half_w + 12):
+            for sgn in (1, -1):
+                i, j = col(cx + ox * off * sgn, cz + oz * off * sgn)
+                if not (0 <= j < nz and 0 <= i < nx):
+                    continue
+                sk = surf_block[j, i]
+                if not sk or sk == "water" or (sea_mask is not None and sea_mask[j, i]):
+                    continue
+                if sk not in ROADISH:
+                    return sk
+                if fb is None:
+                    fb = sk
+        return fb
+
+    def portal_floor(end_pt, in_pt):
+        # 坑口側(トンネル外=道路側)へ 0..8 block の地形高 min（=道路/谷床）を床高に
+        dx, dz = end_pt[0] - in_pt[0], end_pt[1] - in_pt[1]
+        L = math.hypot(dx, dz)
+        if L > 1e-6:
+            dx, dz = dx / L, dz / L
+        ys = [h for d in range(0, 9)
+              if (h := terr(end_pt[0] + dx * d, end_pt[1] + dz * d)) is not None]
+        if ys:
+            return int(min(ys))
+        t0 = terr(*end_pt)
+        return t0 if t0 is not None else 1
+
+    def end_floor(pts, from_start):
+        # #5: 範囲外を含む全way端から、その端方向で最初に in-grid となる点で床高を採る
+        rng = range(len(pts)) if from_start else range(len(pts) - 1, -1, -1)
+        for i in rng:
+            if terr(*pts[i]) is not None:
+                inn = (pts[i + 1] if from_start and i + 1 < len(pts)
+                       else pts[i - 1] if not from_start and i - 1 >= 0 else pts[i])
+                return portal_floor(pts[i], inn)
+        return 1
+
+    def udir(a, b):
+        dx, dz = b[0] - a[0], b[1] - a[1]
+        L = math.hypot(dx, dz)
+        return (dx / L, dz / L) if L > 1e-6 else (0.0, 0.0)
+
+    def safe_ext_len(end_pt, dx, dz, half_w):
+        # 坑口外側へ d=1..EXT 進め、走廊の**両側**(法線 half_w+2..+7 の左右どちらにも)に道路が
+        # ある地点=横断路(交叉点)の手前で停止する。自路の直進継続や片側のみの並走車線では
+        # 止めない(片側だけの検出は無視)。これが無いと坑口直近で常時0になり延長が効かない。
+        if road_mask is None:
+            return EXT
+        ox, oz = -dz, dx
+        for d in range(1, EXT + 1):
+            px, pz = end_pt[0] + dx * d, end_pt[1] + dz * d
+            sides = 0
+            for side in (1, -1):
+                # 自路(半幅±half_w)より遠い側方のみ見る＝横断路だけが当たる
+                for off in range(half_w + 9, half_w + 16):
+                    i, j = col(px + ox * off * side, pz + oz * off * side)
+                    if 0 <= j < nz and 0 <= i < nx and road_mask[j, i]:
+                        sides += 1
+                        break
+            if sides == 2:                  # 左右両側遠方に道路 = 横断路(交叉点)
+                return max(0, d - 3)         # 交叉点の少し手前で止める
+        return EXT
+
+    def is_line(w, ostat, half_w):
+        # 路面の白線（てきとうに）: 中央=破線(車線分離), 端寄り=実線(車道外側線)
+        if w == 0:
+            return (int(round(ostat)) // 3) % 2 == 0
+        return half_w >= 3 and abs(w) == half_w - 1
+
+    def open_approach(start_pt, dx, dz, fy_start, half_w):
+        # 密閉延長の端から外側へ「開削」(壁/天井なし)して地表道路へ接続する。
+        # 坑口を出た先〜道路の間に残る地形コブ(=道路との障害物)を路面＋頭上クリア
+        # ランス分だけ air で除去し、床を1block/blockで地表(道路面)へ擦り付ける。
+        # 中央列が地表道路(road_mask)に達したらそこで打ち切り(交叉点の手前まで掘る)。
+        ox, oz = -dz, dx
+        fy_prev = fy_start
+        appr = min(EXT, 16)                  # 開削は密閉延長端→地表道路の最終接続のみ(短く)
+        for d in range(1, appr + 1):
+            cx, cz = start_pt[0] + dx * d, start_pt[1] + dz * d
+            tc = terr(cx, cz)
+            if tc is None:
+                break
+            fy = min(fy_prev + 1, tc) if tc > fy_prev else tc   # ≤45°で地表へ擦り上げ/下げ
+            fy_prev = fy
+            clear_top = max(tc, fy + CLEAR)
+            ci, cj = col(cx, cz)
+            on_road = (road_mask is not None and 0 <= cj < nz and 0 <= ci < nx
+                       and bool(road_mask[cj, ci]))
+            for w in range(-half_w, half_w + 1):
+                wx, wz = cx + ox * w, cz + oz * w
+                ix, iz = col(wx, wz)
+                put(ix, fy, iz, line_key if is_line(w, d, half_w) else floor_key)
+                put(ix, fy - 1, iz, base_key)
+                twc = terr(wx, wz)
+                yb = fy - 2
+                while twc is not None and yb > twc and yb > fy - 10:
+                    put(ix, yb, iz, base_key)
+                    yb -= 1
+                for yy in range(fy + 1, clear_top + 1):
+                    put(ix, yy, iz, "air")          # 頭上の地形コブを除去（天井なし＝開削）
+            if on_road:
+                break
+
+    n_t = 0
+    for b in tunnels:
+        pts = [_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, nz, nx) for la, lo in b["coords"]]
+        if len(pts) < 2:
+            continue
+        _wm = float(b.get("width_m") or 5.5)
+        if "link" in (b.get("highway") or ""):
+            _wm = min(_wm, 5.5)
+        half_w = max(1, int(round((_wm / max(h_res_block_m, 0.1)) / 2.0)))
+        seg0 = [math.hypot(b1[0] - a1[0], b1[1] - a1[1]) for a1, b1 in zip(pts, pts[1:])]
+        total = sum(seg0)
+        if total < 2.0:
+            continue
+        # トンネル長に応じて天井高/延長を可変化（短い=低天井(≈アーチ化前の高さ)・延長ほぼ無し,
+        # 長い=高アーチ・延長大）。WALL_H/CLEAR/EXT を再代入＝閉包(arch_h/safe_ext_len/
+        # open_approach)が呼出時にこの値を参照する。
+        Lm = total * h_res_block_m                          # トンネル長[m]
+        CLEAR = int(min(9, max(5, round(4.0 + Lm / 80.0)))) # 内空頂高: 短~5(≈アーチ前) → 長~8-9
+        WALL_H = min(4, CLEAR - 1)                          # 直壁高(=端の内空高)
+        EXT = int(min(70, max(1, round((Lm - 30.0) / 6.0)))) # 延長: 短~1-2(ほぼ無) → 長~50-55
+        f0 = end_floor(pts, True)
+        f1 = end_floor(pts, False)
+        # #3: 両端を延長（交叉点手前で短縮）。延長部も壁・天井で密閉。station は元始点基準。
+        d0 = udir(pts[1], pts[0]); d1 = udir(pts[-2], pts[-1])
+        head_len = safe_ext_len(pts[0], d0[0], d0[1], half_w)
+        tail_len = safe_ext_len(pts[-1], d1[0], d1[1], half_w)
+        head = (pts[0][0] + d0[0] * head_len, pts[0][1] + d0[1] * head_len)
+        tail = (pts[-1][0] + d1[0] * tail_len, pts[-1][1] + d1[1] * tail_len)
+        epts = [head] + pts + [tail]
+        seg = [math.hypot(b1[0] - a1[0], b1[1] - a1[1]) for a1, b1 in zip(epts, epts[1:])]
+        n_t += 1
+        s_acc = 0.0
+        for si in range(len(seg)):
+            (x0, z0), (x1, z1) = epts[si], epts[si + 1]
+            L = seg[si]
+            if L < 1e-6:
+                continue
+            tx, tz = (x1 - x0) / L, (z1 - z0) / L
+            ox, oz = -tz, tx
+            n = max(1, int(L / 0.5))
+            for k in range(n + 1):
+                t = k / n
+                cx, cz = x0 + (x1 - x0) * t, z0 + (z1 - z0) * t
+                ostat = (s_acc + L * t) - head_len      # 元始点基準の station（延長部は負/total超）
+                fy = (int(round(f0 + (f1 - f0) * (ostat / total)))
+                      if total > 1e-6 else f0)
+                tc = terr(cx, cz)
+                if tc is None:
+                    continue
+                # 被覆判定: コア(OSMトンネル本体, 0≤ostat≤total)は tunnel=yes なので常に密閉。
+                # 延長部(ostat<0 / >total)のみ「地形が天井より上なら密閉, 地表に出たら開削」。
+                # これで長い延長が山を抜け開けた地面に出る区間は浮いた箱にならず開削化する。
+                in_core = -1e-6 <= ostat <= total + 1e-6
+                covered = in_core or (tc > fy + CLEAR + SHELL)
+                for w in range(-half_w, half_w + 1):
+                    ix, iz = col(cx + ox * w, cz + oz * w)
+                    # 路面（白線 or 路盤色）＋路盤(SHELL厚)＋地表が床より低い延長部は床下を石で支持
+                    put(ix, fy, iz, line_key if is_line(w, ostat, half_w) else floor_key)
+                    for s in range(1, SHELL + 1):
+                        put(ix, fy - s, iz, base_key)
+                    yb = fy - SHELL - 1
+                    while yb > tc and yb > fy - 12:
+                        put(ix, yb, iz, base_key)
+                        yb -= 1
+                    ah = arch_h(w, half_w)
+                    if covered:
+                        for yy in range(fy + 1, fy + ah + 1):
+                            put(ix, yy, iz, "air")           # 内空をアーチ状に刳り貫く
+                        for s in range(1, SHELL + 1):
+                            put(ix, fy + ah + s, iz, base_key)   # アーチ天井(SHELL厚)
+                    else:
+                        # 開削: 路面上〜地表まで空に(頭上の地形コブ除去, 天井なし)
+                        twc = terr(cx + ox * w, cz + oz * w)
+                        top = max(fy + ah, twc if twc is not None else fy + ah)
+                        for yy in range(fy + 1, top + 1):
+                            put(ix, yy, iz, "air")
+                if covered:
+                    # 壁(両側 SHELL厚)を床下〜天井上まで石で密閉
+                    for w in [(-half_w - s) for s in range(1, SHELL + 1)] + \
+                             [(half_w + s) for s in range(1, SHELL + 1)]:
+                        ix, iz = col(cx + ox * w, cz + oz * w)
+                        for yy in range(fy - SHELL, fy + CLEAR + SHELL + 1):
+                            put(ix, yy, iz, base_key)
+                # #4: トンネル上に地形(山)がある被覆部は、地表トップの道路色を周囲色で消す
+                if tc > fy + CLEAR + SHELL + 1:
+                    fc = fill_color(cx, cz, ox, oz, half_w)
+                    if fc is not None:
+                        for w in range(-half_w, half_w + 1):
+                            ty = terr(cx + ox * w, cz + oz * w)
+                            if ty is not None and ty > fy + arch_h(w, half_w) + SHELL:
+                                ix, iz = col(cx + ox * w, cz + oz * w)
+                                put(ix, ty, iz, fc)
+                # 照明: 刳り貫き後に直接配置(last-winsでairを上書き; put/seenだと隣接サンプルのairに先取り
+                #       されて消えるため)。天井直下中央に一定間隔。被覆(密閉)部のみ。
+                if covered and int(round(ostat)) % 6 == 0:
+                    ix, iz = col(cx, cz)
+                    ly = fy + CLEAR
+                    if 0 <= ix < nx and 0 <= iz < nz and (ix, ly, iz) not in seen_light:
+                        seen_light.add((ix, ly, iz))
+                        blocks.append(nbtlib.Compound({
+                            "pos": nbtlib.List[nbtlib.Int](
+                                [nbtlib.Int(ix), nbtlib.Int(ly), nbtlib.Int(iz)]),
+                            "state": block_id(light_key)}))
+            s_acc += L
+        # #3b: 密閉延長端から地表道路まで開削して接続（坑口外の障害物を除去）
+        fy_h = (int(round(f0 + (f1 - f0) * (-head_len / total))) if total > 1e-6 else f0)
+        fy_t = (int(round(f0 + (f1 - f0) * ((total + tail_len) / total))) if total > 1e-6 else f0)
+        open_approach(head, d0[0], d0[1], fy_h, half_w)
+        open_approach(tail, d1[0], d1[1], fy_t, half_w)
+    if n_t:
+        print(f"  [tunnel] OSMトンネル {n_t} 本を密閉刳り貫き (内空頂高/延長は長さ依存:"
+              f"短5block・ほぼ延長無→長8-9block・延長~40, 壁天井{SHELL}厚, "
+              f"交叉点手前で停止, 白線+照明+地表道路消去)")
     return ymax[0]
 
 
@@ -1020,20 +2074,25 @@ def dem_to_blocks_enhanced(
     building_id: np.ndarray | None = None,
     building_wall_keys: list | None = None,
     building_roof_keys: list | None = None,
+    building_roof_solid: list | None = None,   # 建物 id → 屋根を型単色にしオルソ焼込無効
     roof_color_tol: float = 55.0,
     color_building_roofs: bool = False,
+    terrain_skirt_cells: int = 0,   # >0: ワールド外周この幅を斜面で下ろし境界の崖を無くす(単一タイル前提)
     wall_block: str = "white_concrete",
     window_block: str = "glass",
     floor_height: int = 5,
     floor_block: str = "light_gray_concrete",
     interior_light: str = "sea_lantern",
     building_style_keys: list | None = None,
+    building_facade_by_id: list | None = None,    # 建物 id → 外壁装飾スペック(アーキタイプ由来)
     hollow_buildings: bool = True,
     legend_layer: bool = False,
     surface_grid_override: np.ndarray | None = None,
     bridges: list | None = None,
+    tunnels: list | None = None,
     powerlines: list | None = None,
     power_towers: list | None = None,
+    rails: list | None = None,
     parkings: list | None = None,
     ortho_rgb: np.ndarray | None = None,
     patch_bbox_latlon: tuple | None = None,
@@ -1146,6 +2205,18 @@ def dem_to_blocks_enhanced(
     # 陸地表 y（最低 1）。凡例有効時は _lift 持ち上げ
     elev_land = np.where(np.isnan(dem_ds), 0.0, dem_ds)
     y_surf_land = np.maximum(1, (elev_land * scale_land).astype(int)) + _lift
+    # terrain skirt: ワールド外周 N セルを端に向け斜面で下ろし、境界の垂直な崖を無くす。
+    #   単一タイル(campus)前提＝dem_ds の外周がそのままワールド端。--tiles 併用時は継ぎ目にも
+    #   斜面が出るため使わないこと。陸セルのみ対象(海/水面は既に傾斜)。
+    if terrain_skirt_cells and terrain_skirt_cells > 0:
+        _N = int(terrain_skirt_cells)
+        _dz = np.minimum(np.arange(nz), nz - 1 - np.arange(nz))[:, None]
+        _dx = np.minimum(np.arange(nx), nx - 1 - np.arange(nx))[None, :]
+        _d = np.minimum(_dz, _dx)                       # 最寄り端までのセル距離
+        _frac = np.clip(_d / float(_N), 0.0, 1.0)
+        _y_skirt = (_lift + (y_surf_land - _lift) * _frac).round().astype(y_surf_land.dtype)
+        _inzone = (_d < _N) & land_mask
+        y_surf_land = np.where(_inzone, np.minimum(y_surf_land, _y_skirt), y_surf_land)
     # 海面 y（sea_level + 1 が水面ブロック）。地盤柱の起点として使う海底 y は sea - depth
     y_sea_surface = max(1, int((sea_level_m + 1.0) * scale_sea)) + _lift
     y_sea_floor   = (np.maximum(0.0, sea_level_m - ocean_depth) * scale_sea).astype(int)
@@ -1201,6 +2272,14 @@ def dem_to_blocks_enhanced(
     # 駐車場(OSM amenity=parking)を先に描く。道路をこの後に上書きすることで「領域競合=道路優先」
     # （駐車場は粒度が粗いので、駐車場内でも道路の安山岩/砂利を生成する）。オルソ有=写真アスファルト色を
     # 残し行ベースライン/境界を合成、無=black_concrete。車は立体化せず色のみ。
+    # オルソRGBを surf_block 解像度(nz,nx)へ整合（駐車場と屋根色集約で共用）
+    _ortho_ds = ortho_rgb
+    if _ortho_ds is not None and _ortho_ds.shape[:2] != (nz, nx):
+        if _ortho_ds.shape[:2] == dem_patch.shape:
+            _ortho_ds = _ortho_ds[:nz * factor, :nx * factor].reshape(
+                nz, factor, nx, factor, 3)[:, factor // 2, :, factor // 2]
+        else:
+            _ortho_ds = None
     _parking_cars = []
     parking_area = None
     parking_boundary = None
@@ -1208,19 +2287,11 @@ def dem_to_blocks_enhanced(
     _pk_boundary_key = "gray_concrete"   # 駐車場境界線の色（render_parking の boundary_key と一致）
     if parkings and patch_bbox_latlon is not None:
         from parking_render import render_parking
-        # ortho_rgb を surf_block 解像度(nz,nx)へ整合（surface_grid_override と同じ factor 間引き）
-        _orgb = ortho_rgb
-        if _orgb is not None and _orgb.shape[:2] != (nz, nx):
-            if _orgb.shape[:2] == dem_patch.shape:
-                _orgb = _orgb[:nz * factor, :nx * factor].reshape(
-                    nz, factor, nx, factor, 3)[:, factor // 2, :, factor // 2]
-            else:
-                _orgb = None
         land_for_pk = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
         _parking_cars, parking_area, parking_boundary = render_parking(
             parkings, patch_bbox_latlon, nz, nx,
             surf_block=surf_block, y_surf_land=y_surf_land, land_mask=land_for_pk,
-            ortho_rgb=_orgb, h_res_block_m=h_res_block, boundary_key=_pk_boundary_key,
+            ortho_rgb=_ortho_ds, h_res_block_m=h_res_block, boundary_key=_pk_boundary_key,
         )
 
     # 道路を地表に上書き（陸セルのみ）。RdEdg=道路縁バッファなので「左右2本の帯＋中央オルソ」。
@@ -1419,6 +2490,9 @@ def dem_to_blocks_enhanced(
         #     RGB 距離 roof_color_tol 以内（=同系統の濃淡）はセルの色を残し、外れ色
         #     （木の緑・隣家の別色など speckle）だけ代表色へスナップする。
         #     color_building_roofs 無効/未集約は type 由来の屋根キー（単色）。
+        def _roof_solid(_id):      # その棟が「屋根を型単色・オルソ非焼込」指定か
+            return bool(building_roof_solid is not None
+                        and 0 <= _id < len(building_roof_solid) and building_roof_solid[_id])
         roof_by_id = None          # 各建物の代表屋根キー
         roof_dom_rgb = None        # 代表屋根キーの RGB（同系統判定用）
         if building_id is not None and building_roof_keys is not None:
@@ -1427,13 +2501,30 @@ def dem_to_blocks_enhanced(
                 from collections import Counter
                 from block_palette import BLOCKS as _BP
                 bsel = (building_id >= 0) & building_mask & land_mask
-                acc: dict[int, Counter] = {}
-                for _id, _c in zip(building_id[bsel].tolist(),
-                                   np.asarray(surf_block)[bsel].tolist()):
-                    acc.setdefault(_id, Counter())[_c] += 1
-                for _id, c in acc.items():
-                    if 0 <= _id < len(roof_by_id):
-                        roof_by_id[_id] = c.most_common(1)[0][0]
+                if _ortho_ds is not None and _ortho_ds.shape[:2] == surf_block.shape:
+                    # 屋根色: footprint の生オルソ平均RGBを増彩度マッチ(水色/黄緑の色落ち対策)。
+                    # surf_block の最頻ブロック(=通常彩度マッチ)だと淡い青タイル/黄緑屋根がグレーに落ちる。
+                    from ortho_surface import classify_rgb_to_palette_saturated as _csat
+                    ids = building_id[bsel]
+                    cols = _ortho_ds[bsel].astype(np.float64)
+                    nb = len(roof_by_id)
+                    rgb_sum = np.zeros((nb, 3)); cnt = np.zeros(nb)
+                    np.add.at(rgb_sum, ids, cols); np.add.at(cnt, ids, 1)
+                    have = cnt > 0
+                    mean_rgb = np.zeros((nb, 3), np.uint8)
+                    mean_rgb[have] = (rgb_sum[have] / cnt[have, None]).round().astype(np.uint8)
+                    matched = _csat(mean_rgb.reshape(1, nb, 3)).reshape(nb)
+                    for _id in range(nb):
+                        if have[_id] and not _roof_solid(_id):   # 新設建物はオルソを焼かず型単色を保持
+                            roof_by_id[_id] = str(matched[_id])
+                else:
+                    acc: dict[int, Counter] = {}
+                    for _id, _c in zip(building_id[bsel].tolist(),
+                                       np.asarray(surf_block)[bsel].tolist()):
+                        acc.setdefault(_id, Counter())[_c] += 1
+                    for _id, c in acc.items():
+                        if 0 <= _id < len(roof_by_id) and not _roof_solid(_id):
+                            roof_by_id[_id] = c.most_common(1)[0][0]
                 roof_dom_rgb = [(_BP[k][1] if k in _BP else (128, 128, 128))
                                 for k in roof_by_id]
         _tol2 = float(roof_color_tol) * float(roof_color_tol)
@@ -1442,10 +2533,14 @@ def dem_to_blocks_enhanced(
         # ── 連絡通路(渡り廊下)の検出と 1F 抜き ──
         #   FGD道路バッファは広場/駐車場まで含み広大で、「道路がfootprintに重なる」だけでは普通の道路脇
         #   建物まで誤検出する(9基準で検証済・分離不可)。実際の連絡通路は『2棟の建物を繋ぐ細長い渡り廊下を
-        #   道路が貫く』形状。そこで次の3条件で検出する:
+        #   道路が貫く』形状。そこで次の4条件で検出する:
         #     (1) 細長い         : footprint座標のPCA主軸/副軸比 >= 2.2
         #     (2) 橋渡し         : 膨張2セルで隣接する別建物が 2 種以上(行き止まり/単独棟を排除)
         #     (3) 道路が貫く     : footprint ∩ 塗り潰し道路 >= 10 セル
+        #     (4) 道路被覆率高い : (footprint∩道路)/footprint >= 0.37
+        #         ＝渡り廊下は床の大半を道路が占める。端をかすめるだけの大建物(rib/nfp≤0.22)を排除。
+        #         南部bboxで真の3棟は 0.41/0.69/0.85, 過剰反応の大建物は ≤0.22 と明確に分離。0.37は
+        #         「3棟がギリギリ(0.41)認識できるより少しだけ余裕」を持たせた値(ユーザ指定)。
         #   検出した渡り廊下の footprint∩道路 の 1F を抜いて下を通れるようにする(上階は通路天井に残る)。
         tunnel_cells = None
         if (road_under_building and building_id is not None and _road_filled is not None
@@ -1454,6 +2549,9 @@ def dem_to_blocks_enhanced(
             tunnel_cells = np.zeros((nz, nx), bool)
             road_in_bld = _road_filled & building_mask
             _n_tunnel = 0
+            RIB_FRAC = 0.37          # (4) 道路被覆率の下限(端かすめ大建物の過剰検出を排除)
+            _dbg = bool(__import__("os").environ.get("TUNNEL_DEBUG"))
+            _dbg_rows = []
             _bids = np.unique(building_id[(building_id >= 0) & building_mask])
             for _b in _bids.tolist():
                 fp = (building_id == _b)
@@ -1461,8 +2559,19 @@ def dem_to_blocks_enhanced(
                 if nfp < 12:
                     continue
                 rib = road_in_bld & fp
-                if int(rib.sum()) < 10:
-                    continue                                  # 道路が貫いていない → 対象外
+                ribn = int(rib.sum())
+                if _dbg and ribn >= 1:
+                    ys2, xs2 = np.where(fp)
+                    pts = np.column_stack((ys2 - ys2.mean(), xs2 - xs2.mean())).astype(float)
+                    ev = np.sort(np.linalg.eigvalsh(np.cov(pts.T)))[::-1]
+                    pca_d = (ev[0] / max(float(ev[1]), 1e-6)) ** 0.5
+                    nb_d = _tdil(fp, iterations=2) & ~fp
+                    neigh_d = int(np.unique(building_id[nb_d & (building_id >= 0)]).size)
+                    cy, cx = float(ys2.mean()), float(xs2.mean())
+                    _dbg_rows.append((nfp, ribn, round(pca_d, 2), neigh_d,
+                                      round(ribn / max(nfp, 1), 2), int(cy), int(cx)))
+                if ribn < 10 or ribn < nfp * RIB_FRAC:
+                    continue              # 道路が貫いていない/被覆率低い(端かすめ大建物) → 対象外
                 ys2, xs2 = np.where(fp)                        # (1) 細長さ = PCA主軸/副軸
                 pts = np.column_stack((ys2 - ys2.mean(), xs2 - xs2.mean())).astype(float)
                 ev = np.sort(np.linalg.eigvalsh(np.cov(pts.T)))[::-1]
@@ -1475,6 +2584,14 @@ def dem_to_blocks_enhanced(
                     continue                                  # 行き止まり/単独棟 → 対象外
                 tunnel_cells |= rib
                 _n_tunnel += 1
+            if _dbg:
+                print(f"  [連絡通路-DBG] 候補(nfp>=12 & road接触) {len(_dbg_rows)}件 "
+                      f"[nfp, rib, pca, neigh, rib/nfp, cz, cx] (rib降順):")
+                for r in sorted(_dbg_rows, key=lambda t: -t[1]):
+                    _pass = (r[1] >= 10 and r[1] >= r[0] * RIB_FRAC
+                             and r[2] >= 2.2 and r[3] >= 2)
+                    print(f"      {'PASS' if _pass else 'rej '} nfp={r[0]:4d} rib={r[1]:3d} "
+                          f"pca={r[2]:5.2f} neigh={r[3]} rib/nfp={r[4]:.2f} @z{r[5]},x{r[6]}")
             if _n_tunnel:
                 print(f"  [連絡通路] 渡り廊下(細長×2棟橋渡し×道路貫通)を {_n_tunnel}棟検出し1Fを抜いて通路化 "
                       f"({int(tunnel_cells.sum())} cells)")
@@ -1493,7 +2610,7 @@ def dem_to_blocks_enhanced(
             ceil_y = y_base + int(eave_blocks_by_bid.get(bid_c, bh_blocks))   # 軒高（上は中実の屋根）
             if top_y > b_max_y:
                 b_max_y = top_y
-            if roof_dom_rgb is not None and 0 <= bid_c < len(roof_by_id):
+            if roof_dom_rgb is not None and 0 <= bid_c < len(roof_by_id) and not _roof_solid(bid_c):
                 # color_building_roofs 経路: 同系統の濃淡は残し、外れ色だけ代表色へ
                 cell_k = surf_block[j, i_]
                 dom_k = roof_by_id[bid_c]
@@ -1518,6 +2635,21 @@ def dem_to_blocks_enhanced(
             style = (building_style_keys[bid_c]
                      if (building_style_keys is not None and 0 <= bid_c < len(building_style_keys))
                      else "house")
+            # アーキタイプ由来の外壁装飾スペック(trim=角柱/帯, win=窓材, parapet, 店頭, 床帯)
+            fac = (building_facade_by_id[bid_c]
+                   if (building_facade_by_id is not None and 0 <= bid_c < len(building_facade_by_id))
+                   else None)
+            trim_kind = fac["trim"] if fac else wall_kind
+            win_kind = fac["window"] if fac else window_block
+            shopfront = bool(fac["shopfront"]) if fac else False
+            floor_band = bool(fac["floor_band"]) if fac else False
+            parapet_n = int(fac["parapet"]) if fac else 0
+            # 屋根色(オルソ)を壁に反映: 暖色屋根の戸建は暖色壁へ(色も種別の代理特徴=ユーザ方針)
+            if (fac and style == "wood_house" and roof_dom_rgb is not None
+                    and 0 <= bid_c < len(roof_dom_rgb) and roof_dom_rgb[bid_c] is not None):
+                _rr = roof_dom_rgb[bid_c]
+                if _rr[0] > _rr[2] + 18:                      # R≫B = 暖色屋根
+                    wall_kind = "sandstone"
             is_wall = bool(wall_cell[j, i_])
             is_corner = bool(corner_cell[j, i_])
             is_door = bool(door_cell[j, i_])
@@ -1525,13 +2657,19 @@ def dem_to_blocks_enhanced(
             attic = hollow_buildings and (ceil_y < top_y)        # 寄棟で軒より上に屋根裏がある棟
             # 連絡通路セル: この棟の下を道路がくぐる位置。1F(y_base+1..y_base+fh)を抜いて通路化する。
             tunnel_here = bool(tunnel_cells[j, i_]) if tunnel_cells is not None else False
-            # 基礎: 地盤(y_top)から基準面(y_base)まで壁材で充填（傾斜地の段差を塞ぐ）。通路下は塞がない。
+            # 基礎: 地盤(y_top)から基準面の1つ下(y_base-1)まで壁材で充填（傾斜地の段差を塞ぐ）。
+            # y_base = 1F の床面: 室内=床材を敷き(地表オルソが室内に透けるのを防ぐ)、壁直下=壁材。
+            # 通路下(連絡通路)は塞がず道路を露出させ通れるようにする。
             if not tunnel_here:
-                for fy in range(y_top + 1, y_base + 1):
+                for fy in range(y_top + 1, y_base):
                     blocks.append(nbtlib.Compound({
                         "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(fy), nbtlib.Int(bz_v)]),
                         "state": block_id(wall_kind),
                     }))
+                blocks.append(nbtlib.Compound({
+                    "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(y_base), nbtlib.Int(bz_v)]),
+                    "state": block_id(wall_kind if bool(wall_cell[j, i_]) else floor_block),
+                }))
             for fy in range(y_base + 1, top_y + 1):
                 # 連絡通路: 1F分(y_base+fh まで)はブロックを置かず空ける。2Fの床スラブ以上は残し通路の天井に。
                 if tunnel_here and fy <= y_base + fh:
@@ -1544,16 +2682,27 @@ def dem_to_blocks_enhanced(
                 elif attic and fy > ceil_y:
                     kind = roof_kind                                      # 軒より上＝屋根裏を中実化(筒抜け防止)
                 elif is_slab or (attic and fy == ceil_y):
-                    # 各階の床 / 軒の天井（全 footprint）。疎な内側格子は天井灯
-                    kind = interior_light if (not is_wall and light_here) else floor_block
+                    # 各階の床 / 軒の天井（全 footprint）。外壁の床ラインは帯/角柱(arnis風)、内側は床/灯
+                    if is_wall and (is_corner or floor_band):
+                        kind = trim_kind                                 # 角柱(quoin) or 床ライン帯
+                    else:
+                        kind = interior_light if (not is_wall and light_here) else floor_block
                 elif not hollow_buildings:
-                    kind = window_block if (r == 2 and fy < top_y - 1) else wall_kind  # 旧ソリッド
+                    kind = win_kind if (r == 2 and fy < top_y - 1) else wall_kind  # 旧ソリッド
                 elif is_wall:
                     if is_door and fy <= y_base + 2:
                         continue                                         # 出入口（接地2マス開口）
-                    _run = bz_v if wall_x[j, i_] else bx_v                # 壁の走る向きに沿って窓を間引く
-                    kind = (window_block if (not is_corner and _is_window(style, r, fh, _run))
-                            else wall_kind)                              # ガラス窓 or 壁
+                    if is_corner:
+                        kind = trim_kind                                 # 角柱(quoin)で縦の陰影
+                    else:
+                        _run = bz_v if wall_x[j, i_] else bx_v            # 壁の走る向きに沿って窓を間引く
+                        _ground = (fy <= y_base + fh)                    # 1F(地上階)
+                        if shopfront and _ground and r != 0:
+                            kind = win_kind if (_run % 2 == 0) else wall_kind   # 店頭=広いガラス面
+                        elif _is_window(style, r, fh, _run):
+                            kind = win_kind                              # 窓(アーキタイプ別パターン)
+                        else:
+                            kind = wall_kind
                 else:
                     # 内側＝空洞。平屋根の最上階だけ屋根下に灯を吊る
                     if light_here and fy == top_y - 1:
@@ -1564,6 +2713,15 @@ def dem_to_blocks_enhanced(
                     "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(fy), nbtlib.Int(bz_v)]),
                     "state": block_id(kind),
                 }))
+            # parapet(陸屋根の外周を屋根上に1〜2段立ち上げる。勾配屋根=attic の棟は対象外)
+            if parapet_n > 0 and is_wall and not attic and not tunnel_here:
+                for _pz in range(1, parapet_n + 1):
+                    _pk = trim_kind if _pz == parapet_n else wall_kind   # 最上段=トリムで笠木風
+                    blocks.append(nbtlib.Compound({
+                        "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v),
+                                                          nbtlib.Int(top_y + _pz), nbtlib.Int(bz_v)]),
+                        "state": block_id(_pk),
+                    }))
             # 軒(庇): 屋根レベルを footprint 外1ブロックに張り出す（壁より屋根が出る家らしさ）
             for di, dj in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 ni, nj = i_ + di, j + dj
@@ -1683,8 +2841,21 @@ def dem_to_blocks_enhanced(
             y_sea_surface=y_sea_surface, y_sea_floor=y_sea_floor,
             scale_land=scale_land, h_res_block_m=h_res_block,
             surf_block=surf_block, y_flood_top=y_flood_top,
+            road_mask=(road_mask if (road_mask is not None
+                       and road_mask.shape == (nz, nx)) else None),
         )
         max_y = max(max_y, bridge_ymax + 2)
+
+    # --- トンネル（OSM tunnel=yes）。地形を刳り貫く。地表構築後・橋の後に処理 ---
+    if tunnels and patch_bbox_latlon is not None:
+        tunnel_ymax = add_tunnel_blocks(
+            blocks, tunnels, patch_bbox_latlon, nz, nx,
+            y_surf_land=y_surf_land, h_res_block_m=h_res_block,
+            surf_block=surf_block, sea_mask=sea_mask,
+            road_mask=(road_mask if (road_mask is not None
+                       and road_mask.shape == (nz, nx)) else None),
+        )
+        max_y = max(max_y, tunnel_ymax + 2)
 
     # --- 送電線・鉄塔（OSM power=line/tower）。橋の後に立体化 ---
     if (powerlines or power_towers) and patch_bbox_latlon is not None:
@@ -1693,6 +2864,14 @@ def dem_to_blocks_enhanced(
             y_surf_land=y_surf_land, sea_mask=sea_mask, scale_land=scale_land,
         )
         max_y = max(max_y, power_ymax + 2)
+
+    # --- 鉄道（FG-GML RailCL）。道床＋枕木＋レールを地表敷設 ---
+    if rails and patch_bbox_latlon is not None:
+        rail_ymax = add_rail_blocks(
+            blocks, rails, patch_bbox_latlon, nz, nx,
+            y_surf_land=y_surf_land, sea_mask=sea_mask,
+        )
+        max_y = max(max_y, rail_ymax + 2)
 
     # --- 駐車場の停車車両（オルソ検出）を 1 段持ち上げて配置 ---
     for (ix, iy, iz, key) in _parking_cars:

@@ -196,6 +196,77 @@ def fetch_mapzen_dem(
     }
 
 
+# GSI 標高タイル（航空レーザ測量・bare-earth, ログイン不要・全国被覆）。
+# layer="dem5a_png"(5m,〜z15) / "dem1a_png"(1m,〜z17)。ローカル DEM が無い/粗い域を online で補う。
+GSI_DEM_BASE = "https://cyberjapandata.gsi.go.jp/xyz"
+
+
+def fetch_gsi_dem_tile(z: int, x: int, y: int, layer: str = "dem5a_png",
+                       cache_dir: Path = DEFAULT_CACHE_DIR) -> np.ndarray:
+    """GSI 標高タイル(256×256)を取得し標高[m]を返す。無被覆(404)は全 NaN。
+    GSI 標高 PNG: v = R*2^16+G*2^8+B; v==2^23 → 無効, v<2^23 → v*0.01, else (v-2^24)*0.01。"""
+    tile_dir = cache_dir / layer / str(z) / str(x)
+    tile_path = tile_dir / f"{y}.png"
+    if not tile_path.exists():
+        url = f"{GSI_DEM_BASE}/{layer}/{z}/{x}/{y}.png"
+        try:
+            data = _http_get_with_retry(url)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return np.full((256, 256), np.nan, dtype=np.float32)  # 無被覆
+            raise
+        tile_dir.mkdir(parents=True, exist_ok=True)
+        tile_path.write_bytes(data)
+    img = Image.open(tile_path).convert("RGB")
+    arr = np.asarray(img, dtype=np.float64)
+    v = arr[..., 0] * 65536.0 + arr[..., 1] * 256.0 + arr[..., 2]
+    elev = np.where(v < 2**23, v, v - 2**24) * 0.01
+    elev[v == 2**23] = np.nan
+    return elev.astype(np.float32)
+
+
+def fetch_gsi_dem5a(
+    lat_min: float, lat_max: float,
+    lon_min: float, lon_max: float,
+    zoom: int = 15,
+    layer: str = "dem5a_png",
+    cache_dir: Path = DEFAULT_CACHE_DIR,
+    verbose: bool = True,
+) -> dict:
+    """BBOX をカバーする GSI 標高タイル(dem5a/dem1a)をモザイク化。戻り値は fetch_mapzen_dem と同形式。"""
+    tiles = tiles_for_bbox(lon_min, lat_min, lon_max, lat_max, zoom)
+    if not tiles:
+        raise ValueError(f"empty bbox: lat[{lat_min},{lat_max}] lon[{lon_min},{lon_max}]")
+    xs = sorted({x for x, _ in tiles}); ys = sorted({y for _, y in tiles})
+    nw_lon, nw_lat = tile_to_lonlat(xs[0], ys[0], zoom)
+    se_lon, se_lat = tile_to_lonlat(xs[-1] + 1, ys[-1] + 1, zoom)
+    ts = 256
+    H = (ys[-1] - ys[0] + 1) * ts; W = (xs[-1] - xs[0] + 1) * ts
+    mosaic = np.full((H, W), np.nan, dtype=np.float32)
+    if verbose:
+        print(f"[gsi:{layer}] zoom={zoom}  tiles={len(tiles)}  → mosaic {H}×{W}")
+    for i, (x, y) in enumerate(tiles, 1):
+        try:
+            tile = fetch_gsi_dem_tile(zoom, x, y, layer=layer, cache_dir=cache_dir)
+        except Exception as e:
+            if verbose:
+                print(f"  [warn] tile ({x},{y}) failed: {e}")
+            continue
+        r0 = (y - ys[0]) * ts; c0 = (x - xs[0]) * ts
+        mosaic[r0:r0 + ts, c0:c0 + ts] = tile
+        if verbose and (i % 8 == 0 or i == len(tiles)):
+            print(f"  [{i}/{len(tiles)}] tiles fetched")
+    res_lat = (nw_lat - se_lat) / H
+    res_lon = (se_lon - nw_lon) / W
+    return {
+        "dem": mosaic,
+        "lat_min": se_lat, "lat_max": nw_lat,
+        "lon_min": nw_lon, "lon_max": se_lon,
+        "res_lat": res_lat, "res_lon": res_lon,
+        "source": layer, "zoom": zoom,
+    }
+
+
 # ─────────────────────────────────────────────────────────────
 # GSI シームレス空中写真（オルソ RGB）取得
 # ─────────────────────────────────────────────────────────────
