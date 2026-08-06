@@ -118,9 +118,10 @@ class _Reader:
 
 
 def _scan(r):
-    """compound を1つ読み size/palette/blocks を返す。子 compound にあれば再帰探索
-    （入れ子ラッパー root→''/'root'→{size,palette,blocks} 形式に対応）。"""
-    size = names = arrays = None
+    """compound を1つ読み size/palette(names+props)/blocks を返す。子 compound にあれば再帰探索
+    （入れ子ラッパー root→''/'root'→{size,palette,blocks} 形式に対応）。
+    props は palette 各要素の Properties dict|None（litematic 復元で shape 等を保持するため）。"""
+    size = names = props = arrays = None
     while True:
         tid = r.u8()
         if tid == 0:
@@ -129,9 +130,9 @@ def _scan(r):
         if tid == 9 and nm == "size":
             r.u8(); n = r.i32(); size = [r.i32() for _ in range(n)]
         elif tid == 9 and nm == "palette":
-            r.u8(); n = r.i32(); pal = []
+            r.u8(); n = r.i32(); pal = []; palp = []
             for _ in range(n):
-                nm2 = None
+                nm2 = None; pr = None
                 while True:
                     t = r.u8()
                     if t == 0:
@@ -139,21 +140,34 @@ def _scan(r):
                     pn = r.name()
                     if t == 8 and pn == "Name":
                         nm2 = r.name()
+                    elif t == 10 and pn == "Properties":
+                        pr = {}
+                        while True:
+                            pt = r.u8()
+                            if pt == 0:
+                                break
+                            pk = r.name()
+                            if pt == 8:
+                                pr[pk] = r.name()
+                            else:
+                                r.skip(pt)
                     else:
                         r.skip(t)
                 pal.append(nm2 or "minecraft:air")
-            names = pal
+                palp.append(pr)
+            names = pal; props = palp
         elif tid == 9 and nm == "blocks":
             r.u8(); n = r.i32(); arrays = r.parse_blocks(n)
         elif tid == 10:
-            s2, n2, a2 = _scan(r)
+            s2, n2, p2, a2 = _scan(r)
             if a2 is not None:
                 arrays = a2
                 if s2 is not None: size = s2
                 if n2 is not None: names = n2
+                if p2 is not None: props = p2
         else:
             r.skip(tid)
-    return size, names, arrays
+    return size, names, props, arrays
 
 
 def _parse_fast(path):
@@ -165,10 +179,10 @@ def _parse_fast(path):
     if root_tid != 10:
         raise ValueError("root is not a compound")
     r.name()  # root name
-    size, names, arrays = _scan(r)
+    size, names, props, arrays = _scan(r)
     if size is None or names is None or arrays is None:
         raise ValueError("size/palette/blocks not found")
-    return size, names, arrays
+    return size, names, props, arrays
 
 
 def _aggregate(path, verbose=True):
@@ -184,7 +198,7 @@ def _aggregate(path, verbose=True):
     t0 = time.time()
     if verbose:
         print(f"    parsing {Path(path).name} ({st.st_size/1e6:.1f}MB)...", flush=True)
-    size, names, (xs, ys, zs, sts) = _parse_fast(path)
+    size, names, _props, (xs, ys, zs, sts) = _parse_fast(path)
     sx, sy, sz = size
     is_water = np.array([n in WATER_NAMES for n in names], bool)
     is_air = np.array([n == "minecraft:air" for n in names], bool)

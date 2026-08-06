@@ -37,12 +37,12 @@ import nbtlib
 # パレットは block_palette.py（単一真実源, ~80 バニラブロック）から生成。
 # water/blue_ice はアニメーションテクスチャ回避のため stained_glass で代替（block_palette 内で定義）。
 from block_palette import (BLOCKS as _BLOCKS, PALETTE_KEYS as _PALETTE_KEYS,
-                           block_state_properties as _block_state_properties)
+                           block_state_properties_for_key as _block_state_properties_for_key)
 
 
 def _palette_compound(key: str) -> nbtlib.Compound:
     name = _BLOCKS[key][0]
-    props = _block_state_properties(name)
+    props = _block_state_properties_for_key(key)
     if props:
         return nbtlib.Compound({
             "Name": nbtlib.String(name),
@@ -295,7 +295,7 @@ assert len(_VOXEL_TMPL) == 36
 
 
 def _write_nbt_dense(arr: np.ndarray, size: list, out_path,
-                     meta_compound=None) -> int:
+                     meta_compound=None, compresslevel: int = 6) -> int:
     """密3D配列 ``arr[y,z,x]``（uint16, 0=air, 値=palette index）を Structure NBT へ
     **ストリーミング書き出し**する（施策③）。
 
@@ -304,6 +304,16 @@ def _write_nbt_dense(arr: np.ndarray, size: list, out_path,
     （docs/06 の 8-12GB 問題の根治）。出力は標準 NBT バイナリで、既存の nbtlib／
     nbt_preview._parse_fast の双方で読め、従来 write_nbt_structure と等価。
     返り値: 書き込んだ非air ブロック数。
+
+    compresslevel : gzip 圧縮レベル 0-9（既定 6, 旧既定は gzip の 9）。実測:
+      御坊 400m crop タイル(raw 66.0MB)  L9=8.86s/5.712MB → L6=0.73s/5.113MB
+      御坊 1km 本番タイル (raw 60.8MB)  L9=6.01s/5.291MB → L6=0.67s/4.589MB
+      本データは L9 の lazy matching がかえって不利で、**L6 は 9〜12倍速かつ
+      サイズも 11〜13% 小さい**（L1/L4/L5 は速いがサイズが増える）。
+      0 は gzip level 0（deflate stored）。**gzip ストリームとしては正当で
+      Minecraft も nbtlib も普通に読める**（magic 1f8b08 を実測確認）。
+      圧縮しない分サイズが数倍に膨らむだけなので、書き出し時間だけを詰めたい
+      検証用途に使う。
     """
     ys, zs, xs = np.nonzero(arr)            # air(=0) を除く非air(Y,Z,X 昇順)
     states = arr[ys, zs, xs]
@@ -315,7 +325,7 @@ def _write_nbt_dense(arr: np.ndarray, size: list, out_path,
         return bytes([tag_id]) + struct.pack(">H", len(name)) + name
 
     rec = np.frombuffer(_VOXEL_TMPL, dtype=np.uint8)
-    with gzip.open(str(out_path), "wb") as f:
+    with gzip.open(str(out_path), "wb", compresslevel=int(compresslevel)) as f:
         f.write(b"\x0a\x00\x00")                                   # root TAG_Compound, name ""
         f.write(_named(3, b"DataVersion") + struct.pack(">i", 4671))
         au = b"flood_pso"
@@ -344,19 +354,24 @@ def _write_nbt_dense(arr: np.ndarray, size: list, out_path,
 
 
 def write_nbt_structure(blocks, size: list, out_path: str,
-                        meta: dict | None = None):
+                        meta: dict | None = None,
+                        compresslevel: int = 6):
     """
     Minecraft Structure NBT 形式（1.17+ Structure Block）でファイルを書き出す。
 
     blocks が **np.ndarray**（密3D配列 ``arr[y,z,x]``, 0=air）なら _write_nbt_dense で
     ストリーミング省メモリ書き出し（施策③）。**list[Compound]**（legacy）なら従来の
     nbtlib 直列化。meta が与えられたら ``flood_pso_meta`` を埋め込む。
+
+    compresslevel : gzip 圧縮レベル 0-9（既定 6, 密配列パスのみ有効）。
+                    legacy(list[Compound]) パスは nbtlib.save の既定に従う。
     """
     meta_compound = _finalize_meta(meta)
     out_path = Path(out_path)
 
     if isinstance(blocks, np.ndarray):
-        n = _write_nbt_dense(blocks, size, out_path, meta_compound)
+        n = _write_nbt_dense(blocks, size, out_path, meta_compound,
+                             compresslevel=compresslevel)
     else:
         palette_list = nbtlib.List[nbtlib.Compound]([PALETTE[k] for k in PALETTE_LIST_KEYS])
         blocks_list  = nbtlib.List[nbtlib.Compound](blocks)
@@ -398,6 +413,12 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   cliff_threshold_m_per_m: float = 0.4,
                   v_exag_sea: float | None = None,
                   deep_ground: int = 8,
+                  underfill_cap: int | None = None,
+                  tunnel_core_always_covered: bool = False,
+                  tunnel_core_cover_slack: int | None = None,
+                  tunnel_cover_close_blocks: int | None = None,
+                  power_clip_spans_to_grid: bool = True,
+                  global_anchors: bool = True,
                   terrain_source: str = "gsi",
                   mapzen_zoom: int = 15,
                   use_esa: bool = False,
@@ -407,7 +428,11 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   fgd_bld_xml: str | None = None,
                   fgd_rdedg_xml: str | None = None,
                   fgd_wa_xml: str | None = None,
+                  fgd_rail_xml: str | None = None,
                   building_list: list | None = None,
+                  remove_bld_polys: list | None = None,  # 重心がこの[lat,lon]環内のFGD建物を除去
+                  add_bld_list: list | None = None,       # FGD建物に追加する新設建物dict
+                  terrain_skirt_cells: int = 0,           # >0: ワールド外周を斜面化し境界の崖を無くす
                   surface_ortho: bool = False,
                   ortho_zoom: int = 18,
                   ortho_saturation: float = 1.4,
@@ -420,6 +445,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   tellus_world_scale: float = 1.0,
                   tellus_sea_level_y: int = 0,
                   bridges_json: str | None = None,
+                  tunnels_json: str | None = None,
                   power_json: str | None = None,
                   parking_json: str | None = None,
                   evac_xml: str | None = None,
@@ -430,7 +456,11 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   anvil_offset: tuple | None = None,
                   anvil_merge: bool = False,
                   anvil_level_name: str = "flood_pso",
-                  anvil_level_template: str | None = None):
+                  anvil_level_template: str | None = None,
+                  world_base_y: int = 0,
+                  nbt_compresslevel: int = 6,
+                  write_intermediate_nbt: bool = True,
+                  strict_osm_json: bool = False):
     """
     DEMと浸水マップの指定範囲をMinecraft NBT Structureに変換する。
 
@@ -453,7 +483,18 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
     smooth_sigma_cells: cliff-aware smoothing の sigma [cells]（enhanced のみ）
     cliff_threshold_m_per_m: 急斜面判定の slope 閾値 [m/m]（enhanced のみ）
     v_exag_sea      : 海中の垂直誇張倍率。None なら v_exag * 0.33（enhanced のみ）
-    deep_ground     : 陸の地盤柱の深さ [block]（enhanced のみ、既定 8）
+    deep_ground     : 陸の地盤柱の深さ [block]（enhanced のみ、既定 8）。自動アンダー
+                      フィル（underfill_cap=None）では上限の**下限**としてしか効かない。
+                      実際に効いた上限は full_meta["underfill_cap_effective"] に記録される。
+
+    旧挙動エスケープハッチ（既定はすべて新挙動。make_nbt_hd の同名 CLI から到達可能）:
+    underfill_cap   : int でアンダーフィル深さを一律クランプ（旧挙動。8 で HEAD 相当）
+    tunnel_core_always_covered : True で OSM トンネル way 本体を無条件密閉（旧挙動）
+    tunnel_core_cover_slack    : コア被覆判定の緩さ [block]（None=terrain_render 既定）
+    tunnel_cover_close_blocks  : 被覆判定の station 方向 closing 長 [block]（0 で無効）
+    power_clip_spans_to_grid   : False で端点がタイル外の径間を丸ごと捨てる（旧挙動）
+    global_anchors  : False で送電線/トンネルの全域DEMアンカー（タイル継ぎ目の段差対策）を
+                      使わずタイルローカル走査に戻す（旧挙動）。橋のアンカーは常に有効。
 
     terrain_source  : "gsi" (default, 国土地理院 5m DEM をそのまま使う)
                       "mapzen" (Tellus が使う AWS Mapzen Joerd 全球 DEM を取得して
@@ -468,7 +509,25 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
     tellus_world_dir   : terrain_source="tellus_world" のとき必須。level.dat のあるパス
     tellus_world_scale : Tellus 世界生成時の world_scale（既定 1 = real-Earth scale）
     tellus_sea_level_y : Tellus 世界の海面 y。dem (m) = block_y - tellus_sea_level_y
+
+    nbt_compresslevel  : 中間 structure NBT の gzip 圧縮レベル 0-9（既定 6）
+    write_intermediate_nbt : False で中間 .nbt を書かない（anvil_out 指定時のみ許可）。
+                         Anvil ワールドだけ欲しいとき、72タイルで 3.2GB になる中間 NBT を省ける。
+    strict_osm_json    : True で bridges/tunnels/power/parking の JSON パスが指定済なのに
+                         存在しない場合 FileNotFoundError（既定 False は警告のみ＝従来動作）。
     """
+    if not write_intermediate_nbt and anvil_out is None:
+        raise ValueError("write_intermediate_nbt=False は anvil_out 指定時のみ有効"
+                         "（両方無しでは出力が何も残らない）")
+    for _lbl, _p in (("--bridges-json", bridges_json), ("--tunnels-json", tunnels_json),
+                     ("--power-json", power_json), ("--parking-json", parking_json)):
+        if _p and not Path(_p).exists():
+            _msg = f"{_lbl} に指定された OSM JSON が存在しません: {_p}"
+            if strict_osm_json:
+                raise FileNotFoundError(
+                    _msg + "  → 無言で0本のワールドが出来るのを防ぐため停止しました"
+                           "（意図的に無効化するなら空文字を渡す）")
+            print(f"  [warn] {_msg} → このフィーチャは0件になります")
     lat_per_m = 1.0 / 111320.0
     lon_per_m = 1.0 / (111320.0 * np.cos(np.radians(lat_center)))
 
@@ -673,6 +732,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
 
     print(f"DEM patch: {dem_patch.shape} cells = {dem_patch.shape[1]*res_lon/lon_per_m:.0f}m W x {dem_patch.shape[0]*res_lat/lat_per_m:.0f}m N "
           f"[source={terrain_source}]")
+    print(f"  [patch_bbox] lat[{patch_bbox_latlon[0]:.7f},{patch_bbox_latlon[1]:.7f}] "
+          f"lon[{patch_bbox_latlon[2]:.7f},{patch_bbox_latlon[3]:.7f}]")
 
     h_res_dem = res_lat / lat_per_m   # DEMセル = 何m か
 
@@ -702,7 +763,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         building_id_grid = None        # P2: 建物ごとの整数ラベル
         building_wall_keys = None      # P2: 建物 id → 壁ブロックキー
         building_roof_keys = None      # P2: 建物 id → 屋根ブロックキー(fallback)
-        building_style_keys = None     # 建物 id → スタイル(house/building/factory)
+        building_roof_solid = None     # 建物 id → 屋根を型単色化しオルソ焼込無効(新設建物)
+        building_style_keys = None     # 建物 id → スタイル(wood_house/apartment/shop/rc/...)
+        building_facade_by_id = None   # 建物 id → 外壁装飾スペック(アーキタイプ由来)
         if use_osm:
             from tellus_data import fetch_osm_buildings_roads
             osm = fetch_osm_buildings_roads(
@@ -735,6 +798,21 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                     lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
                 )
                 _blds = _fgd["buildings"]; _roads = _fgd["roads"]
+            # 現況補正: 解体済み建物を除去 → 新設建物を追加（FGD/building_list どちらにも適用）
+            if remove_bld_polys:
+                from shapely.geometry import Polygon as _Poly
+                _rm = [_Poly([(lo, la) for la, lo in ring]) for ring in remove_bld_polys]
+                def _in_rm(coords):
+                    if len(coords) < 3:
+                        return False
+                    c = _Poly([(lo, la) for la, lo in coords]).centroid
+                    return any(c.within(p) for p in _rm)
+                _n0 = len(_blds)
+                _blds = [b for b in _blds if not _in_rm(b.get("coords", []))]
+                print(f"  [bld-fix] 除去: {_n0} -> {len(_blds)} 棟（解体済み {_n0 - len(_blds)} 棟を削除）")
+            if add_bld_list:
+                _blds = _blds + add_bld_list
+                print(f"  [bld-fix] 追加: +{len(add_bld_list)} 棟（新設）→ 計 {len(_blds)} 棟")
             factor = max(1, round(h_res / h_res_dem))
             nz_g = dem_patch.shape[0] // factor
             nx_g = dem_patch.shape[1] // factor
@@ -778,7 +856,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_id_grid = bmaps["id"]
             building_wall_keys = bmaps["wall_keys"]
             building_roof_keys = bmaps["roof_keys"]
+            building_roof_solid = bmaps.get("roof_solid")
             building_style_keys = bmaps.get("style_keys")
+            building_facade_by_id = bmaps.get("facade")
             _bh_in = building_height_block[np.isfinite(building_height_block)]
             _med = float(np.median(_bh_in)) if _bh_in.size else 0.0
             _src = "plateau/osm" if building_list is not None else "fgd"
@@ -807,14 +887,53 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         bridges_render = None
         if bridges_json:
             from bridge_osm import load_bridges
+            import math as _math
+            _ctx_m = 650.0
+            _mid_lat = 0.5 * (patch_bbox_latlon[0] + patch_bbox_latlon[1])
+            _ctx_lat = _ctx_m / 111320.0
+            _ctx_lon = _ctx_m / (111320.0 * max(0.2, _math.cos(_math.radians(_mid_lat))))
+            _bridge_bbox = (
+                max(float(dem_info["lat_min"]), patch_bbox_latlon[0] - _ctx_lat),
+                min(float(dem_info["lat_max"]), patch_bbox_latlon[1] + _ctx_lat),
+                max(float(dem_info["lon_min"]), patch_bbox_latlon[2] - _ctx_lon),
+                min(float(dem_info["lon_max"]), patch_bbox_latlon[3] + _ctx_lon),
+            )
             bridges_render = load_bridges(
                 bridges_json,
+                lat_min=_bridge_bbox[0], lat_max=_bridge_bbox[1],
+                lon_min=_bridge_bbox[2], lon_max=_bridge_bbox[3],
+            )
+            print(f"  [bridge] OSM 橋 {len(bridges_render)} 本を patch 周辺({_ctx_m:.0f}m)に配置"
+                  + (f"（例: {', '.join(b['name'] for b in bridges_render if b['name'])[:60]}）"
+                     if any(b['name'] for b in bridges_render) else ""))
+            # 端アンカー高を全域DEMで事前計算（--tiles 分割で橋端点がタイル外に出てもデッキが
+            # 地表へ降下しないよう、全タイルが同一の高さを参照＝高架が一貫して連続平坦飛行する）。
+            from terrain_render import assign_global_bridge_anchors
+            assign_global_bridge_anchors(
+                bridges_render, dem_info["dem"],
+                dem_info["lat_max"], dem_info["lon_min"],
+                dem_info["res_lat"], dem_info["res_lon"],
+                h_res_block_m=h_res, scale_land=(v_exag / max(v_res, 1e-6)),
+                lift=(6 if legend_layer else 1), sea_level_m=sea_level_m)
+
+        # OSM トンネル（tunnel=yes）を patch 範囲で読む（橋と同じ Overpass geom JSON 形式）
+        tunnels_render = None
+        if tunnels_json:
+            from bridge_osm import load_bridges as _load_ways
+            tunnels_render = _load_ways(
+                tunnels_json,
                 lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
                 lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
             )
-            print(f"  [bridge] OSM 橋 {len(bridges_render)} 本を patch 内に配置"
-                  + (f"（例: {', '.join(b['name'] for b in bridges_render if b['name'])[:60]}）"
-                     if any(b['name'] for b in bridges_render) else ""))
+            print(f"  [tunnel] OSM トンネル {len(tunnels_render)} 本を patch 内で検出")
+            # 坑口床高を全域DEMで事前計算（--tiles 分割でトンネルが複数タイルにまたがっても
+            # 床が同一勾配になる＝タイル境界で床高が段差にならない）。橋と同じ手当て。
+            if global_anchors and tunnels_render:
+                from terrain_render import assign_global_tunnel_anchors
+                assign_global_tunnel_anchors(
+                    tunnels_render, dem, lat_max, lon_min, res_lat, res_lon,
+                    h_res_block_m=h_res, scale_land=(v_exag / max(v_res, 1e-6)),
+                    lift=(6 if legend_layer else 1))
 
         # OSM 送電線/鉄塔（power=line/tower）を patch 範囲で読む
         power_lines = power_towers = None
@@ -827,6 +946,28 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             )
             power_lines, power_towers = _pw["lines"], _pw["towers"]
             print(f"  [power] OSM 送電線 {len(power_lines)} 本 / 鉄塔・電柱 {len(power_towers)} 基を配置")
+            # 径間端点（鉄塔）の地表Yを全域DEMで事前計算（--tiles 分割で端点がタイル外に
+            # 出ても全タイルが同一の架線直線を引く＝継ぎ目の段差と対地クリアランス破綻を防ぐ）。
+            if global_anchors and power_lines:
+                from terrain_render import assign_global_power_anchors
+                assign_global_power_anchors(
+                    power_lines, dem, lat_max, lon_min, res_lat, res_lon,
+                    scale_land=(v_exag / max(v_res, 1e-6)),
+                    lift=(6 if legend_layer else 1))
+
+        # FG-GML 鉄道中心線（RailCL）を patch 範囲で読む
+        rail_render = None
+        if fgd_rail_xml:
+            from fgd_vector import load_rail
+            rail_render = []
+            for rx in str(fgd_rail_xml).split(","):
+                rx = rx.strip()
+                if rx and Path(rx).exists():
+                    rail_render += load_rail(
+                        rx, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                        lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                    )
+            print(f"  [rail] FG-GML RailCL {len(rail_render)} 本を敷設")
 
         # OSM 駐車場（amenity=parking）を patch 範囲で読む
         parking_render = None
@@ -891,6 +1032,11 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             smooth_sigma_cells=smooth_sigma_cells,
             cliff_threshold_m_per_m=cliff_threshold_m_per_m,
             deep_ground=deep_ground,
+            underfill_cap=underfill_cap,
+            tunnel_core_always_covered=tunnel_core_always_covered,
+            tunnel_core_cover_slack=tunnel_core_cover_slack,
+            tunnel_cover_close_blocks=tunnel_cover_close_blocks,
+            power_clip_spans_to_grid=power_clip_spans_to_grid,
             cover_patch=cover_patch,
             building_mask=building_mask,
             road_mask=road_mask,
@@ -902,14 +1048,19 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             building_id=building_id_grid,
             building_wall_keys=building_wall_keys,
             building_roof_keys=building_roof_keys,
+            building_roof_solid=building_roof_solid,
             building_style_keys=building_style_keys,
+            building_facade_by_id=building_facade_by_id,
             hollow_buildings=hollow_buildings,
             legend_layer=legend_layer,
             color_building_roofs=surface_ortho,
+            terrain_skirt_cells=terrain_skirt_cells,
             surface_grid_override=surface_override,
             bridges=bridges_render,
+            tunnels=tunnels_render,
             powerlines=power_lines,
             power_towers=power_towers,
+            rails=rail_render,
             parkings=parking_render,
             ortho_rgb=ortho_rgb,
             evac_facilities=evac_render,
@@ -917,7 +1068,13 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             water_mask=water_mask,
             road_major_mask=road_major_mask,
             road_curb_osm_mask=road_curb_osm_mask,
-            cell_offset=(c0, r0),   # 軸6-2: 地表ディザの世界座標基準（タイル間整合）
+            # 軸6-2: 地表ディザは絶対緯度経度から算出した世界座標グリッドに固定する。
+            # 旧: 配列内オフセット(c0,r0)を渡していたため、同じ地点でもロードした DEM が
+            # crop(南部4図郭mosaic)と world-full(18図郭mosaic)で配列原点が違うと gx0/gz0 が
+            # ずれ、地表ディザ素材が食い違っていた。lat/lon 基準なら mosaic 非依存で一致し、
+            # 隣接タイルも lon_west が res_lon×nx ずれる＝gx0 が nx ずれで境界が連続する。
+            cell_offset=(int(round(patch_bbox_latlon[2] / res_lon)),
+                         int(round(-patch_bbox_latlon[1] / res_lat))),
         )
     elif terrain_quality == "legacy":
         print(f"Converting to blocks [legacy] "
@@ -979,8 +1136,32 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             full_meta.setdefault("v_exag_sea",
                                   float(v_exag_sea if v_exag_sea is not None else v_exag * 0.33))
             full_meta.setdefault("deep_ground", int(deep_ground))
+            # アンダーフィル: 自動モードでは deep_ground は「上限の下限」としてしか効かず
+            # (_cap = max(UNDERFILL_MIN, UNDERFILL_HARD_CAP, deep_ground))、既定 8 は無視される。
+            # 生成物から実際に効いた上限が読めるよう実効値とモードを記録する。
+            from terrain_render import (UNDERFILL_MIN, UNDERFILL_EXTRA, UNDERFILL_HARD_CAP)
+            if underfill_cap is None:
+                full_meta.setdefault("underfill_cap_mode", "auto")
+                full_meta.setdefault("underfill_cap_effective",
+                                     int(max(UNDERFILL_MIN, UNDERFILL_HARD_CAP,
+                                             int(deep_ground))))
+                full_meta.setdefault("underfill_min", int(UNDERFILL_MIN))
+                full_meta.setdefault("underfill_extra", int(UNDERFILL_EXTRA))
+            else:
+                full_meta.setdefault("underfill_cap_mode", "fixed")
+                full_meta.setdefault("underfill_cap_effective",
+                                     int(max(2, int(underfill_cap))))
+                full_meta.setdefault("underfill_min", 2)
+                full_meta.setdefault("underfill_extra", 1)
+            full_meta.setdefault("tunnel_core_always_covered", bool(tunnel_core_always_covered))
+            full_meta.setdefault("power_clip_spans_to_grid", bool(power_clip_spans_to_grid))
+            full_meta.setdefault("global_anchors", bool(global_anchors))
 
-    write_nbt_structure(blocks, size, out_path, meta=full_meta)
+    if write_intermediate_nbt:
+        write_nbt_structure(blocks, size, out_path, meta=full_meta,
+                            compresslevel=nbt_compresslevel)
+    else:
+        print(f"  [nbt] 中間 structure NBT をスキップ（--no-intermediate-nbt）: {out_path}")
 
     # 施策⑤: native Anvil world(.mca)も出力（密配列のときのみ＝enhanced）。
     if anvil_out is not None:
@@ -988,8 +1169,14 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             from anvil_export import write_anvil_world
             ox, oz = (int(anvil_offset[0]), int(anvil_offset[1])) if anvil_offset else (0, 0)
             write_anvil_world(blocks, size, anvil_out, x_offset=ox, z_offset=oz,
+                              y_offset=int(world_base_y),
                               merge=bool(anvil_merge), level_name=anvil_level_name,
                               level_template=anvil_level_template)
+        elif not write_intermediate_nbt:
+            raise RuntimeError(
+                "[anvil] dense 配列でないため Anvil を書けず、write_intermediate_nbt=False で "
+                "中間 NBT も書かないため出力が空になります（terrain_quality='enhanced' にするか "
+                "--no-intermediate-nbt を外して下さい）")
         else:
             print("  [anvil] スキップ: dense 配列でない（terrain_quality=enhanced が必要）")
 

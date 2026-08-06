@@ -33,3 +33,21 @@ results/nbt_preview/.cache/
 # 生成済み世界バイナリ（NBT/litematic, 再生成可能・大容量）
 results/nbt/hd/
 results/nbt/tellus_preview/
+
+# data_preview 全域フルラスタ（~300MB, gen_data_preview.py で再生成可能）
+results/data_preview/gobo_full/
+# 橋デッキ高プロファイル等の診断ダンプ / Anvilワールド出力（再生成可能・大容量）
+results/inspect/
+results/anvil/
+results/world/
+
+# scratch スクリプトの生成物（コード自体は追跡する）
+scratch_calib_diag/*.npz
+scratch_calib_diag/*.png
+scratch_calib_diag/__pycache__/
+
+# ci-preview の生成物（tests/golden/*.png のみ追跡。preview/diff は再生成物）
+/preview.png
+/preview_neg.png
+/diff.png
+/diff.txt

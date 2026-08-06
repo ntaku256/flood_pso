@@ -58,6 +58,14 @@ BLOCKS: dict[str, tuple[str, tuple[int, int, int], str]] = {
     "glowstone":         ("minecraft:glowstone", (255, 226, 142), "opaque"),
     "iron_bars":         ("minecraft:iron_bars", (130, 130, 135), "opaque"),
 
+    # ── 鉄道レール（同一 minecraft 名で shape 別の 6 キー。Properties は KEY で分岐）──
+    "rail_ns":           ("minecraft:rail", (84, 82, 80), "opaque"),
+    "rail_ew":           ("minecraft:rail", (84, 82, 80), "opaque"),
+    "rail_ne":           ("minecraft:rail", (84, 82, 80), "opaque"),
+    "rail_nw":           ("minecraft:rail", (84, 82, 80), "opaque"),
+    "rail_se":           ("minecraft:rail", (84, 82, 80), "opaque"),
+    "rail_sw":           ("minecraft:rail", (84, 82, 80), "opaque"),
+
     # ── 凡例(地下データ層)用の色付きガラス。地表オルソ色マッチには使わない（_NON_MATCH 除外） ──
     "white_stained_glass":      ("minecraft:white_stained_glass", (236, 240, 240), "opaque"),
     "red_stained_glass":        ("minecraft:red_stained_glass", (165, 46, 38), "opaque"),
@@ -145,7 +153,9 @@ PALETTE_KEYS: list[str] = list(BLOCKS.keys())
 _NON_MATCH = {"sea_lantern", "glass", "glowstone", "iron_bars",
               "white_stained_glass", "red_stained_glass", "orange_stained_glass",
               "light_blue_stained_glass", "blue_stained_glass",
-              "green_stained_glass", "black_stained_glass"}
+              "green_stained_glass", "black_stained_glass",
+              # 鉄道レールは色マッチで地表/屋根に湧くと「レール屋根」になるため候補から除外
+              "rail_ns", "rail_ew", "rail_ne", "rail_nw", "rail_se", "rail_sw"}
 MATCH_KEYS: list[str] = [k for k, (_, _, role) in BLOCKS.items()
                          if role == "opaque" and k not in _NON_MATCH]
 
@@ -178,6 +188,24 @@ def block_state_properties(name: str) -> dict[str, str] | None:
     return None
 
 
+# 鉄道レール: palette KEY → minecraft:rail の shape。同一名で複数 state を持つため
+# 名前ベースの block_state_properties では分岐できず、KEY で解決する。
+RAIL_SHAPES: dict[str, str] = {
+    "rail_ns": "north_south", "rail_ew": "east_west",
+    "rail_ne": "north_east",  "rail_nw": "north_west",
+    "rail_se": "south_east",  "rail_sw": "south_west",
+}
+
+
+def block_state_properties_for_key(key: str) -> dict[str, str] | None:
+    """palette KEY → BlockState Properties（NBT/litematic/anvil 共通の単一真実源）。
+    rail のように同一 minecraft 名で複数 state を持つキーはここで分岐し、
+    それ以外は名前ベースの block_state_properties() に委譲する。"""
+    if key in RAIL_SHAPES:
+        return {"shape": RAIL_SHAPES[key]}
+    return block_state_properties(BLOCKS[key][0])
+
+
 def name_to_rgb() -> dict[str, tuple[int, int, int]]:
     """minecraft:name → (r,g,b)。プレビュー/ビューア用。"""
     return {mc: c for (mc, c, _) in BLOCKS.values()}
@@ -203,9 +231,11 @@ def export_viewer_rust(path: str) -> None:
         "pub fn block_rgb_role(name: &str) -> Option<([f32; 3], u8)> {",
         "    let v = match name {",
     ]
+    _seen_mc: set[str] = set()
     for mc, (r, g, b), rl in ((mc, c, rl) for (mc, c, rl) in BLOCKS.values()):
-        if rl == "air":
+        if rl == "air" or mc in _seen_mc:   # 同一 minecraft 名（例: rail の shape 別キー）は1度だけ
             continue
+        _seen_mc.add(mc)
         code = _ROLE_CODE[rl]
         lines.append(f'        "{mc}" => ([{r/255:.4f}, {g/255:.4f}, {b/255:.4f}], {code}u8),')
     lines += [

@@ -59,6 +59,33 @@ def rgb_to_oklab(rgb: np.ndarray) -> np.ndarray:
 
 _ANCHOR_OKLAB = rgb_to_oklab(_ANCHOR_RGB)  # (M,3) アンカーの Oklab（起動時前計算）
 
+# ── 屋根専用アンカー（落ち着いた材のみ）─────────────────────────────────────
+# 衛星写真の屋根は彩度ブーストで wool/原色 concrete（鮮やかな orange=「発破」/水色）へ
+# 過剰マッチしてカートゥーン化する。屋根は terracotta（くすんだ土色16色）・無彩コンクリ・
+# 石/木系などの muted ブロックだけに制限し、現実的な屋根色にする。地表マッチ(ground)は
+# 従来どおり全アンカー(_ANCHOR_*)を使い無変更。rail は block_palette 側で全マッチから除外済。
+_VIVID_CONCRETE = {"orange_concrete", "magenta_concrete", "light_blue_concrete",
+                   "yellow_concrete", "lime_concrete", "pink_concrete", "cyan_concrete",
+                   "purple_concrete", "blue_concrete", "green_concrete", "red_concrete"}
+_ROOF_EXCLUDE = {k for k in MATCH_KEYS if k.endswith("_wool")} | _VIVID_CONCRETE
+ROOF_MATCH_KEYS = [k for k in MATCH_KEYS if k not in _ROOF_EXCLUDE]
+_ROOF_ANCHOR_KEYS = np.array(ROOF_MATCH_KEYS, dtype=object)
+_ROOF_ANCHOR_OKLAB = rgb_to_oklab(np.array([_key_rgb(k) for k in ROOF_MATCH_KEYS],
+                                           dtype=np.float32))
+
+
+def classify_rgb_to_palette_saturated(rgb: np.ndarray, saturation: float = 1.4) -> np.ndarray:
+    """屋根色専用。muted な土色屋根の濃淡を残すため軽く彩度を上げてからマッチするが、
+    アンカーは **落ち着いた材のみ(ROOF_MATCH_KEYS)** に制限する: wool/原色 concrete を外し、
+    terracotta(くすんだ土色16色)・無彩コンクリ・石/木で現実的な屋根色にする。
+    （以前は saturation=1.9 + 全アンカーで鮮やかな orange=「発破」/水色へ過剰マッチしていた。）
+    地表マッチには使わない(屋根のみ)。"""
+    a = rgb.astype(np.float32)
+    luma = a @ np.array([0.299, 0.587, 0.114], np.float32)
+    a = np.clip(luma[..., None] + (a - luma[..., None]) * saturation, 0, 255).astype(np.uint8)
+    return classify_rgb_to_palette(a, anchor_oklab=_ROOF_ANCHOR_OKLAB,
+                                   anchor_keys=_ROOF_ANCHOR_KEYS)
+
 
 def enhance_rgb(rgb: np.ndarray, *, saturation: float = 1.35,
                 low_pct: float = 2.0, high_pct: float = 98.0,
@@ -93,7 +120,8 @@ def enhance_rgb(rgb: np.ndarray, *, saturation: float = 1.35,
     return np.clip(arr, 0, 255).astype(np.uint8)
 
 
-def classify_rgb_to_palette(rgb: np.ndarray) -> np.ndarray:
+def classify_rgb_to_palette(rgb: np.ndarray, anchor_oklab: np.ndarray | None = None,
+                            anchor_keys: np.ndarray | None = None) -> np.ndarray:
     """
     rgb: (H, W, 3) uint8 → object 配列 (H, W) のパレットキー。
 
@@ -102,18 +130,21 @@ def classify_rgb_to_palette(rgb: np.ndarray) -> np.ndarray:
     水/氷は洪水・海レイヤが別途生成するためアンカーから除外している。
     RGB ユークリッドより知覚一致が高く、道路/畑の微妙な色の取り違えを抑える。
     アンカーをまたぐ (P×M) 行列は作らず、アンカー毎ループで省メモリ。
+    anchor_oklab/anchor_keys を渡すとアンカー集合を差し替え可（屋根は muted 限定セットを使う）。
     """
+    A = _ANCHOR_OKLAB if anchor_oklab is None else anchor_oklab
+    K = _ANCHOR_KEYS if anchor_keys is None else anchor_keys
     h, w, _ = rgb.shape
     lab = rgb_to_oklab(rgb.reshape(-1, 3))             # (P,3) Oklab
     best = np.full(lab.shape[0], np.inf, dtype=np.float32)
     idx = np.zeros(lab.shape[0], dtype=np.int32)
-    for j in range(_ANCHOR_OKLAB.shape[0]):
-        a = _ANCHOR_OKLAB[j]
+    for j in range(A.shape[0]):
+        a = A[j]
         d = (lab[:, 0] - a[0]) ** 2 + (lab[:, 1] - a[1]) ** 2 + (lab[:, 2] - a[2]) ** 2
         m = d < best
         best[m] = d[m]
         idx[m] = j
-    return _ANCHOR_KEYS[idx].reshape(h, w)
+    return K[idx].reshape(h, w)
 
 
 def colorize(surf: np.ndarray) -> np.ndarray:
