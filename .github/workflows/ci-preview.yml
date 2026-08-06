@@ -1,0 +1,72 @@
+name: ci-preview
+# PR プレビュー: *完全合成* の極小 DEM を FLOOD_PSO_OFFLINE=1 で決定的に生成し、
+# 俯瞰プレビューをゴールデン画像と画素差分して PR にコメントする。外部データ・
+# ネットワークとも不要。地形出力を変える意図した PR は tests/golden/ci_crop.png の
+# 更新（make ci-golden）を同じ PR に含めること。
+on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "tools/**"
+      - "tests/**"
+      - "Makefile"
+      - "requirements.txt"
+  workflow_dispatch:
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write      # sticky コメント投稿に必要
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: deps
+        run: pip install -r requirements.txt
+      - name: offline deterministic build + render
+        env:
+          FLOOD_PSO_OFFLINE: "1"
+        run: |
+          make ci-build PY="python"
+          python tools/ci_preview_diff.py --render "results/nbt/hd/*_cicrop.nbt" --out preview.png
+      - name: golden diff
+        id: diff
+        run: |
+          python tools/ci_preview_diff.py --compare preview.png tests/golden/ci_crop.png \
+            --diff-out diff.png --threshold 0.5 | tee diff.txt
+          echo "rate=$(grep -oE '[0-9.]+%' diff.txt | head -1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-preview
+          path: |
+            preview.png
+            diff.png
+      - name: PR comment
+        if: always()
+        continue-on-error: true   # fork PR 等で権限が無くてもジョブは落とさない
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const rate = "${{ steps.diff.outputs.rate }}" || "n/a";
+            const ok = "${{ steps.diff.outcome }}" === "success";
+            const body = `## ci-preview\n地形出力の画素差分率: **${rate}**（閾値 0.5% / ` +
+              `合成 fixture をオフライン決定的生成 → ゴールデン比較）\n` +
+              (ok ? "" : "⚠️ 閾値超過。意図した変更なら `make ci-golden` で " +
+                    "`tests/golden/ci_crop.png` を更新して同じ PR に含めてください。\n") +
+              `画像は Actions の Artifacts \`ci-preview\`（preview.png / diff.png）を参照。`;
+            const marker = "## ci-preview";
+            const {data: comments} = await github.rest.issues.listComments(
+              {...context.repo, issue_number: context.issue.number});
+            const prev = comments.find(c => c.body && c.body.startsWith(marker));
+            if (prev) {
+              await github.rest.issues.updateComment({...context.repo, comment_id: prev.id, body});
+            } else {
+              await github.rest.issues.createComment(
+                {...context.repo, issue_number: context.issue.number, body});
+            }
