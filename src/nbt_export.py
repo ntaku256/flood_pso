@@ -1068,7 +1068,13 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             water_mask=water_mask,
             road_major_mask=road_major_mask,
             road_curb_osm_mask=road_curb_osm_mask,
-            cell_offset=(c0, r0),   # 軸6-2: 地表ディザの世界座標基準（タイル間整合）
+            # 軸6-2: 地表ディザは絶対緯度経度から算出した世界座標グリッドに固定する。
+            # 旧: 配列内オフセット(c0,r0)を渡していたため、同じ地点でもロードした DEM が
+            # crop(南部4図郭mosaic)と world-full(18図郭mosaic)で配列原点が違うと gx0/gz0 が
+            # ずれ、地表ディザ素材が食い違っていた。lat/lon 基準なら mosaic 非依存で一致し、
+            # 隣接タイルも lon_west が res_lon×nx ずれる＝gx0 が nx ずれで境界が連続する。
+            cell_offset=(int(round(patch_bbox_latlon[2] / res_lon)),
+                         int(round(-patch_bbox_latlon[1] / res_lat))),
         )
     elif terrain_quality == "legacy":
         print(f"Converting to blocks [legacy] "
