@@ -25,7 +25,7 @@
 #    make crop KEEP_NBT=1                             … 中間 structure .nbt も残す(既定は Anvil のみ)
 # ============================================================================
 
-PY        := PYTHONUNBUFFERED=1 .venv/bin/python
+PY        ?= PYTHONUNBUFFERED=1 .venv/bin/python
 LID       := data_cache/wakayama_lidar
 OSM       := data_cache/osm
 D561      := ../kennkyuu20260114/地形データ/FG-GML-503561-ALL-20251001
@@ -130,7 +130,8 @@ COMMON := --K 16 --seed 0 --preset gobo_walk_1km --methods gt --scale 1.5 \
           --world-base-y $(WORLD_BASE_Y) --nbt-compresslevel $(NBTZ) \
           --fill-gap-osm $(LEGEND) $(EVAC)
 
-.PHONY: help world-full world-test crop crop-clean osm-check osm-fetch
+.PHONY: help world-full world-test crop crop-clean osm-check osm-fetch \
+        ci-fixture ci-build ci-preview ci-golden
 .DEFAULT_GOAL := help
 
 help:
@@ -245,3 +246,42 @@ crop: $(BR_SOUTH)
 crop-clean:
 	rm -rf $(CROP_OUT)
 	rm -f $(CROP_NBT)
+
+# ============================================================================
+#  CI プレビュー: *完全合成* の極小 DEM をオフライン決定的に生成し、俯瞰プレビューを
+#  コミット済みゴールデン画像と画素差分して地形出力の回帰を検出する（外部データ不要）。
+#  CI からは PY="python"（.venv 非依存）で叩く。詳細は tests/README.md。
+# ============================================================================
+CI_GRD       := $(LID)/cifix_grd.txt
+CI_CLAT      ?= 33.842123
+CI_CLON      ?= 135.179515
+CI_W         ?= 100
+CI_TAG       := _cicrop
+CI_NBT_GLOB  := $(NBT_DIR)/*$(CI_TAG).nbt
+CI_GOLDEN    := tests/golden/ci_crop.png
+CI_THRESHOLD ?= 0.5
+
+# 合成 grd を data_cache/ へ生成（.gitignore 対象なのでリポジトリには残らない）
+ci-fixture:
+	@$(PY) tools/ci_fixture.py stage
+
+# FGD/オルソ/OSMライブ無し・FLOOD_PSO_OFFLINE=1 で合成 crop を決定的生成（中間 .nbt を残す）
+ci-build: ci-fixture
+	@rm -f $(CI_NBT_GLOB)
+	FLOOD_PSO_OFFLINE=1 $(PY) src/make_nbt_hd.py --K 16 --seed 0 --preset gobo_walk_1km \
+	  --methods gt --scale 1.5 --wakayama-grd "$(CI_GRD)" --no-building-heights \
+	  --no-road-curb-osm --bridges-json "" --tunnels-json "" --power-json "" --parking-json "" \
+	  --center-lat $(CI_CLAT) --center-lon $(CI_CLON) --width $(CI_W) --depth $(CI_W) \
+	  --no-litematic --world-base-y -50 --nbt-compresslevel 6 --tag-suffix $(CI_TAG)
+
+# 生成 → レンダ → ゴールデン画素差分（閾値 CI_THRESHOLD%。超過で非ゼロ終了）
+ci-preview: ci-build
+	@$(PY) tools/ci_preview_diff.py --render "$(CI_NBT_GLOB)" --out preview.png
+	@$(PY) tools/ci_preview_diff.py --compare preview.png $(CI_GOLDEN) \
+	  --diff-out diff.png --threshold $(CI_THRESHOLD)
+
+# ゴールデン画像を今回のレンダで更新（地形を変える意図した変更後に実行し PR に含める）
+ci-golden: ci-build
+	@mkdir -p tests/golden
+	@$(PY) tools/ci_preview_diff.py --render "$(CI_NBT_GLOB)" --out $(CI_GOLDEN)
+	@echo "  [ci] golden 更新: $(CI_GOLDEN)"

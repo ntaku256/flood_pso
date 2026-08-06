@@ -45,3 +45,9 @@ results/world/
 scratch_calib_diag/*.npz
 scratch_calib_diag/*.png
 scratch_calib_diag/__pycache__/
+
+# ci-preview の生成物（tests/golden/*.png のみ追跡。preview/diff は再生成物）
+/preview.png
+/preview_neg.png
+/diff.png
+/diff.txt
