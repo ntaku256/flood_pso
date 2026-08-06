@@ -656,17 +656,28 @@ def main():
             "method_long": "Synthetic ground truth (target for inverse problem)",
         }
 
+    # 洪水キャッシュ鍵に織り込む DEM 内容ハッシュ。別エリアで同形状の DEM が同じ tag+water で
+    # 誤再利用される（旧: shape 一致のみで判定）のを防ぐ。dem_flood はメソッド非依存なので一度だけ算出。
+    def _inund_dem_key(_d):
+        import hashlib
+        _a = np.nan_to_num(np.ascontiguousarray(_d, dtype=np.float32),
+                           nan=-9999.0, posinf=-9999.0, neginf=-9999.0)
+        return hashlib.blake2b(_a.tobytes(), digest_size=8).hexdigest()
+    _dem_hash = _inund_dem_key(dem_flood)
+
     for tag, r in runs.items():
         sm_note = f", sigma_map K_s={ks}" if r["sigma_map"] is not None else ""
         print(f"\n--- Generating NBT: {tag} "
               f"(water={r['water']:.3f}, IoU={r['iou']:.3f}{sm_note}) ---")
         # 洪水sim再利用キャッシュ: 御坊全域(144Mグリッド)の sim は ~2h かかるため、
-        # --reuse-inundation DIR 指定時は DIR/inund_<method>.npz を load（dem 形状一致時のみ）。
-        # 無ければ sim 実行→保存。樹木/建物モード変更だけの再生成で 2h を省ける。
+        # --reuse-inundation DIR 指定時は DIR/inund_<method>_w<水位>_<demハッシュ>.npz を load。
+        # 鍵に DEM 内容ハッシュを含めるので、別エリア(同形状)の inundation を誤再利用しない
+        # （crop と world-test が同じ DIR を共有していても衝突しない）。無ければ sim 実行→保存。
+        # 樹木/建物モードなど DEM を変えない再生成では従来どおりキャッシュがヒットする。
         _inund_cache = None
         if args.reuse_inundation:
             _cd = Path(args.reuse_inundation); _cd.mkdir(parents=True, exist_ok=True)
-            _inund_cache = _cd / f"inund_{tag}_w{r['water']:.3f}.npz"
+            _inund_cache = _cd / f"inund_{tag}_w{r['water']:.3f}_{_dem_hash}.npz"
         inundation = None
         if args.no_flood:
             # 氾濫(浸水)を一切出さない。御坊用の水位/水源が別エリアで不適合なときに使う。
@@ -675,9 +686,13 @@ def main():
             print("  [no-flood] 浸水simスキップ（海/河川水面/街並みは残る）")
         elif _inund_cache is not None and _inund_cache.exists():
             _z = np.load(_inund_cache)
-            if _z["inund"].shape == dem_flood.shape:
+            # 鍵にハッシュを含むので通常ここは一致するが、念のため shape と dem_key を検証。
+            _key_ok = ("dem_key" not in _z.files) or (str(_z["dem_key"]) == _dem_hash)
+            if _z["inund"].shape == dem_flood.shape and _key_ok:
                 inundation = _z["inund"]
                 print(f"  [reuse-inundation] load {_inund_cache.name} {inundation.shape}")
+            else:
+                print(f"  [reuse-inundation] 鍵不一致→再計算 ({_inund_cache.name})")
         if inundation is None:
             # 5m フル解像度 DEM 上でシミュレーションを再実行
             if r["sigma_map"] is not None:
@@ -695,7 +710,9 @@ def main():
                     sigma=SIGMA,
                 )
             if _inund_cache is not None:
-                np.savez_compressed(_inund_cache, inund=inundation.astype(np.float32))
+                np.savez_compressed(_inund_cache, inund=inundation.astype(np.float32),
+                                    dem_shape=np.asarray(dem_flood.shape),
+                                    dem_key=np.asarray(_dem_hash))
                 print(f"  [reuse-inundation] saved {_inund_cache.name}")
         flooded = int(np.sum(inundation > 0.05))
         print(f"  full-res flooded cells: {flooded:,}")
