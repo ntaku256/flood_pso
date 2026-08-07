@@ -106,6 +106,15 @@ TUNNEL_CORE_COVER_SLACK = 0
 # トンネル: 被覆判定を station 方向へ closing する長さ[block]。密閉に挟まれた
 # これ未満の非密閉ギャップは密閉へ戻す（山中の小さな谷/DEMノイズ対策）。0 で無効。
 TUNNEL_COVER_CLOSE_BLOCKS = 8
+# トンネル直上(被覆部=山の中)の“地表道路”を消す閾値[block]。トンネルは地下なので、
+# 地表が床グレード(startF/endF or 坑口地表を長さ内挿)より この値以上 高いセルを「被覆部」
+# とみなし road_mask から除去する（=山の上に道路を描かない・木も生える）。坑口/開削部は
+# 地表≈床なので残り、トンネル回廊外の別の道路も残る。負値で無効。CLEAR+SHELL 相当。
+TUNNEL_SURFACE_ROAD_COVER_MARGIN = 9
+# 上記の回廊半幅に足す余裕[block]。実際の路面(オルソ舗装+路肩+RdEdg帯)は OSM の width_m
+# より広いので、道路半幅に この値を足して回廊を広げ、路面全体を確実に覆う。片側車道どうしの
+# 間隔(中央分離帯)より小さく保つこと(大きすぎると分離帯の森も消える)。
+TUNNEL_SURFACE_ROAD_CORRIDOR_PAD = 8
 # 地盤アンダーフィル: 隣接セルとの段差に応じた可変深さの下限/上限[block]。
 # 上限は「段差 + UNDERFILL_EXTRA」でも足りない崖のための安全弁で、既定は
 # 従来の deep_ground クランプを超えて崖の穴を塞げるよう十分大きく取る。
@@ -3042,6 +3051,67 @@ def dem_to_blocks_enhanced(
     # 細道=road_minor_block(砂利)、幹線=road_block(andesite舗装)。駐車場の後＝道路優先。
     if road_mask is not None and road_mask.shape == surf_block.shape:
         land_for_road = ~np.isnan(dem_ds) & ~(np.where(np.isnan(dem_ds), 0.0, dem_ds) <= sea_level_m)
+        # トンネル直上(被覆部=山の中)の地表道路を消す。トンネルは地下なので山の上に道路を
+        # 描かない（木も生える）。各トンネルの coords を grid 投影し、床グレード(startF/endF、
+        # 無ければ坑口セルの地表)を区間長で内挿。回廊(±(道路半幅+CORRIDOR_PAD))内で地表が
+        # 床+COVER_MARGIN より高いセル=被覆部として road_mask/road_major_mask から除去し、
+        # さらにオルソ由来の路面色を最近傍の回廊外地表で埋め直す。坑口/開削部は地表≈床なので
+        # 残り、回廊外の別道路も残る。
+        if (tunnels and patch_bbox_latlon is not None
+                and TUNNEL_SURFACE_ROAD_COVER_MARGIN >= 0):
+            _rjj, _rii = np.mgrid[0:nz, 0:nx]
+            _rjj = _rjj.astype(np.float32); _rii = _rii.astype(np.float32)
+            _tcov = np.zeros((nz, nx), dtype=bool)
+            _cmarg = float(TUNNEL_SURFACE_ROAD_COVER_MARGIN)
+            for _tb in tunnels:
+                _co = _tb.get("coords") or []
+                if len(_co) < 2:
+                    continue
+                _p = [_lonlat_to_grid_xy(_la, _lo, patch_bbox_latlon, nz, nx)
+                      for _la, _lo in _co]
+
+                def _floor_ref(_gp, _fb):
+                    if _fb is not None:
+                        return float(_fb)
+                    _c = int(round(_gp[0])); _r = int(round(_gp[1]))
+                    if 0 <= _r < nz and 0 <= _c < nx:
+                        return float(y_surf_land[_r, _c])
+                    return 0.0
+
+                _fs = _floor_ref(_p[0], _tb.get("startF"))
+                _fe = _floor_ref(_p[-1], _tb.get("endF"))
+                _sl = [((_p[_k + 1][0] - _p[_k][0]) ** 2 + (_p[_k + 1][1] - _p[_k][1]) ** 2) ** 0.5
+                       for _k in range(len(_p) - 1)]
+                _tot = sum(_sl) or 1.0
+                _fv = [_fs]; _acc = 0.0
+                for _s in _sl:
+                    _acc += _s
+                    _fv.append(_fs + (_fe - _fs) * (_acc / _tot))
+                _wm = float(_tb.get("width_m") or 5.5)
+                _hw = (max(1.0, (_wm / max(h_res_block, 0.1)) / 2.0)
+                       + float(TUNNEL_SURFACE_ROAD_CORRIDOR_PAD))
+                _hw2 = _hw * _hw
+                for _k in range(len(_p) - 1):
+                    _ax, _az = _p[_k]; _bx, _bz = _p[_k + 1]
+                    _dx, _dz = _bx - _ax, _bz - _az
+                    _l2 = _dx * _dx + _dz * _dz
+                    if _l2 < 1e-6:
+                        continue
+                    _t = np.clip(((_rii - _ax) * _dx + (_rjj - _az) * _dz) / _l2, 0.0, 1.0)
+                    _d2 = (_rii - (_ax + _t * _dx)) ** 2 + (_rjj - (_az + _t * _dz)) ** 2
+                    _fl = _fv[_k] + _t * (_fv[_k + 1] - _fv[_k])
+                    _tcov |= (_d2 <= _hw2) & (y_surf_land > _fl + _cmarg)
+            if _tcov.any():
+                # ① 道路帯(road_mask/road_major_mask)から除去 → 地表に道路を塗らない
+                road_mask = road_mask & (~_tcov)
+                if road_major_mask is not None and road_major_mask.shape == (nz, nx):
+                    road_major_mask = road_major_mask & (~_tcov)
+                # ② オルソ由来の路面色(道路中央=衛星画像の舗装。road_mask ではないので①では
+                #    消えない)も、被覆部の回廊内を最近傍の“回廊外”地表で埋め直して山肌に
+                #    道路が見えないようにする（周囲の森林地表に馴染ませる）。
+                from scipy.ndimage import distance_transform_edt as _edt
+                _, (_iy, _ix) = _edt(_tcov, return_indices=True)
+                surf_block[_tcov] = surf_block[_iy[_tcov], _ix[_tcov]]
         surf_block[road_mask & land_for_road] = road_minor_block
         if road_major_mask is not None and road_major_mask.shape == surf_block.shape:
             surf_block[road_major_mask & land_for_road] = road_block
