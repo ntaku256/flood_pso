@@ -2145,17 +2145,22 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         min_deck = (int(y_sea_surface) + clear_full) if has_water else -1.0e9
         return rise_full, half_w, rc, min_deck
 
-    EXTEND_MAX = 40                                    # 端の最大延長(block)
+    EXTEND_MAX = 50                                    # 端の最大延長(block)
+    # 最高点へ着地したあと、直進方向に道路(road_mask)が続く限り更に延ばす柵なしすり付けの
+    # 上限[block]。道路が途切れる/T字で直進の先に道路が無い所で手前停止する。0 で無効。
+    BRIDGE_APPROACH_EXTRA = 10
     def _extend_to_highest(end_pt, in_pt):
         # 端点から外向き(奥に続く道路方向)へ d=0..EXTEND_MAX block 走査し、その区間の最高地形(=道路)点に着地。
         # 「元データから延長して一番高い道路地点から橋をはやす」。チェーン分割後に適用するので
         # この延長部はグループ化の対象外（既に linked/chains 確定後）。川底/低所への降下を防ぐ。
+        # 着地後は直進の道路が続く限り BRIDGE_APPROACH_EXTRA block まで更に延長し、柵なし
+        # すり付けを道路へ長く馴染ませる（直進の先に道路が無い=終端/T字なら手前で停止）。
         dx, dz = end_pt[0] - in_pt[0], end_pt[1] - in_pt[1]
         L = math.hypot(dx, dz)
         if L < 1e-6:
             return end_pt, terrain_y(*end_pt)
         dx, dz = dx / L, dz / L
-        best_pt, best_h = None, None
+        best_pt, best_h, best_d = None, None, 0
         for d in range(0, EXTEND_MAX + 1):
             x, z = end_pt[0] + dx * d, end_pt[1] + dz * d
             i, j = col(x, z)
@@ -2165,9 +2170,21 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                 continue
             h = int(y_surf_land[j, i])
             if best_h is None or h > best_h:
-                best_h, best_pt = h, (x, z)
+                best_h, best_pt, best_d = h, (x, z), d
         if best_h is None:
             return end_pt, terrain_y(*end_pt)
+        # 最高点の先へ、直進方向に道路が続く限り更に延長（T字/道路終端で手前停止）。
+        if road_mask is not None and BRIDGE_APPROACH_EXTRA > 0:
+            for d in range(best_d + 1, best_d + int(BRIDGE_APPROACH_EXTRA) + 1):
+                x, z = end_pt[0] + dx * d, end_pt[1] + dz * d
+                i, j = col(x, z)
+                if not (0 <= j < nz and 0 <= i < nx):
+                    break
+                if sea_mask[j, i] or not np.isfinite(y_surf_land[j, i]):
+                    break
+                if not road_mask[j, i]:              # 直進の先に道路が無い=終端/T字 → 手前で停止
+                    break
+                best_pt, best_h = (x, z), int(y_surf_land[j, i])
         return best_pt, best_h
 
     def _project(mpts, seglen, q):
