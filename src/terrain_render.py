@@ -1171,15 +1171,24 @@ def assign_global_bridge_anchors(bridges, dem_full, lat_max, lon_min, res_lat, r
                 ys.append(v)
         if not ys:
             v = ysl(r0, c0)
-            return int(v) if v is not None else 1
+            return int(v) if v is not None else None       # None = 生成DEM範囲外/水上で高さ不明
         return int(round(np.median(ys)))
 
     for b in bridges:
         c = b.get("coords") or []
         if len(c) < 2:
             continue
-        b["startS"] = anchor(c[0], c[1])
-        b["endS"] = anchor(c[-1], c[-2])
+        s = anchor(c[0], c[1])
+        e = anchor(c[-1], c[-2])
+        # 片端が生成DEMの範囲外/水上で高さ不明(None)なら、もう片方の端の高さで代用する。
+        # 橋が生成範囲で途切れる所で、端アンカーが地表(1)へ落ちてデッキ全体が地面まで
+        # 降下するのを防ぐ（＝範囲外の端は反対端の高さに合わせて平坦に飛ばす）。両端不明なら 1。
+        if s is None:
+            s = e
+        if e is None:
+            e = s
+        b["startS"] = int(s) if s is not None else 1
+        b["endS"] = int(e) if e is not None else 1
 
 
 def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
