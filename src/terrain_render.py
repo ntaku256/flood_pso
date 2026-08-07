@@ -55,6 +55,17 @@ TUNNEL_SURFACE_ROAD_CORRIDOR_PAD = 8
 UNDERFILL_MIN = 2
 UNDERFILL_EXTRA = 1
 UNDERFILL_HARD_CAP = 96
+# トンネル坑口(出入口)“周り”の下方向 増し厚。坑口は地表が道路レベルまで局所的に下げられ、
+# 可変アンダーフィル(近傍最低段差ベース)では床下がほぼ埋まらずシェル内部の空洞(すきま)が
+# 残りやすい。各トンネルの coords 両端(=坑口)を grid に投影し、坑口を中心に**軸方向**へ内側
+# (トンネル側)REACH_IN・外側(進入路側)REACH_OUT[block] 伸ばした半径 RADIUS[block] のカプセル
+# 内の陸セルのアンダーフィル深さを最低 DEPTH[block] へ引き上げて床下を stone で塞ぐ
+# (UNDERFILL_HARD_CAP でクランプ)。傾斜が緩く「坑門(覆われる端)と入口(開削端)」が離れる区間も
+# 軸方向に伸ばして覆う。刳り貫きは後段なので増し厚は坑口の周り/床下だけに残る。RADIUS=0 で無効。
+TUNNEL_PORTAL_UNDERFILL_RADIUS = 22
+TUNNEL_PORTAL_UNDERFILL_DEPTH = 18
+TUNNEL_PORTAL_UNDERFILL_REACH_IN = 32   # 坑口から内側(トンネル側)へ延ばす長さ[block]
+TUNNEL_PORTAL_UNDERFILL_REACH_OUT = 12  # 坑口から外側(進入路側)へ延ばす長さ[block]
 
 
 class _DenseBlockSink:
@@ -2764,6 +2775,55 @@ def dem_to_blocks_enhanced(
         _under_depth = np.clip(_drop + int(UNDERFILL_EXTRA), _umin, _cap).astype(np.int32)
     else:                                    # 旧挙動: 一律クランプ
         _under_depth = np.clip(_drop + 1, 2, int(max(2, underfill_cap))).astype(np.int32)
+    # --- トンネル坑口“周り”の下方向 増し厚（坑口壁際/床下のすきま対策） ---
+    # 坑口では地表が道路レベルまで下げられ、その真下にシェル内部の空洞(すきま)が残りやすい。
+    # 可変アンダーフィルは近傍最低段差で決まるため、坑口のような“局所的に低い平面”は
+    # 深さ≈最小(2)しか埋まらず床下に穴が開く。coords 両端(=坑口)と内隣接点から軸方向を求め、
+    # 坑口を中心に内側 REACH_IN・外側 REACH_OUT 伸ばした半径 R のカプセル内の陸セルの
+    # アンダーフィル深さを最低 DEPTH[block] へ引き上げて床下を stone で塞ぐ
+    # (UNDERFILL_HARD_CAP でクランプ)。刳り貫きは後段なので増し厚は坑口の周り/床下だけに残る。
+    if (tunnels and patch_bbox_latlon is not None
+            and int(TUNNEL_PORTAL_UNDERFILL_RADIUS) > 0):
+        _pr2 = float(TUNNEL_PORTAL_UNDERFILL_RADIUS) ** 2
+        _pdep = int(min(max(1, TUNNEL_PORTAL_UNDERFILL_DEPTH), UNDERFILL_HARD_CAP))
+        _rin = float(max(0, TUNNEL_PORTAL_UNDERFILL_REACH_IN))
+        _rout = float(max(0, TUNNEL_PORTAL_UNDERFILL_REACH_OUT))
+        _pjj, _pii = np.mgrid[0:nz, 0:nx]
+        _pjj = _pjj.astype(np.float32); _pii = _pii.astype(np.float32)
+        _pmask = np.zeros((nz, nx), dtype=bool)
+
+        def _portal_capsule(_p_ll, _n_ll):
+            # 坑口 _p_ll と内隣接 _n_ll(トンネル内側)から軸方向 u を求め、坑口を中心に
+            # [-REACH_OUT, +REACH_IN]u 伸ばした線分から半径 R 以内の grid セルを返す。
+            _px, _pz = _lonlat_to_grid_xy(_p_ll[0], _p_ll[1], patch_bbox_latlon, nz, nx)
+            _nxg, _nzg = _lonlat_to_grid_xy(_n_ll[0], _n_ll[1], patch_bbox_latlon, nz, nx)
+            _ux, _uz = _nxg - _px, _nzg - _pz            # 内向き
+            _un = (_ux * _ux + _uz * _uz) ** 0.5
+            if _un < 1e-6:                               # 退化(重複点) → 円板
+                _ax, _az, _bx, _bz = _px, _pz, _px, _pz
+            else:
+                _ux, _uz = _ux / _un, _uz / _un
+                _ax, _az = _px - _ux * _rout, _pz - _uz * _rout   # 外(進入路)端
+                _bx, _bz = _px + _ux * _rin, _pz + _uz * _rin     # 内(トンネル)端
+            _dx, _dz = _bx - _ax, _bz - _az
+            _l2 = _dx * _dx + _dz * _dz
+            if _l2 < 1e-6:
+                _d2 = (_pii - _ax) ** 2 + (_pjj - _az) ** 2
+            else:
+                _t = np.clip(((_pii - _ax) * _dx + (_pjj - _az) * _dz) / _l2, 0.0, 1.0)
+                _d2 = (_pii - (_ax + _t * _dx)) ** 2 + (_pjj - (_az + _t * _dz)) ** 2
+            return _d2 <= _pr2
+
+        for _tb in tunnels:
+            _co = _tb.get("coords") or []
+            if len(_co) < 2:
+                continue
+            _pmask |= _portal_capsule(_co[0], _co[1])
+            _pmask |= _portal_capsule(_co[-1], _co[-2])
+        _pmask &= land_mask                          # 海/水柱は対象外
+        if _pmask.any():
+            _under_depth = np.where(
+                _pmask, np.maximum(_under_depth, _pdep), _under_depth).astype(np.int32)
     land_idx = np.argwhere(land_mask)
     for j, i_ in land_idx.tolist():
         bx_v = int(BX[j, i_]); bz_v = int(BZ[j, i_])
