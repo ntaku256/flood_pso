@@ -46,6 +46,13 @@ TUNNEL_COVER_CLOSE_BLOCKS = 8
 UNDERFILL_MIN = 2
 UNDERFILL_EXTRA = 1
 UNDERFILL_HARD_CAP = 96
+# トンネル坑口(出入口)“周り”の下方向 増し厚。坑口は地表が道路レベルまで局所的に下げられ、
+# 可変アンダーフィル(近傍最低段差ベース)では床下がほぼ埋まらずシェル内部の空洞(すきま)が
+# 残りやすい。各トンネルの coords 両端(=坑口)を grid に投影し、半径 RADIUS[block] の円板内の
+# 陸セルのアンダーフィル深さを最低 DEPTH[block] へ引き上げて床下を stone で塞ぐ
+# (UNDERFILL_HARD_CAP でクランプ)。刳り貫きは後段なので増し厚は坑口の周り/床下だけに残る。RADIUS=0 で無効。
+TUNNEL_PORTAL_UNDERFILL_RADIUS = 22
+TUNNEL_PORTAL_UNDERFILL_DEPTH = 18
 
 
 class _DenseBlockSink:
@@ -2668,6 +2675,32 @@ def dem_to_blocks_enhanced(
         _under_depth = np.clip(_drop + int(UNDERFILL_EXTRA), _umin, _cap).astype(np.int32)
     else:                                    # 旧挙動: 一律クランプ
         _under_depth = np.clip(_drop + 1, 2, int(max(2, underfill_cap))).astype(np.int32)
+    # --- トンネル坑口“周り”の下方向 増し厚（坑口壁際/床下のすきま対策） ---
+    # 坑口では地表が道路レベルまで下げられ、その真下にシェル内部の空洞(すきま)が残りやすい。
+    # 可変アンダーフィルは近傍最低段差で決まるため、坑口のような“局所的に低い平面”は
+    # 深さ≈最小(2)しか埋まらず床下に穴が開く。coords 両端(=坑口)を grid に投影し、半径 R の
+    # 円板内の陸セルのアンダーフィル深さを最低 DEPTH[block] へ引き上げて床下を stone で塞ぐ
+    # (UNDERFILL_HARD_CAP でクランプ)。刳り貫きは後段なので増し厚は坑口の周り/床下だけに残る。
+    if (tunnels and patch_bbox_latlon is not None
+            and int(TUNNEL_PORTAL_UNDERFILL_RADIUS) > 0):
+        _pr = int(TUNNEL_PORTAL_UNDERFILL_RADIUS)
+        _pdep = int(min(max(1, TUNNEL_PORTAL_UNDERFILL_DEPTH), UNDERFILL_HARD_CAP))
+        _pjj, _pii = np.mgrid[0:nz, 0:nx]
+        _pmask = np.zeros((nz, nx), dtype=bool)
+        for _tb in tunnels:
+            _co = _tb.get("coords") or []
+            if len(_co) < 2:
+                continue
+            for _pla, _plo in (_co[0], _co[-1]):     # 両坑口
+                _px, _pz = _lonlat_to_grid_xy(_pla, _plo, patch_bbox_latlon, nz, nx)
+                _pci = int(round(_px)); _prj = int(round(_pz))
+                if not (0 <= _pci < nx and 0 <= _prj < nz):
+                    continue
+                _pmask |= ((_pii - _pci) ** 2 + (_pjj - _prj) ** 2) <= _pr * _pr
+        _pmask &= land_mask                          # 海/水柱は対象外
+        if _pmask.any():
+            _under_depth = np.where(
+                _pmask, np.maximum(_under_depth, _pdep), _under_depth).astype(np.int32)
     land_idx = np.argwhere(land_mask)
     for j, i_ in land_idx.tolist():
         bx_v = int(BX[j, i_]); bz_v = int(BZ[j, i_])
