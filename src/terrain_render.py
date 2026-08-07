@@ -1649,7 +1649,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         min_deck = (int(y_sea_surface) + clear_full) if has_water else -1.0e9
         return rise_full, half_w, rc, min_deck
 
-    EXTEND_MAX = 40                                    # 端の最大延長(block)
+    EXTEND_MAX = 50                                    # 端の最大延長(block)
     # 最高点へ着地したあと、直進方向に道路(road_mask)が続く限り更に延ばす柵なしすり付けの
     # 上限[block]。道路が途切れる/T字で直進の先に道路が無い所で手前停止する。0 で無効。
     BRIDGE_APPROACH_EXTRA = 10
