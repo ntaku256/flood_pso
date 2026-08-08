@@ -81,6 +81,32 @@ class _DenseBlockSink:
         h = max(1, min(int(height), self.arr.shape[0]))
         return self.arr[:h].copy()
 
+    def gravity_guard(self, fall_key: str = "gray_concrete_powder",
+                      safe_key: str = "gray_concrete") -> int:
+        """重力ブロック(既定=gray_concrete_powder)の**直下が固体でない**セルを、落下しない
+        安全ブロック(既定=gray_concrete)へ置換する。ワールド読込時の落下・道路の穴あきを防ぐ。
+        直下が空気/水/範囲外=非支持。粉ブロックの積み重ねは、is_solid に粉自身も含めるため
+        下端(空気の上)だけが置換され、上側は置換後の固体に支えられる（1パスで収束）。"""
+        from block_palette import BLOCKS as _BP, PALETTE_KEYS as _PK
+        try:
+            fall_id = int(block_id(fall_key)); safe_id = int(block_id(safe_key))
+        except KeyError:
+            return 0
+        arr = self.arr
+        powder = (arr == fall_id)
+        if not powder.any():
+            return 0
+        is_solid = np.zeros(len(_PK) + 1, dtype=bool)
+        for _i, _k in enumerate(_PK):
+            is_solid[_i] = (_BP[_k][2] == "opaque")     # 不透明=固体（air/water/ice は除外）
+        solid_below = np.zeros_like(arr, dtype=bool)
+        solid_below[1:] = is_solid[arr[:-1]]            # arr[y-1] が固体か（y=0 行は非支持）
+        unsupported = powder & ~solid_below
+        n = int(unsupported.sum())
+        if n:
+            arr[unsupported] = safe_id
+        return n
+
 
 # ─────────────────────────────────────────────────────────────
 # DEM 由来の地形特徴量
@@ -1943,7 +1969,7 @@ def assign_global_tunnel_anchors(tunnels, dem_full, lat_max, lon_min, res_lat, r
 def add_tunnel_blocks(blocks, tunnels, patch_bbox_latlon, nz, nx, *,
                       y_surf_land, h_res_block_m, surf_block=None, sea_mask=None,
                       road_mask=None,
-                      floor_key="gray_concrete", base_key="stone",
+                      floor_key="gray_concrete_powder", base_key="stone",   # 走行面（直下=路盤stoneで支持）
                       light_key="sea_lantern", line_key="white_concrete",
                       core_always_covered: bool = False,
                       core_cover_slack: int | None = None,
@@ -2335,7 +2361,7 @@ def dem_to_blocks_enhanced(
     parkings: list | None = None,
     ortho_rgb: np.ndarray | None = None,
     patch_bbox_latlon: tuple | None = None,
-    road_block: str = "andesite",
+    road_block: str = "gray_concrete_powder",   # 幹線舗装（地表上=直下は地形固体で支持される）
     road_major_mask: np.ndarray | None = None,
     road_minor_block: str = "gravel",
     # 道路の「一番外側」に引く 1 ブロック境界線（普通=灰色コンクリ / 小路=青緑テラコッタ）
@@ -3234,4 +3260,11 @@ def dem_to_blocks_enhanced(
             tree_grid[tree_cells] = "green_stained_glass"
         _emit(LEGEND_YS[2], tree_grid, full=True)
 
+    # 重力ブロック(道路舗装=gray_concrete_powder)の落下防止: 直下が固体でないセルを
+    # 非落下の gray_concrete へ置換（橋デッキ天面/建物屋根の路面色など、道路面以外に
+    # 舗装色が乗って宙に浮いた箇所も安全化する）。
+    if hasattr(blocks, "gravity_guard"):
+        _ng = blocks.gravity_guard("gray_concrete_powder", "gray_concrete")
+        if _ng:
+            print(f"  [gravity-guard] 直下非固体の gray_concrete_powder {_ng} 個 → gray_concrete")
     return blocks.array(max_y + 1), [nx, max_y + 1, nz]

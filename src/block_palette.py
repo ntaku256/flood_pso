@@ -98,6 +98,7 @@ BLOCKS: dict[str, tuple[str, tuple[int, int, int], str]] = {
     "lime_concrete":       ("minecraft:lime_concrete", (94, 168, 24), "opaque"),
     "pink_concrete":       ("minecraft:pink_concrete", (213, 101, 142), "opaque"),
     "gray_concrete":       ("minecraft:gray_concrete", (54, 57, 61), "opaque"),
+    "gray_concrete_powder": ("minecraft:gray_concrete_powder", (77, 80, 84), "opaque"),  # 道路舗装（※重力：直下に固体必須）
     "light_gray_concrete": ("minecraft:light_gray_concrete", (125, 125, 115), "opaque"),
     "cyan_concrete":       ("minecraft:cyan_concrete", (21, 118, 136), "opaque"),
     "purple_concrete":     ("minecraft:purple_concrete", (100, 31, 156), "opaque"),
@@ -151,6 +152,8 @@ PALETTE_KEYS: list[str] = list(BLOCKS.keys())
 # カラーマッチに使うアンカー（opaque のみ。air/water/ice は除外）
 # 発光等のマーカー専用ブロックは地表オルソ色マッチのアンカーから除外
 _NON_MATCH = {"sea_lantern", "glass", "glowstone", "iron_bars",
+              # 重力ブロック: オルソ色マッチで地表(斜面/縁=直下が空)に湧くと落下するため候補外
+              "gray_concrete_powder",
               "white_stained_glass", "red_stained_glass", "orange_stained_glass",
               "light_blue_stained_glass", "blue_stained_glass",
               "green_stained_glass", "black_stained_glass",
