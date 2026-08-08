@@ -1150,7 +1150,11 @@ def assign_global_bridge_anchors(bridges, dem_full, lat_max, lon_min, res_lat, r
     H, W = dem_full.shape
     M_PER_DEG_LAT = 111320.0
     h_res_dem = max(res_lat * M_PER_DEG_LAT, 1e-6)        # DEM 1セルの m（lat方向）
-    step = max(1, int(round(h_res_block_m / h_res_dem)))  # 1 block = step DEMセル
+    # 端アンカーは端点から外側(奥へ続く道路方向)へ ≈45m の陸地形 median を取る。距離は必ず
+    # メートル基準にする: DEM が粗い(GSI 5m→約4m/セル)と 1セル=数block になり、旧実装の
+    # 「45セル」方式では 45×4≈180m 先まで届いて『トンネルの先の山』を拾い、坑口手前でデッキが
+    # 高いまま浮く不具合が出ていた。LiDAR(1m)では 45セル=45m と実質同じ挙動を保つ。
+    n_out_anchor = max(1, int(round(45.0 / h_res_dem)))   # ≈45m を DEMセル数へ換算
 
     def cell(lat, lon):
         return int(round((lat_max - lat) / res_lat)), int(round((lon - lon_min) / res_lon))  # (row,col)
@@ -1169,8 +1173,8 @@ def assign_global_bridge_anchors(bridges, dem_full, lat_max, lon_min, res_lat, r
         if L > 1e-6:
             dr, dc = dr / L, dc / L
         ys = []
-        for d in range(0, 46):                            # 端から外側 0..45 block の陸地形
-            v = ysl(int(round(r0 + dr * d * step)), int(round(c0 + dc * d * step)))
+        for d in range(0, n_out_anchor + 1):              # 端から外側 ≈45m の陸地形（DEMセル単位）
+            v = ysl(int(round(r0 + dr * d)), int(round(c0 + dc * d)))
             if v is not None:
                 ys.append(v)
         if not ys:
@@ -1217,6 +1221,12 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     MAX_RISE_M, RAMP_HV = 10.0, 4.0
     CLEAR_M = {"main": 6.0, "normal": 5.0, "dirt": 3.0}
     PIER_SPACING_M = 16.0
+    # ── 橋端すり付け/支持の自動判別パラメータ（デッキが道路/地面から浮くのを防ぐ）──
+    BRIDGE_END_LAND_TH = 2      # デッキが直下地表からこの差以内なら「着地済み」とみなす[block]
+    BRIDGE_END_LOOK = 24        # 端の外向きに水/範囲外(=支持ケース)を判定する走査距離[block]
+    BRIDGE_END_RAMP = 120       # 端を地表へ降ろすすり付けの最大長[block]（4:1で既存プロファイルに合流）
+    BRIDGE_SUPPORT_MIN = 6      # デッキが直下床からこれ以上浮く所は橋脚で必ず支える[block]
+    BRIDGE_SUPPORT_STEP = 8     # 追加橋脚の最小間隔[block]（宙吊りの空洞を無くす）
     seen: set = set()
     ymax = [0]
 
@@ -1561,7 +1571,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     # ── レンダリング本体: 1スパン=連続ポリラインを startS→endS 線形デッキで立体化。
     #    head_ext/tail_ext = 端の延長区間長(station)。延長部は柵を生成しない(道路へ自然に接続)。──
     def _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc,
-                     head_ext=0.0, tail_ext=0.0):
+                     head_ext=0.0, tail_ext=0.0, treat_head=True, treat_tail=True):
         seg = [math.hypot(mpts[s + 1][0] - mpts[s][0], mpts[s + 1][1] - mpts[s][1])
                for s in range(len(mpts) - 1)]
         total = sum(seg)
@@ -1569,6 +1579,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
             return [], []
         pier_step = max(4.0, PIER_SPACING_M / max(h_res_block_m, 0.1))
         next_pier = pier_step
+        next_support = 0.0
         # デッキ幅は「直下道路実幅の一番大きい部分」で全長統一(#1)。事前スキャンで最大半幅を求める
         # (nominal=width_m半幅が上限)。くびれ/ジャギを無くし均一幅にする。
         uniform_hw = 1
@@ -1584,8 +1595,46 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                 uniform_hw = max(uniform_hw, _road_halfw(
                     x0 + (x1 - x0) * t, z0 + (z1 - z0) * t, ox, oz, half_w))
         lhw = max(1, uniform_hw)
-        _, _, _prof_sts, dyt = _deck_profile(mpts, seg, total, startS, endS,
-                                             rise_full, min_deck, lhw)
+        _cxs, _czs, _prof_sts, dyt = _deck_profile(mpts, seg, total, startS, endS,
+                                                   rise_full, min_deck, lhw)
+        # ── 端すり付け/支持の自動判別: 各自由端で「奥に地上道路が続く」ならデッキを地表高へ
+        #    勾配で降ろして道路へ接続（すり付け）。範囲外/水/谷で切れる端はデッキ高を据置き、
+        #    後段の橋脚で地面まで支える（どちらの場合も宙吊りを作らない）。──
+        _m = len(dyt)
+
+        def _grd(i):
+            return ground_y(_cxs[i], _czs[i])
+
+        def _treat_end(term, inw, sgn):
+            if not (0 <= term < _m and 0 <= inw < _m):
+                return
+            g_term = _grd(term)
+            if dyt[term] - g_term <= BRIDGE_END_LAND_TH:
+                return                                   # 既に地表へ着地している端
+            dxo, dzo = _cxs[term] - _cxs[inw], _czs[term] - _czs[inw]
+            Lo = math.hypot(dxo, dzo) or 1.0
+            dxo, dzo = dxo / Lo, dzo / Lo                 # 端の外向き（奥へ続く道路方向）
+            nwater = ntot = 0
+            for d in range(1, BRIDGE_END_LOOK + 1):
+                ci, cj = col(_cxs[term] + dxo * d, _czs[term] + dzo * d)
+                if not (0 <= cj < nz and 0 <= ci < nx):
+                    return                               # 生成範囲外で切断＝支持ケース（据置）
+                ntot += 1
+                if sea_mask[cj, ci]:
+                    nwater += 1
+            if ntot and nwater * 2 >= ntot:              # 外向きが主に水＝川/海を渡る端＝支持（据置）
+                return
+            # 降ろすケース（奥が陸: 地上道路の続き / トンネル坑口へ下る等）: 端を g_term まで下げ、
+            # 内側へ 4:1 勾配で復帰する（min で既存プロファイルに自然合流・持ち上げはしない）。
+            for j in range(0, BRIDGE_END_RAMP + 1):
+                i = term + sgn * j
+                if not (0 <= i < _m):
+                    break
+                dyt[i] = max(_grd(i), min(dyt[i], int(round(g_term + j / RAMP_HV))))
+        if treat_head:
+            _treat_end(0, 1, +1)
+        if treat_tail:
+            _treat_end(_m - 1, _m - 2, -1)
         idx = 0
         s_acc = 0.0
         for si in range(len(seg)):
@@ -1626,6 +1675,17 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                             for yy in range(fy, dy - 1):
                                 put(ix, yy, iz, pier_key)
                             put(ix, dy - 1, iz, cap_key)
+                # 追加支持: デッキが直下床から高く浮く区間（端の据置・谷/窪みの跨ぎ）は、
+                # 通常橋脚(pier_step)より細かい間隔で中央橋脚を必ず立てて宙吊りの空洞を無くす。
+                _fy2 = floor_y(cx, cz)
+                if dy - 1 - _fy2 >= BRIDGE_SUPPORT_MIN and station >= next_support:
+                    next_support = station + BRIDGE_SUPPORT_STEP
+                    shafts2 = (-lhw + 1, lhw - 1) if (rc == "main" and lhw >= 2) else (0,)
+                    for w in shafts2:
+                        ix, iz = col(cx + ox * w, cz + oz * w)
+                        for yy in range(_fy2, dy - 1):
+                            put(ix, yy, iz, pier_key)
+                        put(ix, dy - 1, iz, cap_key)
                 # 橋下の処理（列ごと）: 実際に水がある列のみ「その列の水面まで」水柱、
                 #   乾いた陸の列は衛星が橋を写し込んだ路面色を、橋脇の周囲色で上書き補完する。
                 #   水位はバンド最大でなく列ごとの実水面で決める(端の高地に引っ張られた異常水位を防ぐ)。
@@ -1902,16 +1962,20 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         dy0, d0 = _parent_at(mpts[0])
         dy1, d1 = _parent_at(mpts[-1])
         head_ext = tail_ext = 0.0
+        treat_head = treat_tail = True                # 本線接続端は降ろさない(接続が切れるため)
         if dy0 is not None and (dy1 is None or d0 <= d1):
             startS = dy0                              # 接続端=派生元の橋の高さ（延長しない）
             mpts, tail_ext, endS = _ext_tail(mpts)
+            treat_head = False                        # head=本線接続端 → 高さ据置
         elif dy1 is not None:
             endS = dy1
             mpts, head_ext, startS = _ext_head(mpts)
+            treat_tail = False                        # tail=本線接続端 → 高さ据置
         else:                                         # 本線未接続: 通常チェーン同様に両端延長
             mpts, head_ext, startS = _ext_head(mpts)
             mpts, tail_ext, endS = _ext_tail(mpts)
-        _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc, head_ext, tail_ext)
+        _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc, head_ext, tail_ext,
+                     treat_head=treat_head, treat_tail=treat_tail)
         if _BDBG or _BDUMP:
             _sl = _seglens(mpts); _tot = sum(_sl)
             if _BDBG:
