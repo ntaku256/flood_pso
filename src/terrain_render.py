@@ -785,6 +785,35 @@ def _building_area_height_factor(tp: str, area_m2: float) -> float:
     return float(np.clip(0.62 + 0.28 * math.log10(a / 90.0), 0.52, 1.10))
 
 
+def _gable_roof_rise(ins, roof_slope: float, roof_cap: float, aspect_min: float = 1.6):
+    """細長い footprint 向けの切妻(gable)屋根の rise マップを返す。
+    PCA で長辺方向を求め、その中心線(棟)を通し短辺方向の距離で左右に傾ける。
+    正方形に近い(縦横比 < aspect_min)場合は None を返し、呼び出し側で寄棟(hip)にフォールバックする。"""
+    ys, xs = np.where(ins)
+    if ys.size < 4:
+        return None
+    cy = float(ys.mean()); cx = float(xs.mean())
+    yy = ys - cy; xx = xs - cx
+    cyy = float((yy * yy).mean()); cxx = float((xx * xx).mean()); cyx = float((yy * xx).mean())
+    tr = cyy + cxx
+    disc = max(tr * tr / 4.0 - (cyy * cxx - cyx * cyx), 0.0) ** 0.5
+    l1 = tr / 2.0 + disc; l2 = max(tr / 2.0 - disc, 1e-6)
+    if (l1 / l2) ** 0.5 < aspect_min:          # 正方形に近い → 寄棟に任せる
+        return None
+    if abs(cyx) > 1e-6:                          # 長辺方向の固有ベクトル(major)
+        mvy = l1 - cxx; mvx = cyx
+    else:
+        mvy, mvx = (1.0, 0.0) if cyy >= cxx else (0.0, 1.0)
+    n = (mvy * mvy + mvx * mvx) ** 0.5 or 1.0
+    mvy /= n; mvx /= n
+    perp = np.abs(xx * mvy - yy * mvx)          # 棟(中心線)からの短辺方向距離(block)
+    half = float(perp.max()) or 1.0
+    rise_vals = np.minimum(np.clip(half - perp, 0.0, None) * roof_slope, roof_cap)
+    out = np.zeros(ins.shape, dtype=np.float32)
+    out[ys, xs] = rise_vals.astype(np.float32)
+    return out
+
+
 def build_building_maps(
     buildings: list,
     dsm_h_block: np.ndarray | None,
@@ -884,9 +913,14 @@ def build_building_maps(
             if cov.any():
                 sub_h[cov] = np.maximum(sz[cov] - bz, min_h_m).astype(np.float32)
         elif roof_slope > 0 and tp in HIP_ROOF_TYPES and ins.sum() >= 4:
-            d = distance_transform_edt(ins).astype(np.float32)   # 縁からの内側距離(block)
-            rise = np.minimum(np.clip(d - 1.0, 0, None) * roof_slope, roof_cap)
-            sub_h[ins] = h + rise[ins]                            # 重なりは後勝ち
+            # 細長い建物=切妻(棟が線), 正方形に近い=寄棟(頂点), を縦横比で自動選択。
+            gab = _gable_roof_rise(ins, roof_slope, roof_cap)
+            if gab is not None:                                  # 切妻(gable)
+                sub_h[ins] = h + gab[ins]
+            else:                                                # 寄棟(hip): 縁からの距離変換
+                d = distance_transform_edt(ins).astype(np.float32)
+                rise = np.minimum(np.clip(d - 1.0, 0, None) * roof_slope, roof_cap)
+                sub_h[ins] = h + rise[ins]                        # 重なりは後勝ち
         else:
             sub_h[ins] = h
         sub_i = idmap[y0:y1, x0:x1]; sub_i[ins] = bid
