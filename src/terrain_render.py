@@ -1303,6 +1303,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                       scale_land, h_res_block_m, surf_block=None,
                       deck_key="andesite", pier_key="andesite",
                       cap_key="andesite", rail_key="andesite",
+                      road_key="gray_concrete_powder", line_key="white_concrete",
                       arch_rise_m=0.0, y_flood_top=None, road_mask=None) -> int:
     """OSM 橋（polyline + layer + road_class + width）を Tellus 流に立体化して blocks へ追加。
 
@@ -1319,13 +1320,13 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     _dump_recs = []
     MAX_RISE_M, RAMP_HV = 10.0, 4.0
     CLEAR_M = {"main": 6.0, "normal": 5.0, "dirt": 3.0}
-    PIER_SPACING_M = 16.0
+    PIER_SPACING_M = 48.0        # 通常橋脚の間隔[m]。大きいほど柱は疎（実橋のように間引く）
     # ── 橋端すり付け/支持の自動判別パラメータ（デッキが道路/地面から浮くのを防ぐ）──
     BRIDGE_END_LAND_TH = 2      # デッキが直下地表からこの差以内なら「着地済み」とみなす[block]
     BRIDGE_END_LOOK = 24        # 端の外向きに水/範囲外(=支持ケース)を判定する走査距離[block]
     BRIDGE_END_RAMP = 120       # 端を地表へ降ろすすり付けの最大長[block]（4:1で既存プロファイルに合流）
     BRIDGE_SUPPORT_MIN = 6      # デッキが直下床からこれ以上浮く所は橋脚で必ず支える[block]
-    BRIDGE_SUPPORT_STEP = 8     # 追加橋脚の最小間隔[block]（宙吊りの空洞を無くす）
+    BRIDGE_SUPPORT_STEP = 24    # 追加橋脚の最小間隔[block]。大きいほど柱は疎（1/3 に間引く狙い）
     # デッキ直下に地上道路(横断道・農道・生活道など road_mask で残った道)がある列には橋脚を
     # 立てない＝道路を跨ぐ。1セル膨張して路肩ギリギリに柱が刺さるのも避ける。橋自身の路面は
     # road_mask から除去済みなので中心線上の柱は従来どおり立つ。
@@ -1767,11 +1768,13 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                 for wi in range(-half_steps, half_steps + 1):
                     w = wi * 0.5
                     ix, iz = col(cx + ox * w, cz + oz * w)
-                    top_key = deck_key
-                    if surf_block is not None and 0 <= iz < nz and 0 <= ix < nx:
-                        sk = surf_block[iz, ix]
-                        if sk and sk != "water":    # 水域(河川/海)の色は橋の路面に使わない
-                            top_key = sk            # 上面=衛星写真の路面色
+                    # 上面=トンネルと同じ舗装(road_key)＋白線(line_key)。中央=破線, 端寄り=実線。
+                    if abs(w) < 0.5:                                  # 中央=破線(車線分離)
+                        top_key = line_key if (int(round(station)) // 3) % 2 == 0 else road_key
+                    elif lhw >= 3 and abs(abs(w) - (lhw - 1)) < 0.5:  # 端寄り=実線(車道外側線)
+                        top_key = line_key
+                    else:
+                        top_key = road_key
                     put(ix, dy, iz, top_key)
                     put(ix, dy - 1, iz, deck_key)   # 下面=安山岩(構造)
                     if abs(wi) == half_steps and lhw >= 1 and not in_ext:
