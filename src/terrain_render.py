@@ -1319,13 +1319,13 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     _dump_recs = []
     MAX_RISE_M, RAMP_HV = 10.0, 4.0
     CLEAR_M = {"main": 6.0, "normal": 5.0, "dirt": 3.0}
-    PIER_SPACING_M = 16.0
+    PIER_SPACING_M = 48.0        # 通常橋脚の間隔[m]。大きいほど柱は疎（実橋のように間引く）
     # ── 橋端すり付け/支持の自動判別パラメータ（デッキが道路/地面から浮くのを防ぐ）──
     BRIDGE_END_LAND_TH = 2      # デッキが直下地表からこの差以内なら「着地済み」とみなす[block]
     BRIDGE_END_LOOK = 24        # 端の外向きに水/範囲外(=支持ケース)を判定する走査距離[block]
     BRIDGE_END_RAMP = 120       # 端を地表へ降ろすすり付けの最大長[block]（4:1で既存プロファイルに合流）
     BRIDGE_SUPPORT_MIN = 6      # デッキが直下床からこれ以上浮く所は橋脚で必ず支える[block]
-    BRIDGE_SUPPORT_STEP = 8     # 追加橋脚の最小間隔[block]（宙吊りの空洞を無くす）
+    BRIDGE_SUPPORT_STEP = 24    # 追加橋脚の最小間隔[block]。大きいほど柱は疎（1/3 に間引く狙い）
     # デッキ直下に地上道路(横断道・農道・生活道など road_mask で残った道)がある列には橋脚を
     # 立てない＝道路を跨ぐ。1セル膨張して路肩ギリギリに柱が刺さるのも避ける。橋自身の路面は
     # road_mask から除去済みなので中心線上の柱は従来どおり立つ。
