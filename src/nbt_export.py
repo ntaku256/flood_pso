@@ -766,6 +766,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         building_roof_solid = None     # 建物 id → 屋根を型単色化しオルソ焼込無効(新設建物)
         building_style_keys = None     # 建物 id → スタイル(wood_house/apartment/shop/rc/...)
         building_facade_by_id = None   # 建物 id → 外壁装飾スペック(アーキタイプ由来)
+        road_unpaved_mask = None       # 未舗装道(service/track/農道/庭園路/歩道)→砂利+土の小径
+        _fgd_roads_saved = None        # FGD 道路polyline(橋横断判定に使う)
+        _osm_ground_polys = None       # OSM 非高架道路polyline(橋横断判定に使う)
         if use_osm:
             from tellus_data import fetch_osm_buildings_roads
             osm = fetch_osm_buildings_roads(
@@ -821,6 +824,16 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 {"roads": _roads}, patch_bbox_latlon,
                 grid_h=nz_g, grid_w=nx_g, h_res_block_m=h_res,
             )
+            _fgd_roads_saved = _roads
+            # FGD 未舗装(庭園路等=農道/私道・徒歩道) → 砂利小径。
+            _fgd_unp = [r for r in _roads
+                        if r.get("tags", {}).get("fgd_type") in ("庭園路等", "徒歩道")]
+            if _fgd_unp:
+                _, _fgd_unp_m, _ = build_osm_masks(
+                    {"roads": _fgd_unp}, patch_bbox_latlon,
+                    grid_h=nz_g, grid_w=nx_g, h_res_block_m=h_res)
+                road_unpaved_mask = (_fgd_unp_m if road_unpaved_mask is None
+                                     else (road_unpaved_mask | _fgd_unp_m))
             # P1: 建物高さ[m] を block grid にダウンサンプル → 各 footprint で p75 集約しフラット化
             # P2: 同時に建物 id / type 別の壁・屋根キーも生成
             dsm_h_block = None
@@ -993,6 +1006,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         # 用意して dem_to_blocks_enhanced に渡す（centerline は交差点を連続して貫くので「同一道路」
         # 判定に使える）。オフライン等で取得失敗時は None=極小穴埋めのみにフォールバック。
         road_curb_osm_mask = None
+        road_ground_other_mask = None   # 非高架(bridge/layer=0)の地上道路のみ→橋直下で残す判定に使う
         if road_mask is not None and road_curb_use_osm:
             try:
                 from tellus_data import fetch_osm_buildings_roads as _fetch_osm
@@ -1009,9 +1023,57 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 )
                 print(f"  [road-curb] OSM道路回廊 {int(road_curb_osm_mask.sum())} cells "
                       f"(roads={_osm_c.get('n_roads')}) → 交差点の偽枠線を抑制")
+                # 高架(bridge=yes/viaduct or layer>0)の道路を除いた「地上道路のみ」の回廊。
+                # 橋デッキ直下では、この地上道路(=別の道路)だけを残し、橋自身の路面は消す。
+                # tags で判定するので OSM way 単位の同定になり、真下/斜め下の別道路も保持できる。
+                def _lay(_t):
+                    try:
+                        return int(float(_t.get("layer", "0")))
+                    except Exception:
+                        return 0
+                _ground_roads = [
+                    r for r in _osm_c.get("roads", [])
+                    if not (r.get("tags", {}).get("bridge") in ("yes", "viaduct")
+                            or _lay(r.get("tags", {})) > 0)
+                ]
+                _, road_ground_other_mask, _ = build_osm_masks(
+                    {"buildings": [], "roads": _ground_roads},
+                    patch_bbox_latlon, grid_h=_nzg, grid_w=_nxg, h_res_block_m=h_res,
+                )
+                _osm_ground_polys = _ground_roads
+                print(f"  [bridge-underroad] 地上道路(非高架) {len(_ground_roads)}本 "
+                      f"/ 全{len(_osm_c.get('roads', []))}本  mask={int(road_ground_other_mask.sum())} cells")
+                # OSM 未舗装(service/track/path/footway/cycleway/pedestrian/bridleway/steps)→砂利小径
+                _UNP = {"service", "track", "path", "footway", "cycleway",
+                        "pedestrian", "bridleway", "steps"}
+                _osm_unp = [r for r in _osm_c.get("roads", [])
+                            if r.get("tags", {}).get("highway") in _UNP]
+                if _osm_unp:
+                    _, _osm_unp_m, _ = build_osm_masks(
+                        {"buildings": [], "roads": _osm_unp},
+                        patch_bbox_latlon, grid_h=_nzg, grid_w=_nxg, h_res_block_m=h_res)
+                    road_unpaved_mask = (_osm_unp_m if road_unpaved_mask is None
+                                         else (road_unpaved_mask | _osm_unp_m))
+                    print(f"  [road-unpaved] OSM未舗装 {len(_osm_unp)}本  "
+                          f"合計mask={int(road_unpaved_mask.sum())} cells")
             except Exception as _e:
                 print(f"  [road-curb] OSM回廊取得不可 ({_e}); 極小穴埋めのみで対応")
                 road_curb_osm_mask = None
+                road_ground_other_mask = None
+
+        # 橋軸に横断する道(FGD農道/OSM生活道)を同定 → 橋直下でも残す。並走(高架自身)は角度で落ちる。
+        road_cross_extra_mask = None
+        if bridges_render and (_osm_ground_polys or _fgd_roads_saved):
+            from terrain_render import build_transverse_crossing_mask
+            _factor2 = max(1, round(h_res / h_res_dem))
+            _nzc = dem_patch.shape[0] // _factor2
+            _nxc = dem_patch.shape[1] // _factor2
+            _cross_roads = list(_osm_ground_polys or []) + list(_fgd_roads_saved or [])
+            road_cross_extra_mask = build_transverse_crossing_mask(
+                bridges_render, _cross_roads, patch_bbox_latlon,
+                grid_h=_nzc, grid_w=_nxc, h_res_block_m=h_res)
+            print(f"  [bridge-underroad] 橋横断道mask={int(road_cross_extra_mask.sum())} cells "
+                  f"(roads={len(_cross_roads)})")
 
         print(f"Converting to blocks [enhanced] "
               f"(h_res={h_res}m/block, v_res={v_res}m/block, "
@@ -1068,6 +1130,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             water_mask=water_mask,
             road_major_mask=road_major_mask,
             road_curb_osm_mask=road_curb_osm_mask,
+            road_ground_other_mask=road_ground_other_mask,
+            road_cross_extra_mask=road_cross_extra_mask,
+            road_unpaved_mask=road_unpaved_mask,
             # 軸6-2: 地表ディザは絶対緯度経度から算出した世界座標グリッドに固定する。
             # 旧: 配列内オフセット(c0,r0)を渡していたため、同じ地点でもロードした DEM が
             # crop(南部4図郭mosaic)と world-full(18図郭mosaic)で配列原点が違うと gx0/gz0 が
