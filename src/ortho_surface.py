@@ -159,6 +159,63 @@ def colorize(surf: np.ndarray) -> np.ndarray:
     return img
 
 
+def _shadow_lift(rgb: np.ndarray, min_lum: float = 50.0, rel: float = 0.55,
+                 max_gain: float = 2.6) -> np.ndarray:
+    """影(低輝度)画素を **色比を保ったまま**明るく持ち上げる。空中写真は撮影時の
+    影が焼き込まれ、暗部が黒/灰ブロックに誤分類される。輝度 Y の中央値へ寄せる gain を
+    影画素だけに掛ける（彩度は enhance_rgb 側で調整済なのでここでは触らない＝シアン化回避）。
+    env ORTHO_SHADOW_LIFT=0 で無効。"""
+    import os as _os
+    if _os.environ.get("ORTHO_SHADOW_LIFT", "1") == "0":
+        return rgb
+    a = rgb.astype(np.float32)
+    Y = 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]
+    medY = float(np.median(Y))
+    thr = max(min_lum, rel * medY)
+    shadow = Y < thr
+    if not shadow.any():
+        return rgb
+    gain = np.clip(medY / np.maximum(Y, 1.0), 1.0, max_gain)
+    gain = np.where(shadow, gain, 1.0)[..., None]
+    print(f"[ortho:shadow-lift] 影画素={shadow.mean()*100:.1f}%  medY={medY:.0f} thr={thr:.0f}")
+    return np.clip(a * gain, 0, 255).astype(np.uint8)
+
+
+def _tree_green_fix(surf: np.ndarray, dst_meta: dict, verbose: bool = True) -> np.ndarray:
+    """暗部リフト後も暗い(黒/濃灰)まま残った画素のうち、ESA WorldCover が
+    樹林/低木/草地(10/20/30)の所だけ緑(grass)へ補正する。水(80)等は使わない
+    （10m と粗いので青誤爆を避けるため「暗い画素のみ」に限定、正しく明るく分類できた
+    所は触らない）。env ORTHO_TREE_GREEN=0 で無効。rasterio/ESA 取得不可なら skip。"""
+    import os as _os
+    if _os.environ.get("ORTHO_TREE_GREEN", "1") == "0":
+        return surf
+    DARK = ["deepslate", "black_concrete", "black_wool", "black_terracotta",
+            "gray_terracotta", "gray_concrete", "tuff"]
+    dark = np.isin(surf.astype(str), DARK)
+    if not dark.any():
+        return surf
+    try:
+        from tellus_data import fetch_esa_worldcover
+        from PIL import Image
+        H, W = surf.shape
+        esa = fetch_esa_worldcover(
+            lat_min=dst_meta["lat_min"], lat_max=dst_meta["lat_max"],
+            lon_min=dst_meta["lon_min"], lon_max=dst_meta["lon_max"], verbose=False)
+        cov = np.asarray(Image.fromarray(esa["cover"]).resize((W, H), Image.NEAREST))
+    except Exception as _e:
+        if verbose:
+            print(f"[ortho:tree-green] WorldCover 取得不可({_e}); skip")
+        return surf
+    fix = dark & np.isin(cov, [10, 20, 30])   # 樹林/低木/草地 のみ
+    n = int(fix.sum())
+    if n:
+        surf = surf.copy()
+        surf[fix] = "grass"
+        if verbose:
+            print(f"[ortho:tree-green] 暗部の樹林/草地 {n} セルを grass に補正")
+    return surf
+
+
 def ortho_surface_grid(dst_meta: dict, zoom: int = 18, saturation: float = 1.4,
                        cache_dir=None, verbose: bool = True,
                        layer: str = "seamlessphoto", return_rgb: bool = False):
@@ -185,7 +242,9 @@ def ortho_surface_grid(dst_meta: dict, zoom: int = 18, saturation: float = 1.4,
     rgb_dst = np.clip(np.stack(chans, axis=-1), 0, 255).astype(np.uint8)
     if saturation and saturation != 1.0:
         rgb_dst = enhance_rgb(rgb_dst, saturation=saturation)
+    rgb_dst = _shadow_lift(rgb_dst)          # 影の黒ずみを持ち上げてから分類
     surf = classify_rgb_to_palette(rgb_dst)
+    surf = _tree_green_fix(surf, dst_meta, verbose=verbose)   # 残った暗部の樹林は緑へ
     if verbose:
         keys, cnts = np.unique(surf.astype(str), return_counts=True)
         dist = ", ".join(f"{k}={c}" for k, c in sorted(zip(keys, cnts), key=lambda t: -t[1]))
