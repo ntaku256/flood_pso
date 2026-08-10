@@ -759,6 +759,32 @@ DEFAULT_WALL_KEY = "white_concrete"
 DEFAULT_ROOF_KEY = "gray_concrete"
 
 
+def _building_height_jitter(ext, amp: float = 0.12) -> float:
+    """建物の代表座標から決定的な擬似ジッタ [-amp, +amp] を返す(再現性あり・乱数不使用)。"""
+    la, lo = ext[0]
+    k = (int(round(la * 1e5)) * 73856093) ^ (int(round(lo * 1e5)) * 19349663)
+    k &= 0xFFFFFFFF
+    k = ((k ^ (k >> 16)) * 0x45d9f3b) & 0xFFFFFFFF
+    k = (k ^ (k >> 16)) & 0xFFFFFFFF
+    return (k / float(0xFFFFFFFF) * 2.0 - 1.0) * amp
+
+
+def _building_area_height_factor(tp: str, area_m2: float) -> float:
+    """種別クラス高さ(base_m)に掛ける footprint 面積係数。
+    倉庫/上屋は面積が大きくても低層平屋、RC/高層は面積で階数が増える傾向を反映。
+    既定の type_floor_frac(≈0.6) 近傍を中心に、面積で 0.5〜1.1 程度へ段階化する。"""
+    import math
+    a = max(area_m2, 20.0)
+    if tp in ("普通無壁舎", "堅ろう無壁舎"):          # 倉庫/上屋: 平屋主体
+        return float(np.clip(0.60 + 0.12 * math.log10(a / 60.0), 0.50, 0.90))
+    if tp == "高層建物":                              # 中高層: 面積で伸びる
+        return float(np.clip(0.62 + 0.30 * math.log10(a / 300.0), 0.55, 1.00))
+    if tp == "堅ろう建物":                            # RC中層
+        return float(np.clip(0.55 + 0.32 * math.log10(a / 100.0), 0.50, 1.10))
+    # 普通建物/住宅など木造: 小住宅=低, 大屋敷=2〜3階
+    return float(np.clip(0.62 + 0.28 * math.log10(a / 90.0), 0.52, 1.10))
+
+
 def build_building_maps(
     buildings: list,
     dsm_h_block: np.ndarray | None,
@@ -821,18 +847,25 @@ def build_building_maps(
             continue
         tp = b.get("tags", {}).get("fgd_type", "")
         _hm = b.get("tags", {}).get("height_m")
-        floor = float(_hm if _hm is not None else 6.0) * type_floor_frac
-        h = floor
-        relief = 2.0 if tp in HIP_ROOF_TYPES else 0.6   # DSM無し時の推定(勾配/陸屋根)
+        area_m2 = float(int(ins.sum()) * _cell_m2)
+        # --- 建物高さカスケード(段階推定) ---
+        # 段1: DSM(LiDAR)実測 p75 があれば最優先。
+        # 段2(fallback): 種別クラス高さ(height_m)を基準に、footprint面積係数 × 座標決定的ジッタで推定。
+        #   → DSM欠落地域(御坊等)で「種別ごとに全棟が同一高さ=棒立ち」になる問題を解消する。
+        base_m = float(_hm) if _hm is not None else 6.0
+        h = None
+        relief = 2.0 if tp in HIP_ROOF_TYPES else 0.6   # DSM無し時の形状推定(勾配/陸屋根)
         if dsm_h_block is not None:
             vals = dsm_h_block[y0:y1, x0:x1][ins]
             vals = vals[np.isfinite(vals)]
             if vals.size:
-                h = max(float(np.percentile(vals, pct)), floor)
+                h = max(float(np.percentile(vals, pct)), base_m * type_floor_frac)
             if vals.size >= 4:                          # 屋根面の起伏=形状の代理(陸屋根/勾配)
                 relief = float(np.percentile(vals, 90) - np.percentile(vals, 10))
+        if h is None:                                   # DSM欠落/未被覆 → クラス×面積×ジッタで段階推定
+            afac = _building_area_height_factor(tp, area_m2)
+            h = base_m * afac * (1.0 + _building_height_jitter(ext))
         h = max(h, min_h_m)
-        area_m2 = float(int(ins.sum()) * _cell_m2)
         arch = building_archetype(tp, h, relief, area_m2)
         spec = ARCHETYPE_STYLE[arch]
         if arch == "wood_house":                 # 壁/トリムを座標決定的に多様化（他種別は不変）
