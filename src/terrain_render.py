@@ -2566,7 +2566,7 @@ def dem_to_blocks_enhanced(
     road_block: str = "gray_concrete_powder",   # 幹線舗装（地表上=直下は地形固体で支持される）
     road_major_mask: np.ndarray | None = None,
     road_minor_block: str = "gravel",
-    road_pave_band_cells: float = 2.0,   # 道路縁から舗装する帯幅[cell]。これより内側(中央)はオルソ保持
+    road_pave_band_cells: float = 3.0,   # 道路縁から舗装する帯幅[cell]。これより内側(中央)はオルソ保持
 
     # 道路の「一番外側」に引く 1 ブロック境界線（普通=灰色コンクリ / 小路=青緑テラコッタ）
     road_edge_major_block: str = "gray_concrete",
@@ -2921,7 +2921,7 @@ def dem_to_blocks_enhanced(
         # （衛星写真的な路面）。狭い道は帯が重なり全面舗装になる。ROAD_ORTHO_CENTER=0 で従来の全面塗り。
         import os as _os_rd
         _center_ortho = _os_rd.environ.get("ROAD_ORTHO_CENTER", "1") != "0"
-        _band = max(1.0, float(road_pave_band_cells))
+        _band = max(1.0, float(_os_rd.environ.get("ROAD_PAVE_BAND", road_pave_band_cells)))
         _rd = road_mask & land_for_road
         if _center_ortho and _rd.any():
             from scipy.ndimage import distance_transform_edt as _dtedt_r
