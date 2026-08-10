@@ -49,6 +49,12 @@ TUNNEL_SURFACE_ROAD_COVER_MARGIN = 9
 # より広いので、道路半幅に この値を足して回廊を広げ、路面全体を確実に覆う。片側車道どうしの
 # 間隔(中央分離帯)より小さく保つこと(大きすぎると分離帯の森も消える)。
 TUNNEL_SURFACE_ROAD_CORRIDOR_PAD = 8
+# 橋デッキ直下の地表道路除去。True で「高架の路面が地面に二重に出る」のを消す。
+# デッキ足元(半幅=道路半幅+PAD)のオルソ/road_mask を除くが、その足元にある別の地上道路
+# (OSM 非bridge道路=road_curb_osm_mask のうち橋中心線から外れるもの)は残す。FGD RdEdg は
+# 高架/地上を区別しないため OSM way 同定で切り分ける。
+BRIDGE_UNDERROAD_REMOVE = True
+BRIDGE_UNDERROAD_PAD = 4
 # 地盤アンダーフィル: 隣接セルとの段差に応じた可変深さの下限/上限[block]。
 # 上限は「段差 + UNDERFILL_EXTRA」でも足りない崖のための安全弁で、既定は
 # 従来の deep_ground クランプを超えて崖の穴を塞げるよう十分大きく取る。
@@ -57,11 +63,15 @@ UNDERFILL_EXTRA = 1
 UNDERFILL_HARD_CAP = 96
 # トンネル坑口(出入口)“周り”の下方向 増し厚。坑口は地表が道路レベルまで局所的に下げられ、
 # 可変アンダーフィル(近傍最低段差ベース)では床下がほぼ埋まらずシェル内部の空洞(すきま)が
-# 残りやすい。各トンネルの coords 両端(=坑口)を grid に投影し、半径 RADIUS[block] の円板内の
-# 陸セルのアンダーフィル深さを最低 DEPTH[block] へ引き上げて床下を stone で塞ぐ
-# (UNDERFILL_HARD_CAP でクランプ)。刳り貫きは後段なので増し厚は坑口の周り/床下だけに残る。RADIUS=0 で無効。
+# 残りやすい。各トンネルの coords 両端(=坑口)を grid に投影し、坑口を中心に**軸方向**へ内側
+# (トンネル側)REACH_IN・外側(進入路側)REACH_OUT[block] 伸ばした半径 RADIUS[block] のカプセル
+# 内の陸セルのアンダーフィル深さを最低 DEPTH[block] へ引き上げて床下を stone で塞ぐ
+# (UNDERFILL_HARD_CAP でクランプ)。傾斜が緩く「坑門(覆われる端)と入口(開削端)」が離れる区間も
+# 軸方向に伸ばして覆う。刳り貫きは後段なので増し厚は坑口の周り/床下だけに残る。RADIUS=0 で無効。
 TUNNEL_PORTAL_UNDERFILL_RADIUS = 22
 TUNNEL_PORTAL_UNDERFILL_DEPTH = 18
+TUNNEL_PORTAL_UNDERFILL_REACH_IN = 32   # 坑口から内側(トンネル側)へ延ばす長さ[block]
+TUNNEL_PORTAL_UNDERFILL_REACH_OUT = 12  # 坑口から外側(進入路側)へ延ばす長さ[block]
 
 
 class _DenseBlockSink:
@@ -505,6 +515,73 @@ def build_osm_masks(
         if w >= 4.5:                       # 真幅道路/幹線 → 舗装(andesite)
             road_major_mask |= m
     return building_mask, road_mask, road_major_mask
+
+
+def build_transverse_crossing_mask(
+    bridges: list, roads: list, patch_bbox_latlon: tuple,
+    grid_h: int, grid_w: int, h_res_block_m: float,
+    deck_pad: float = 4.0, min_angle_deg: float = 35.0,
+) -> np.ndarray:
+    """橋デッキ足元(deck)で、**橋軸に対して横断方向(≥min_angle_deg)** に走る道路セルの
+    bool マスクを返す。高架自身の並走 footprint(軸と平行)は落ち、真下/斜め下を横切る別道路
+    (FGD 農道・庭園路や OSM 生活道路)だけが残る。roads は [{"coords":[[lat,lon],..],
+    "width_m":w}, ..]。deck 近傍のセルのみ評価するので軽い。"""
+    nz, nx = grid_h, grid_w
+    JJ, II = np.mgrid[0:nz, 0:nx]
+    JJ = JJ.astype(np.float32); II = II.astype(np.float32)
+
+    def _pts(coords):
+        return [_lonlat_to_grid_xy(la, lo, patch_bbox_latlon, nz, nx) for la, lo in coords]
+
+    bang = np.full((nz, nx), np.nan, np.float32)   # 橋軸角[rad]（deck上）
+    deck = np.zeros((nz, nx), bool)
+    for b in (bridges or []):
+        c = b.get("coords") or []
+        if len(c) < 2:
+            continue
+        wm = float(b.get("width_m") or 5.5)
+        hw = max(1.5, (wm / max(h_res_block_m, 0.1)) / 2.0 + deck_pad); hw2 = hw * hw
+        bp = _pts(c)
+        for k in range(len(bp) - 1):
+            ax, az = bp[k]; bx, bz = bp[k + 1]
+            dx, dz = bx - ax, bz - az; l2 = dx * dx + dz * dz
+            if l2 < 1e-6:
+                continue
+            t = np.clip(((II - ax) * dx + (JJ - az) * dz) / l2, 0.0, 1.0)
+            d2 = (II - (ax + t * dx)) ** 2 + (JJ - (az + t * dz)) ** 2
+            m = d2 <= hw2
+            deck |= m
+            bang[m] = np.arctan2(dz, dx)
+    if not deck.any():
+        return np.zeros((nz, nx), bool)
+    zs, xs = np.where(deck)
+    z0, z1 = zs.min() - 6, zs.max() + 6
+    x0, x1 = xs.min() - 6, xs.max() + 6
+
+    rang = np.full((nz, nx), np.nan, np.float32)    # 道路角[rad]（deck上）
+    for r in (roads or []):
+        c = r.get("coords") or []
+        if len(c) < 2:
+            continue
+        wm = float(r.get("width_m") or 4.0)
+        hw = max(1.0, (wm / max(h_res_block_m, 0.1)) / 2.0); hw2 = hw * hw
+        rp = _pts(c)
+        for k in range(len(rp) - 1):
+            ax, az = rp[k]; bx, bz = rp[k + 1]
+            if max(ax, bx) < x0 or min(ax, bx) > x1 or max(az, bz) < z0 or min(az, bz) > z1:
+                continue                              # deck から遠い区間は skip（高速化）
+            dx, dz = bx - ax, bz - az; l2 = dx * dx + dz * dz
+            if l2 < 1e-6:
+                continue
+            t = np.clip(((II - ax) * dx + (JJ - az) * dz) / l2, 0.0, 1.0)
+            d2 = (II - (ax + t * dx)) ** 2 + (JJ - (az + t * dz)) ** 2
+            m = (d2 <= hw2) & deck
+            rang[m] = np.arctan2(dz, dx)
+    have = (~np.isnan(rang)) & (~np.isnan(bang))
+    diff = np.abs(rang - bang)
+    diff = np.mod(diff, np.pi)                       # 無向線の角度差 → [0, pi/2]
+    diff = np.minimum(diff, np.pi - diff)
+    return have & (diff >= np.deg2rad(min_angle_deg))
 
 
 # FG-GML type → 壁/屋根ブロック（屋根は ortho 無効時 or 集約不能時の fallback）。
@@ -1172,7 +1249,11 @@ def assign_global_bridge_anchors(bridges, dem_full, lat_max, lon_min, res_lat, r
     H, W = dem_full.shape
     M_PER_DEG_LAT = 111320.0
     h_res_dem = max(res_lat * M_PER_DEG_LAT, 1e-6)        # DEM 1セルの m（lat方向）
-    step = max(1, int(round(h_res_block_m / h_res_dem)))  # 1 block = step DEMセル
+    # 端アンカーは端点から外側(奥へ続く道路方向)へ ≈45m の陸地形 median を取る。距離は必ず
+    # メートル基準にする: DEM が粗い(GSI 5m→約4m/セル)と 1セル=数block になり、旧実装の
+    # 「45セル」方式では 45×4≈180m 先まで届いて『トンネルの先の山』を拾い、坑口手前でデッキが
+    # 高いまま浮く不具合が出ていた。LiDAR(1m)では 45セル=45m と実質同じ挙動を保つ。
+    n_out_anchor = max(1, int(round(45.0 / h_res_dem)))   # ≈45m を DEMセル数へ換算
 
     def cell(lat, lon):
         return int(round((lat_max - lat) / res_lat)), int(round((lon - lon_min) / res_lon))  # (row,col)
@@ -1191,8 +1272,8 @@ def assign_global_bridge_anchors(bridges, dem_full, lat_max, lon_min, res_lat, r
         if L > 1e-6:
             dr, dc = dr / L, dc / L
         ys = []
-        for d in range(0, 46):                            # 端から外側 0..45 block の陸地形
-            v = ysl(int(round(r0 + dr * d * step)), int(round(c0 + dc * d * step)))
+        for d in range(0, n_out_anchor + 1):              # 端から外側 ≈45m の陸地形（DEMセル単位）
+            v = ysl(int(round(r0 + dr * d)), int(round(c0 + dc * d)))
             if v is not None:
                 ys.append(v)
         if not ys:
@@ -1239,6 +1320,24 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     MAX_RISE_M, RAMP_HV = 10.0, 4.0
     CLEAR_M = {"main": 6.0, "normal": 5.0, "dirt": 3.0}
     PIER_SPACING_M = 16.0
+    # ── 橋端すり付け/支持の自動判別パラメータ（デッキが道路/地面から浮くのを防ぐ）──
+    BRIDGE_END_LAND_TH = 2      # デッキが直下地表からこの差以内なら「着地済み」とみなす[block]
+    BRIDGE_END_LOOK = 24        # 端の外向きに水/範囲外(=支持ケース)を判定する走査距離[block]
+    BRIDGE_END_RAMP = 120       # 端を地表へ降ろすすり付けの最大長[block]（4:1で既存プロファイルに合流）
+    BRIDGE_SUPPORT_MIN = 6      # デッキが直下床からこれ以上浮く所は橋脚で必ず支える[block]
+    BRIDGE_SUPPORT_STEP = 8     # 追加橋脚の最小間隔[block]（宙吊りの空洞を無くす）
+    # デッキ直下に地上道路(横断道・農道・生活道など road_mask で残った道)がある列には橋脚を
+    # 立てない＝道路を跨ぐ。1セル膨張して路肩ギリギリに柱が刺さるのも避ける。橋自身の路面は
+    # road_mask から除去済みなので中心線上の柱は従来どおり立つ。
+    _no_pier = None
+    if road_mask is not None:
+        try:
+            _no_pier = binary_dilation(road_mask, iterations=1)
+        except Exception:
+            _no_pier = road_mask
+    def _pier_blocked(iz, ix):
+        return (_no_pier is not None and 0 <= iz < nz and 0 <= ix < nx
+                and bool(_no_pier[iz, ix]))
     seen: set = set()
     ymax = [0]
 
@@ -1583,7 +1682,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     # ── レンダリング本体: 1スパン=連続ポリラインを startS→endS 線形デッキで立体化。
     #    head_ext/tail_ext = 端の延長区間長(station)。延長部は柵を生成しない(道路へ自然に接続)。──
     def _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc,
-                     head_ext=0.0, tail_ext=0.0):
+                     head_ext=0.0, tail_ext=0.0, treat_head=True, treat_tail=True):
         seg = [math.hypot(mpts[s + 1][0] - mpts[s][0], mpts[s + 1][1] - mpts[s][1])
                for s in range(len(mpts) - 1)]
         total = sum(seg)
@@ -1591,6 +1690,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
             return [], []
         pier_step = max(4.0, PIER_SPACING_M / max(h_res_block_m, 0.1))
         next_pier = pier_step
+        next_support = 0.0
         # デッキ幅は「直下道路実幅の一番大きい部分」で全長統一(#1)。事前スキャンで最大半幅を求める
         # (nominal=width_m半幅が上限)。くびれ/ジャギを無くし均一幅にする。
         uniform_hw = 1
@@ -1606,8 +1706,46 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                 uniform_hw = max(uniform_hw, _road_halfw(
                     x0 + (x1 - x0) * t, z0 + (z1 - z0) * t, ox, oz, half_w))
         lhw = max(1, uniform_hw)
-        _, _, _prof_sts, dyt = _deck_profile(mpts, seg, total, startS, endS,
-                                             rise_full, min_deck, lhw)
+        _cxs, _czs, _prof_sts, dyt = _deck_profile(mpts, seg, total, startS, endS,
+                                                   rise_full, min_deck, lhw)
+        # ── 端すり付け/支持の自動判別: 各自由端で「奥に地上道路が続く」ならデッキを地表高へ
+        #    勾配で降ろして道路へ接続（すり付け）。範囲外/水/谷で切れる端はデッキ高を据置き、
+        #    後段の橋脚で地面まで支える（どちらの場合も宙吊りを作らない）。──
+        _m = len(dyt)
+
+        def _grd(i):
+            return ground_y(_cxs[i], _czs[i])
+
+        def _treat_end(term, inw, sgn):
+            if not (0 <= term < _m and 0 <= inw < _m):
+                return
+            g_term = _grd(term)
+            if dyt[term] - g_term <= BRIDGE_END_LAND_TH:
+                return                                   # 既に地表へ着地している端
+            dxo, dzo = _cxs[term] - _cxs[inw], _czs[term] - _czs[inw]
+            Lo = math.hypot(dxo, dzo) or 1.0
+            dxo, dzo = dxo / Lo, dzo / Lo                 # 端の外向き（奥へ続く道路方向）
+            nwater = ntot = 0
+            for d in range(1, BRIDGE_END_LOOK + 1):
+                ci, cj = col(_cxs[term] + dxo * d, _czs[term] + dzo * d)
+                if not (0 <= cj < nz and 0 <= ci < nx):
+                    return                               # 生成範囲外で切断＝支持ケース（据置）
+                ntot += 1
+                if sea_mask[cj, ci]:
+                    nwater += 1
+            if ntot and nwater * 2 >= ntot:              # 外向きが主に水＝川/海を渡る端＝支持（据置）
+                return
+            # 降ろすケース（奥が陸: 地上道路の続き / トンネル坑口へ下る等）: 端を g_term まで下げ、
+            # 内側へ 4:1 勾配で復帰する（min で既存プロファイルに自然合流・持ち上げはしない）。
+            for j in range(0, BRIDGE_END_RAMP + 1):
+                i = term + sgn * j
+                if not (0 <= i < _m):
+                    break
+                dyt[i] = max(_grd(i), min(dyt[i], int(round(g_term + j / RAMP_HV))))
+        if treat_head:
+            _treat_end(0, 1, +1)
+        if treat_tail:
+            _treat_end(_m - 1, _m - 2, -1)
         idx = 0
         s_acc = 0.0
         for si in range(len(seg)):
@@ -1645,9 +1783,24 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                         shafts = (-lhw + 1, lhw - 1) if (rc == "main" and lhw >= 2) else (0,)
                         for w in shafts:
                             ix, iz = col(cx + ox * w, cz + oz * w)
+                            if _pier_blocked(iz, ix):
+                                continue          # 直下に道路 → 橋脚を立てず跨ぐ
                             for yy in range(fy, dy - 1):
                                 put(ix, yy, iz, pier_key)
                             put(ix, dy - 1, iz, cap_key)
+                # 追加支持: デッキが直下床から高く浮く区間（端の据置・谷/窪みの跨ぎ）は、
+                # 通常橋脚(pier_step)より細かい間隔で中央橋脚を必ず立てて宙吊りの空洞を無くす。
+                _fy2 = floor_y(cx, cz)
+                if dy - 1 - _fy2 >= BRIDGE_SUPPORT_MIN and station >= next_support:
+                    next_support = station + BRIDGE_SUPPORT_STEP
+                    shafts2 = (-lhw + 1, lhw - 1) if (rc == "main" and lhw >= 2) else (0,)
+                    for w in shafts2:
+                        ix, iz = col(cx + ox * w, cz + oz * w)
+                        if _pier_blocked(iz, ix):
+                            continue              # 直下に道路 → 橋脚を立てず跨ぐ
+                        for yy in range(_fy2, dy - 1):
+                            put(ix, yy, iz, pier_key)
+                        put(ix, dy - 1, iz, cap_key)
                 # 橋下の処理（列ごと）: 実際に水がある列のみ「その列の水面まで」水柱、
                 #   乾いた陸の列は衛星が橋を写し込んだ路面色を、橋脇の周囲色で上書き補完する。
                 #   水位はバンド最大でなく列ごとの実水面で決める(端の高地に引っ張られた異常水位を防ぐ)。
@@ -1924,16 +2077,20 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         dy0, d0 = _parent_at(mpts[0])
         dy1, d1 = _parent_at(mpts[-1])
         head_ext = tail_ext = 0.0
+        treat_head = treat_tail = True                # 本線接続端は降ろさない(接続が切れるため)
         if dy0 is not None and (dy1 is None or d0 <= d1):
             startS = dy0                              # 接続端=派生元の橋の高さ（延長しない）
             mpts, tail_ext, endS = _ext_tail(mpts)
+            treat_head = False                        # head=本線接続端 → 高さ据置
         elif dy1 is not None:
             endS = dy1
             mpts, head_ext, startS = _ext_head(mpts)
+            treat_tail = False                        # tail=本線接続端 → 高さ据置
         else:                                         # 本線未接続: 通常チェーン同様に両端延長
             mpts, head_ext, startS = _ext_head(mpts)
             mpts, tail_ext, endS = _ext_tail(mpts)
-        _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc, head_ext, tail_ext)
+        _render_span(mpts, startS, endS, rise_full, min_deck, half_w, rc, head_ext, tail_ext,
+                     treat_head=treat_head, treat_tail=treat_tail)
         if _BDBG or _BDUMP:
             _sl = _seglens(mpts); _tot = sum(_sl)
             if _BDBG:
@@ -2412,6 +2569,11 @@ def dem_to_blocks_enhanced(
     road_edge_close_iter: int = 9,
     road_edge_hole_fill_cells: int = 800,         # closing 残穴のうち極小穴(交差点ダイヤ)を埋める閾値
     road_curb_osm_mask: np.ndarray | None = None,  # OSM道路センターライン塗りつぶし回廊(交差点判定用)
+    road_ground_other_mask: np.ndarray | None = None,  # 非高架の地上道路のみ(橋直下で残す別道路の同定)
+    road_cross_extra_mask: np.ndarray | None = None,   # 橋軸に横断する道(FGD農道/OSM生活道)＝橋直下でも残す
+    road_unpaved_mask: np.ndarray | None = None,       # 未舗装道(service/track/農道/庭園路/歩道)→砂利+土の小径
+    road_unpaved_block: str = "coarse_dirt",
+    road_path_block: str = "dirt_path",
     road_under_building: bool = True,             # 道路が端から端まで横断する建物(連絡通路)の1Fを抜いて通す
     water_mask: np.ndarray | None = None,
     water_block: str = "water",
@@ -2677,9 +2839,93 @@ def dem_to_blocks_enhanced(
                 from scipy.ndimage import distance_transform_edt as _edt
                 _, (_iy, _ix) = _edt(_tcov, return_indices=True)
                 surf_block[_tcov] = surf_block[_iy[_tcov], _ix[_tcov]]
+        # ── 橋デッキ直下の地表道路を除去（高架の路面が地面に二重に出るのを防ぐ）。ただし
+        #    デッキ足元にある「別の地上道路」（OSM 非bridge道路 = road_curb_osm_mask のうち
+        #    橋中心線から外れるもの）は残す/塗る。FGD は高架/地上を区別しないので OSM で同定。──
+        if (bridges and patch_bbox_latlon is not None and BRIDGE_UNDERROAD_REMOVE):
+            _bjj, _bii = np.mgrid[0:nz, 0:nx]
+            _bjj = _bjj.astype(np.float32); _bii = _bii.astype(np.float32)
+            _bcov = np.zeros((nz, nx), dtype=bool)     # デッキ足元(広)＝処理領域
+            _bnar = np.zeros((nz, nx), dtype=bool)     # 橋中心線(狭)＝橋自身の車線
+            for _bb in bridges:
+                _bc = _bb.get("coords") or []
+                if len(_bc) < 2:
+                    continue
+                _bp = [_lonlat_to_grid_xy(_la, _lo, patch_bbox_latlon, nz, nx) for _la, _lo in _bc]
+                _wm = float(_bb.get("width_m") or 5.5)
+                _hw = max(1.5, (_wm / max(h_res_block, 0.1)) / 2.0 + BRIDGE_UNDERROAD_PAD)
+                _hw2 = _hw * _hw
+                _nw2 = max(1.2, (_wm / max(h_res_block, 0.1)) / 2.0) ** 2   # 狭(車線幅)
+                for _k in range(len(_bp) - 1):
+                    _ax, _az = _bp[_k]; _bx, _bz = _bp[_k + 1]
+                    _dx, _dz = _bx - _ax, _bz - _az
+                    _l2 = _dx * _dx + _dz * _dz
+                    if _l2 < 1e-6:
+                        continue
+                    _t = np.clip(((_bii - _ax) * _dx + (_bjj - _az) * _dz) / _l2, 0.0, 1.0)
+                    _d2 = (_bii - (_ax + _t * _dx)) ** 2 + (_bjj - (_az + _t * _dz)) ** 2
+                    _bcov |= (_d2 <= _hw2)
+                    _bnar |= (_d2 <= _nw2)
+            if _bcov.any():
+                # 「別の地上道路」＝非高架 OSM 道路(road_ground_other_mask)がデッキ足元に有る所。
+                # tags(bridge/layer)で高架 way を除いてあるので、橋自身の路面は含まれない＝
+                # 橋の路面だけを地面から消し、真下/斜め下を通る別道路は way 単位で保持できる。
+                _grd = (road_ground_other_mask if (road_ground_other_mask is not None
+                        and road_ground_other_mask.shape == (nz, nx)) else None)
+                if _grd is not None:
+                    _keep = _grd & _bcov
+                    _mode = "way-id(非高架OSM)"
+                else:
+                    # フォールバック(OSM回廊取得不可時): 狭い中心線だけ残すヒューリスティック
+                    _osmr = (road_curb_osm_mask if (road_curb_osm_mask is not None
+                             and road_curb_osm_mask.shape == (nz, nx)) else np.zeros((nz, nx), bool))
+                    _keep = _osmr & (~_bnar)
+                    _mode = "fallback(中心線)"
+                # 橋軸に横断する道(FGD農道/OSM生活道)を追加で残す。並走(高架自身)は角度で落ちる。
+                _cross = (road_cross_extra_mask if (road_cross_extra_mask is not None
+                          and road_cross_extra_mask.shape == (nz, nx)) else None)
+                _ncross = 0
+                if _cross is not None:
+                    _cross = _cross & _bcov
+                    _ncross = int((_cross & (~_keep)).sum())
+                    _keep = _keep | _cross
+                # 横断道が除去で細切れにならないよう、deck 内で keep を軽く連結(closing)。
+                # ただし膨張が高架自身の帯を埋め戻さないよう、_keep の近傍1セルのみ対象。
+                if _keep.any():
+                    from scipy.ndimage import binary_closing as _bclose_k
+                    _keep = _bclose_k(_keep, iterations=1, border_value=0) & _bcov
+                _brem = _bcov & (~_keep)                # 除去 = デッキ足元 − 別道路
+                print(f"  [bridge-underroad] deck足元={int(_bcov.sum())} "
+                      f"別道路keep={int(_keep.sum())}(内 横断追加={_ncross}) 除去={int(_brem.sum())} [{_mode}]")
+                road_mask = road_mask & (~_brem)
+                if road_major_mask is not None and road_major_mask.shape == (nz, nx):
+                    road_major_mask = road_major_mask & (~_brem)
+                from scipy.ndimage import distance_transform_edt as _edt2
+                _, (_iy2, _ix2) = _edt2(_brem, return_indices=True)
+                surf_block[_brem] = surf_block[_iy2[_brem], _ix2[_brem]]  # 高架写り込みを周囲色に
+                import os as _os_ur
+                if _os_ur.environ.get("BRIDGE_UNDERROAD_DUMP"):
+                    np.savez(_os_ur.environ["BRIDGE_UNDERROAD_DUMP"],
+                             bcov=_bcov, brem=_brem, keep=_keep,
+                             bnar=_bnar,
+                             osmr=(road_curb_osm_mask if road_curb_osm_mask is not None
+                                   else np.zeros((nz, nx), bool)),
+                             bbox=np.array(patch_bbox_latlon, dtype=np.float64))
+                    print(f"  [bridge-underroad] dump -> {_os_ur.environ['BRIDGE_UNDERROAD_DUMP']}")
         surf_block[road_mask & land_for_road] = road_minor_block
         if road_major_mask is not None and road_major_mask.shape == surf_block.shape:
             surf_block[road_major_mask & land_for_road] = road_block
+        # 未舗装道(service/track/農道/庭園路/歩道) → 砂利+土の小径。舗装(幹線)は上書きしない。
+        if road_unpaved_mask is not None and road_unpaved_mask.shape == surf_block.shape:
+            _unp = road_unpaved_mask & land_for_road
+            if road_major_mask is not None and road_major_mask.shape == surf_block.shape:
+                _unp = _unp & (~road_major_mask)
+            if _unp.any():
+                _rj, _ri = np.mgrid[0:nz, 0:nx]
+                _h = (_ri.astype(np.int64) * 17 + _rj.astype(np.int64) * 31) % 100
+                surf_block[_unp] = road_unpaved_block                 # 主: coarse_dirt
+                surf_block[_unp & (_h < 40)] = road_path_block        # 小径感: dirt_path 4割
+                surf_block[_unp & (_h >= 88)] = "gravel"              # 砂利アクセント 1割強
 
         # ── 道路の「一番外側」に 1 ブロックの境界線（curb）を引く ──
         #   道路中央(オルソ)の細い隙間だけ closing で埋めて左右の帯を一体化 → その外周 1 セル。
@@ -2716,6 +2962,9 @@ def dem_to_blocks_enhanced(
         near_major = binary_dilation(_bclose(rmaj, iterations=it, border_value=0), iterations=2)
         line_minor = edge_line & ~near_major
         line_major = edge_line & near_major
+        # 未舗装道(農道/小径)には縁石(cyan)を引かない：素地に馴染ませる。
+        if road_unpaved_mask is not None and road_unpaved_mask.shape == surf_block.shape:
+            line_minor = line_minor & ~binary_dilation(road_unpaved_mask, iterations=2)
         surf_block[line_minor] = road_edge_minor_block
         surf_block[line_major] = road_edge_major_block
 
@@ -2800,25 +3049,48 @@ def dem_to_blocks_enhanced(
     # --- トンネル坑口“周り”の下方向 増し厚（坑口壁際/床下のすきま対策） ---
     # 坑口では地表が道路レベルまで下げられ、その真下にシェル内部の空洞(すきま)が残りやすい。
     # 可変アンダーフィルは近傍最低段差で決まるため、坑口のような“局所的に低い平面”は
-    # 深さ≈最小(2)しか埋まらず床下に穴が開く。coords 両端(=坑口)を grid に投影し、半径 R の
-    # 円板内の陸セルのアンダーフィル深さを最低 DEPTH[block] へ引き上げて床下を stone で塞ぐ
+    # 深さ≈最小(2)しか埋まらず床下に穴が開く。coords 両端(=坑口)と内隣接点から軸方向を求め、
+    # 坑口を中心に内側 REACH_IN・外側 REACH_OUT 伸ばした半径 R のカプセル内の陸セルの
+    # アンダーフィル深さを最低 DEPTH[block] へ引き上げて床下を stone で塞ぐ
     # (UNDERFILL_HARD_CAP でクランプ)。刳り貫きは後段なので増し厚は坑口の周り/床下だけに残る。
     if (tunnels and patch_bbox_latlon is not None
             and int(TUNNEL_PORTAL_UNDERFILL_RADIUS) > 0):
-        _pr = int(TUNNEL_PORTAL_UNDERFILL_RADIUS)
+        _pr2 = float(TUNNEL_PORTAL_UNDERFILL_RADIUS) ** 2
         _pdep = int(min(max(1, TUNNEL_PORTAL_UNDERFILL_DEPTH), UNDERFILL_HARD_CAP))
+        _rin = float(max(0, TUNNEL_PORTAL_UNDERFILL_REACH_IN))
+        _rout = float(max(0, TUNNEL_PORTAL_UNDERFILL_REACH_OUT))
         _pjj, _pii = np.mgrid[0:nz, 0:nx]
+        _pjj = _pjj.astype(np.float32); _pii = _pii.astype(np.float32)
         _pmask = np.zeros((nz, nx), dtype=bool)
+
+        def _portal_capsule(_p_ll, _n_ll):
+            # 坑口 _p_ll と内隣接 _n_ll(トンネル内側)から軸方向 u を求め、坑口を中心に
+            # [-REACH_OUT, +REACH_IN]u 伸ばした線分から半径 R 以内の grid セルを返す。
+            _px, _pz = _lonlat_to_grid_xy(_p_ll[0], _p_ll[1], patch_bbox_latlon, nz, nx)
+            _nxg, _nzg = _lonlat_to_grid_xy(_n_ll[0], _n_ll[1], patch_bbox_latlon, nz, nx)
+            _ux, _uz = _nxg - _px, _nzg - _pz            # 内向き
+            _un = (_ux * _ux + _uz * _uz) ** 0.5
+            if _un < 1e-6:                               # 退化(重複点) → 円板
+                _ax, _az, _bx, _bz = _px, _pz, _px, _pz
+            else:
+                _ux, _uz = _ux / _un, _uz / _un
+                _ax, _az = _px - _ux * _rout, _pz - _uz * _rout   # 外(進入路)端
+                _bx, _bz = _px + _ux * _rin, _pz + _uz * _rin     # 内(トンネル)端
+            _dx, _dz = _bx - _ax, _bz - _az
+            _l2 = _dx * _dx + _dz * _dz
+            if _l2 < 1e-6:
+                _d2 = (_pii - _ax) ** 2 + (_pjj - _az) ** 2
+            else:
+                _t = np.clip(((_pii - _ax) * _dx + (_pjj - _az) * _dz) / _l2, 0.0, 1.0)
+                _d2 = (_pii - (_ax + _t * _dx)) ** 2 + (_pjj - (_az + _t * _dz)) ** 2
+            return _d2 <= _pr2
+
         for _tb in tunnels:
             _co = _tb.get("coords") or []
             if len(_co) < 2:
                 continue
-            for _pla, _plo in (_co[0], _co[-1]):     # 両坑口
-                _px, _pz = _lonlat_to_grid_xy(_pla, _plo, patch_bbox_latlon, nz, nx)
-                _pci = int(round(_px)); _prj = int(round(_pz))
-                if not (0 <= _pci < nx and 0 <= _prj < nz):
-                    continue
-                _pmask |= ((_pii - _pci) ** 2 + (_pjj - _prj) ** 2) <= _pr * _pr
+            _pmask |= _portal_capsule(_co[0], _co[1])
+            _pmask |= _portal_capsule(_co[-1], _co[-2])
         _pmask &= land_mask                          # 海/水柱は対象外
         if _pmask.any():
             _under_depth = np.where(

@@ -30,6 +30,7 @@ BLOCKS: dict[str, tuple[str, tuple[int, int, int], str]] = {
     "grass":             ("minecraft:grass_block", (91, 153, 66), "opaque"),
     "dirt":              ("minecraft:dirt", (134, 96, 66), "opaque"),
     "coarse_dirt":       ("minecraft:coarse_dirt", (122, 86, 57), "opaque"),
+    "dirt_path":         ("minecraft:dirt_path", (148, 121, 65), "opaque"),
     "podzol":            ("minecraft:podzol", (94, 67, 31), "opaque"),
     "rooted_dirt":       ("minecraft:rooted_dirt", (144, 103, 76), "opaque"),
     "sand":              ("minecraft:sand", (219, 207, 162), "opaque"),
@@ -158,7 +159,9 @@ _NON_MATCH = {"sea_lantern", "glass", "glowstone", "iron_bars",
               "light_blue_stained_glass", "blue_stained_glass",
               "green_stained_glass", "black_stained_glass",
               # 鉄道レールは色マッチで地表/屋根に湧くと「レール屋根」になるため候補から除外
-              "rail_ns", "rail_ew", "rail_ne", "rail_nw", "rail_se", "rail_sw"}
+              "rail_ns", "rail_ew", "rail_ne", "rail_nw", "rail_se", "rail_sw",
+              # dirt_path は未舗装道路専用。オルソ色マッチで地表/屋根に湧かせない
+              "dirt_path"}
 MATCH_KEYS: list[str] = [k for k, (_, _, role) in BLOCKS.items()
                          if role == "opaque" and k not in _NON_MATCH]
 
