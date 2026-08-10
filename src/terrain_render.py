@@ -2566,6 +2566,8 @@ def dem_to_blocks_enhanced(
     road_block: str = "gray_concrete_powder",   # 幹線舗装（地表上=直下は地形固体で支持される）
     road_major_mask: np.ndarray | None = None,
     road_minor_block: str = "gravel",
+    road_pave_band_cells: float = 2.0,   # 道路縁から舗装する帯幅[cell]。これより内側(中央)はオルソ保持
+
     # 道路の「一番外側」に引く 1 ブロック境界線（普通=灰色コンクリ / 小路=青緑テラコッタ）
     road_edge_major_block: str = "gray_concrete",
     road_edge_minor_block: str = "cyan_terracotta",
@@ -2915,9 +2917,26 @@ def dem_to_blocks_enhanced(
                                    else np.zeros((nz, nx), bool)),
                              bbox=np.array(patch_bbox_latlon, dtype=np.float64))
                     print(f"  [bridge-underroad] dump -> {_os_ur.environ['BRIDGE_UNDERROAD_DUMP']}")
-        surf_block[road_mask & land_for_road] = road_minor_block
+        # 道路面の塗り: 縁から road_pave_band_cells 以内だけ舗装し、幅のある道の中央はオルソを残す
+        # （衛星写真的な路面）。狭い道は帯が重なり全面舗装になる。ROAD_ORTHO_CENTER=0 で従来の全面塗り。
+        import os as _os_rd
+        _center_ortho = _os_rd.environ.get("ROAD_ORTHO_CENTER", "1") != "0"
+        _band = max(1.0, float(road_pave_band_cells))
+        _rd = road_mask & land_for_road
+        if _center_ortho and _rd.any():
+            from scipy.ndimage import distance_transform_edt as _dtedt_r
+            _dist_minor = _dtedt_r(_rd)                       # 各セルの道路縁までの距離[cell]
+            surf_block[_rd & (_dist_minor <= _band)] = road_minor_block
+        else:
+            surf_block[_rd] = road_minor_block
         if road_major_mask is not None and road_major_mask.shape == surf_block.shape:
-            surf_block[road_major_mask & land_for_road] = road_block
+            _mj = road_major_mask & land_for_road
+            if _center_ortho and _mj.any():
+                from scipy.ndimage import distance_transform_edt as _dtedt_r2
+                _dist_major = _dtedt_r2(_mj)
+                surf_block[_mj & (_dist_major <= _band)] = road_block   # 幹線=縁の舗装帯のみ(中央=オルソ)
+            else:
+                surf_block[_mj] = road_block
         # 未舗装道(service/track/農道/庭園路/歩道) → 砂利+土の小径。舗装(幹線)は上書きしない。
         if road_unpaved_mask is not None and road_unpaved_mask.shape == surf_block.shape:
             _unp = road_unpaved_mask & land_for_road
