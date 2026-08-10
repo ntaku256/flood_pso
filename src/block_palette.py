@@ -30,6 +30,7 @@ BLOCKS: dict[str, tuple[str, tuple[int, int, int], str]] = {
     "grass":             ("minecraft:grass_block", (91, 153, 66), "opaque"),
     "dirt":              ("minecraft:dirt", (134, 96, 66), "opaque"),
     "coarse_dirt":       ("minecraft:coarse_dirt", (122, 86, 57), "opaque"),
+    "dirt_path":         ("minecraft:dirt_path", (148, 121, 65), "opaque"),
     "podzol":            ("minecraft:podzol", (94, 67, 31), "opaque"),
     "rooted_dirt":       ("minecraft:rooted_dirt", (144, 103, 76), "opaque"),
     "sand":              ("minecraft:sand", (219, 207, 162), "opaque"),
@@ -218,7 +219,9 @@ _NON_MATCH = {"sea_lantern", "verdant_froglight", "glass", "glowstone", "iron_ba
               "light_blue_stained_glass", "blue_stained_glass",
               "green_stained_glass", "black_stained_glass",
               # 鉄道レールは色マッチで地表/屋根に湧くと「レール屋根」になるため候補から除外
-              "rail_ns", "rail_ew", "rail_ne", "rail_nw", "rail_se", "rail_sw"}
+              "rail_ns", "rail_ew", "rail_ne", "rail_nw", "rail_se", "rail_sw",
+              # dirt_path は未舗装道路専用。オルソ色マッチで地表/屋根に湧かせない
+              "dirt_path"}
 _NON_MATCH |= {"gray_concrete_powder", "light_gray_concrete_powder"}  # 道路舗装専用(色マッチ除外)
 _NON_MATCH |= ROOF_SMOOTH_KEYS          # stairs/slab は屋根専用（地表オルソには使わない）
 _NON_MATCH |= WALL_POST_KEYS            # wall ポストは装飾専用
