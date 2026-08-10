@@ -1195,7 +1195,8 @@ def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
 def add_rail_blocks(blocks, rails, patch_bbox_latlon, nz, nx, *,
                     y_surf_land, sea_mask=None,
                     ballast_key="gravel", sleeper_key="spruce_log",
-                    half_width: int = 1, sleeper_step: int = 2) -> int:
+                    half_width: int = 1, sleeper_step: int = 2,
+                    embankment_h: int = 2, fill_key: str = "coarse_dirt") -> int:
     """FG-GML RailCL（鉄道中心線）を **道床(gravel)＋枕木(spruce_log)＋本物のレール(minecraft:rail)** で
     立体化。arnis railways.rs の at-grade rail を 0.667m/block 用に幅を持たせて移植：
     中心線セル列に沿って幅 (2*half_width+1) の道床を敷き、枕木を sleeper_step セル毎に渡し、
@@ -1203,7 +1204,11 @@ def add_rail_blocks(blocks, rails, patch_bbox_latlon, nz, nx, *,
     レール向き(shape)は前後の連結セル方向から決め、直線(ns/ew)・曲線(ne/nw/se/sw)を出し分ける。
     曲線で連結が切れないよう中心線は 4 近傍連結に整える。種別分岐は持たず地表敷設のみ。
     返り値: 置いた最大 y。"""
-    import math
+    import math, os as _os_re
+    # 盛土(築堤)の段数。RAIL_EMBANKMENT=0 で従来の地表敷設、RAIL_EMBANKMENT_H で段数上書き。
+    _emb_h = (0 if _os_re.environ.get("RAIL_EMBANKMENT", "1") == "0"
+              else max(0, int(_os_re.environ.get("RAIL_EMBANKMENT_H", str(embankment_h)))))
+    _n_emb = [0]
     seen: set = set()
     ymax = [0]
     # 近傍セル方向（grid: +x=東 / +z=南）→ 方位名。rail の shape 名は連結 2 方向を表す。
@@ -1286,11 +1291,22 @@ def add_rail_blocks(blocks, rails, patch_bbox_latlon, nz, nx, *,
             ddx, ddz = jx - ix, jz - iz
             mag = math.hypot(ddx, ddz) or 1.0
             px, pz = -ddz / mag, ddx / mag
-            # 道床（枕木セルは木、それ以外は砂利）を幅いっぱいに
+            # 盛土(築堤): 地表から _emb_h 段上げた路盤に載せ、道床幅+1 を fill で埋めて築堤に。
+            gy_bed = gy + _emb_h
+            if _emb_h > 0:
+                for w in range(-half_width - 1, half_width + 2):
+                    fx = int(round(ix + px * w)); fz = int(round(iz + pz * w))
+                    fg = ground_y(fx, fz)
+                    if fg is None:
+                        continue
+                    for fy in range(fg + 1, gy_bed):
+                        put(fx, fy, fz, fill_key)
+                _n_emb[0] += 1
+            # 道床（枕木セルは木、それ以外は砂利）を幅いっぱいに（路盤上面）
             bed = sleeper_key if (idx % sleeper_step == 0) else ballast_key
             for w in range(-half_width, half_width + 1):
-                put(int(round(ix + px * w)), gy, int(round(iz + pz * w)), bed)
-            # レール本体（中心線上に minecraft:rail を1本, 道床の1段上）。
+                put(int(round(ix + px * w)), gy_bed, int(round(iz + pz * w)), bed)
+            # レール本体（中心線上に minecraft:rail を1本, 路盤の1段上）。
             # shape は前後の連結セル方向から決定 → 直線/曲線を自動で出し分け。
             dirs = []
             if idx > 0:
@@ -1298,7 +1314,9 @@ def add_rail_blocks(blocks, rails, patch_bbox_latlon, nz, nx, *,
             if idx + 1 < len(path):
                 dirs.append(_DIRNAME.get((path[idx + 1][0] - ix, path[idx + 1][1] - iz)))
             rkey = _SHAPE_KEY.get(frozenset(d for d in dirs if d), "rail_ns")
-            put(ix, gy + 1, iz, rkey)
+            put(ix, gy_bed + 1, iz, rkey)
+    if _emb_h > 0:
+        print(f"  [rail-embankment] {_n_emb[0]} cells raised (+{_emb_h} blocks)")
     return ymax[0]
 
 
