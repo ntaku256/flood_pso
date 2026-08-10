@@ -2920,7 +2920,10 @@ def dem_to_blocks_enhanced(
         # 道路面の塗り: 縁から road_pave_band_cells 以内だけ舗装し、幅のある道の中央はオルソを残す
         # （衛星写真的な路面）。狭い道は帯が重なり全面舗装になる。ROAD_ORTHO_CENTER=0 で従来の全面塗り。
         import os as _os_rd
-        _center_ortho = _os_rd.environ.get("ROAD_ORTHO_CENTER", "1") != "0"
+        # 既定=全面舗装(クリーン)。FGDは種別ごとに幅が一律なため、隣接/並走する道が
+        # 距離変換で1塊になり中央がオルソ化して縞状に乱れやすい。中央オルソは
+        # ROAD_ORTHO_CENTER=1 の明示時のみ有効(幹線がまばらな地域向けの opt-in)。
+        _center_ortho = _os_rd.environ.get("ROAD_ORTHO_CENTER", "0") == "1"
         _band = max(1.0, float(_os_rd.environ.get("ROAD_PAVE_BAND", road_pave_band_cells)))
         _rd = road_mask & land_for_road
         if _center_ortho and _rd.any():
