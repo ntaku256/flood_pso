@@ -3195,6 +3195,48 @@ def dem_to_blocks_enhanced(
                 "state": block_id("water"),
             }))
 
+    # --- 浸水深マーカー（デリネーター柱）: 浸水域に一定間隔で深さ色分けの柱を立て、
+    #     水面上に発光キャップを突出させて歩行者が水深を体感できるスケール基準にする。
+    #     色帯: <0.5m 水色 / <1m 黄 / <2m 橙 / <3m 赤 / それ以上 マゼンタ。FLOOD_MARKERS=0 で無効。
+    import os as _os_fm
+    if _os_fm.environ.get("FLOOD_MARKERS", "1") != "0" and bool(flood_mask.any()):
+        _mstep = max(4, int(_os_fm.environ.get("FLOOD_MARKER_STEP", "12")))  # 柱の最小間隔[cell]
+        _pole_min = 3   # 浅い浸水でも最低この段数の色柱を立て、深さ色を必ず見せる
+
+        def _flood_depth_key(dm):
+            if dm < 0.5:  return "light_blue_concrete"
+            if dm < 1.0:  return "yellow_concrete"
+            if dm < 2.0:  return "orange_concrete"
+            if dm < 3.0:  return "red_concrete"
+            return "magenta_concrete"
+
+        # 浸水セルを spacing バケットで間引く → 細い/線状の浸水でも帯に沿って柱が並ぶ
+        _fj, _fi = np.where(flood_mask)
+        _seen = set(); _nmark = 0
+        for j, i_ in zip(_fj.tolist(), _fi.tolist()):
+            _bk = (j // _mstep, i_ // _mstep)
+            if _bk in _seen:
+                continue
+            _seen.add(_bk)
+            _nmark += 1
+            dm = float(idn_ds[j, i_])
+            bx_v = int(BX[j, i_]); bz_v = int(BZ[j, i_])
+            y_s = int(y_surf_land[j, i_])
+            y_ft = int(min(y_flood_top[j, i_], y_s + 30))   # 洪水柱と同じ上限
+            y_top = max(y_ft, y_s + _pole_min)              # 水面 or 最低POLE_MIN段
+            kk = _flood_depth_key(dm)
+            for fy in range(y_s + 1, y_top + 1):            # 深さ色の柱(必ず水面上に出る)
+                blocks.append(nbtlib.Compound({
+                    "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(fy), nbtlib.Int(bz_v)]),
+                    "state": block_id(kk),
+                }))
+            for ty in (y_top + 1, y_top + 2):               # 発光キャップ(柱の上)
+                blocks.append(nbtlib.Compound({
+                    "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(bx_v), nbtlib.Int(ty), nbtlib.Int(bz_v)]),
+                    "state": block_id("sea_lantern"),
+                }))
+        print(f"  [flood-markers] placed {_nmark} posts (spacing={_mstep}, flood_cells={int(flood_mask.sum())})")
+
     # --- 建物（陸セルのみ）。高さは DSM 由来 building_height_patch があれば実測、無ければ一律。
     #     壁=wall_block + 階ごとの窓 window_block、屋根トップ=オルソ色（color_building_roofs）。 ---
     if building_mask is not None and building_mask.shape == dem_ds.shape:
