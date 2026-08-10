@@ -837,6 +837,15 @@ def build_building_maps(
     returns dict(mask:bool, height:float32 NaN外, id:int32 -1外, wall_keys:list, roof_keys:list)。
     """
     import matplotlib.path as mpath
+    import os as _os_rf
+    from scipy.ndimage import median_filter as _median_filter
+    # 屋根形状を DSM 実測面で接地する（既定ON）。ROOF_DSM=0 で従来の合成切妻/寄棟に戻す。
+    # relief(p90-p10) が _flat_thr 未満は陸屋根とみなしフラット。eave/ridge は footprint DSM の分位。
+    _dsm_roof = _os_rf.environ.get("ROOF_DSM", "1") != "0"
+    _flat_thr = float(_os_rf.environ.get("ROOF_DSM_FLAT_THR", "1.5"))
+    _eave_pct = float(_os_rf.environ.get("ROOF_DSM_EAVE_PCT", "25"))
+    _ridge_pct = float(_os_rf.environ.get("ROOF_DSM_RIDGE_PCT", "92"))
+    _n_dsm_roof = 0
     mask = np.zeros((grid_h, grid_w), dtype=bool)
     hmap = np.full((grid_h, grid_w), np.nan, dtype=np.float32)
     idmap = np.full((grid_h, grid_w), -1, dtype=np.int32)
@@ -904,6 +913,7 @@ def build_building_maps(
         # 堅ろう建物(RC)・無壁舎(倉庫)は陸屋根(フラット)のまま。
         sub_h = hmap[y0:y1, x0:x1]
         roof3d = b.get("roof3d")
+        _roofed = False
         if roof3d:
             # PLATEAU LOD2: 屋根面を per-cell でラスタ化し、城などの屋根形状をそのまま高さに反映
             sz = _rasterize_lod2_roof(roof3d, patch_bbox_latlon, grid_h, grid_w, x0, y0, x1, y1)
@@ -912,17 +922,35 @@ def build_building_maps(
             sub_h[ins] = h
             if cov.any():
                 sub_h[cov] = np.maximum(sz[cov] - bz, min_h_m).astype(np.float32)
-        elif roof_slope > 0 and tp in HIP_ROOF_TYPES and ins.sum() >= 4:
-            # 細長い建物=切妻(棟が線), 正方形に近い=寄棟(頂点), を縦横比で自動選択。
-            gab = _gable_roof_rise(ins, roof_slope, roof_cap)
-            if gab is not None:                                  # 切妻(gable)
-                sub_h[ins] = h + gab[ins]
-            else:                                                # 寄棟(hip): 縁からの距離変換
-                d = distance_transform_edt(ins).astype(np.float32)
-                rise = np.minimum(np.clip(d - 1.0, 0, None) * roof_slope, roof_cap)
-                sub_h[ins] = h + rise[ins]                        # 重なりは後勝ち
-        else:
-            sub_h[ins] = h
+            _roofed = True
+        elif (_dsm_roof and dsm_h_block is not None
+              and int(ins.sum()) >= 6 and relief >= _flat_thr):
+            # DSM実測の屋根面をそのまま高さに接地（合成の切妻/寄棟に代えて実形状で）。
+            # eave〜ridge の分位でクリップ＋3x3 メディアンで植生/縁スパイクを抑え、実屋根の
+            # 尾根方向・勾配・L字/寄棟をそのまま反映。DSM欠落セルは eave で埋める。
+            _zp = dsm_h_block[y0:y1, x0:x1]
+            _fin = np.isfinite(_zp) & ins
+            if int(_fin.sum()) >= 6:
+                _v = _zp[_fin]
+                _eave = max(float(np.percentile(_v, _eave_pct)), min_h_m)
+                _ridge = max(float(np.percentile(_v, _ridge_pct)), _eave + 0.5)
+                _zc = np.clip(np.where(np.isfinite(_zp), _zp, _eave), _eave, _ridge)
+                _zc = _median_filter(_zc, size=3)
+                sub_h[ins] = np.maximum(_zc[ins], min_h_m).astype(np.float32)
+                _n_dsm_roof += 1
+                _roofed = True
+        if not _roofed:
+            if roof_slope > 0 and tp in HIP_ROOF_TYPES and ins.sum() >= 4:
+                # DSM無し/未被覆や平屋根: 従来の合成屋根（細長=切妻, 正方形≒寄棟）。
+                gab = _gable_roof_rise(ins, roof_slope, roof_cap)
+                if gab is not None:                                  # 切妻(gable)
+                    sub_h[ins] = h + gab[ins]
+                else:                                                # 寄棟(hip): 縁からの距離変換
+                    d = distance_transform_edt(ins).astype(np.float32)
+                    rise = np.minimum(np.clip(d - 1.0, 0, None) * roof_slope, roof_cap)
+                    sub_h[ins] = h + rise[ins]                        # 重なりは後勝ち
+            else:
+                sub_h[ins] = h
         sub_i = idmap[y0:y1, x0:x1]; sub_i[ins] = bid
         # 壁材・窓スタイルはアーキタイプ由来。屋根材は従来どおり type 由来(屋根は現状維持)。
         wall_keys.append(spec["wall"])
@@ -931,6 +959,9 @@ def build_building_maps(
         facade_keys.append(spec)
         roof_solid_keys.append(bool(b.get("tags", {}).get("roof_solid")))
         bid += 1
+    if _dsm_roof and dsm_h_block is not None:
+        print(f"  [roof-dsm] {_n_dsm_roof} buildings roofed from DSM surface "
+              f"(flat_thr={_flat_thr}m, eave/ridge pct={_eave_pct:.0f}/{_ridge_pct:.0f})")
     return {"mask": mask, "height": hmap, "id": idmap,
             "wall_keys": wall_keys, "roof_keys": roof_keys, "style_keys": style_keys,
             "facade": facade_keys, "roof_solid": roof_solid_keys}
