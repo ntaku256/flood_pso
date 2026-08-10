@@ -3195,6 +3195,36 @@ def dem_to_blocks_enhanced(
                 "state": block_id("water"),
             }))
 
+    # --- 護岸・堤防: FGD水域の縁を石で護岸化し、最外リングに低い floodwall(堤防)を立てる ---
+    #     水際の陸リング=護岸(andesite で地表上書き)、その最外リング=堤防壁(gray_concrete 数段)。
+    #     WATER_REVETMENT=0 で無効。WATER_REVET_RINGS(護岸幅[cell]), WATER_LEVEE_H(壁高[段]) で調整。
+    import os as _os_rv
+    if (_os_rv.environ.get("WATER_REVETMENT", "1") != "0"
+            and water_mask is not None and water_mask.shape == surf_block.shape):
+        _rings = max(1, int(_os_rv.environ.get("WATER_REVET_RINGS", "2")))
+        _levee_h = max(0, int(_os_rv.environ.get("WATER_LEVEE_H", "2")))
+        _wat = water_mask & land_for_water
+        if bool(_wat.any()):
+            _d_full = binary_dilation(_wat, iterations=_rings)
+            _d_inner = binary_dilation(_wat, iterations=_rings - 1) if _rings > 1 else _wat
+            _bank = _d_full & land_for_water & ~_wat               # 護岸(水際の陸リング)
+            _levee = _d_full & ~_d_inner & land_for_water & ~_wat  # 堤防壁(最外リング)
+            for j, i_ in zip(*np.where(_bank)):
+                ix = int(BX[j, i_]); iz = int(BZ[j, i_]); ys = int(y_surf_land[j, i_])
+                blocks.append(nbtlib.Compound({
+                    "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(ys), nbtlib.Int(iz)]),
+                    "state": block_id("andesite"),                # 護岸面(石)
+                }))
+            for j, i_ in zip(*np.where(_levee)):
+                ix = int(BX[j, i_]); iz = int(BZ[j, i_]); ys = int(y_surf_land[j, i_])
+                for wy in range(ys + 1, ys + 1 + _levee_h):
+                    blocks.append(nbtlib.Compound({
+                        "pos":   nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(wy), nbtlib.Int(iz)]),
+                        "state": block_id("gray_concrete"),       # 堤防/floodwall
+                    }))
+            print(f"  [revetment] bank={int(_bank.sum())} levee_ring={int(_levee.sum())} "
+                  f"(rings={_rings}, levee_h={_levee_h})")
+
     # --- 建物（陸セルのみ）。高さは DSM 由来 building_height_patch があれば実測、無ければ一律。
     #     壁=wall_block + 階ごとの窓 window_block、屋根トップ=オルソ色（color_building_roofs）。 ---
     if building_mask is not None and building_mask.shape == dem_ds.shape:
