@@ -848,8 +848,15 @@ def build_building_maps(
     # 点状突起(アンテナ/屋上設備)を「局所メディアン+この余裕[m]」で抑える。尾根線は沿線
     # メディアンに近いので保たれる。0 で無効。
     _spike_m = float(_os_rf.environ.get("ROOF_DSM_SPIKE_M", "2.0"))
+    # 支配的屋根(footprint中央値)からこれ以上は上げない[m]。footprintの一部に高い突起
+    # (隣接構造/マスト/DSM汚染)があっても普通の家が棒立ちのタワーにならないための上限。
+    _ridge_max_m = float(_os_rf.environ.get("ROOF_DSM_RIDGE_MAX_M", "5.0"))
+    # 建物高: p75 と median の差がこれを超える footprint は「部分突起で p75 汚染」とみなし
+    # 支配的屋根(median)を高さに使う（普通の家の棒立ちタワー化を防ぐ）。
+    _h_spike_m = float(_os_rf.environ.get("ROOF_DSM_HEIGHT_SPIKE_M", "6.0"))
     _n_dsm_roof = 0
     _n_roof_spikes = 0
+    _n_h_robust = 0
     mask = np.zeros((grid_h, grid_w), dtype=bool)
     hmap = np.full((grid_h, grid_w), np.nan, dtype=np.float32)
     idmap = np.full((grid_h, grid_w), -1, dtype=np.int32)
@@ -901,9 +908,19 @@ def build_building_maps(
             vals = dsm_h_block[y0:y1, x0:x1][ins]
             vals = vals[np.isfinite(vals)]
             if vals.size:
-                h = max(float(np.percentile(vals, pct)), base_m * type_floor_frac)
+                _p75 = float(np.percentile(vals, pct))
+                _medf = float(np.median(vals))
+                # 部分的な高い突起で p75 が汚染(p75≫median)された footprint は、支配的な屋根
+                # レベル(median)を高さに採用（普通の家が突起に引っ張られ棒立ちタワー化するのを防ぐ）。
+                if (_p75 - _medf) > _h_spike_m:
+                    _hd = _medf; _n_h_robust += 1
+                else:
+                    _hd = _p75
+                h = max(_hd, base_m * type_floor_frac)
             if vals.size >= 4:                          # 屋根面の起伏=形状の代理(陸屋根/勾配)
-                relief = float(np.percentile(vals, 90) - np.percentile(vals, 10))
+                # 部分突起(median+_ridge_max超)は relief に数えない（誤アーキタイプ=白タワー化を防ぐ）
+                _p90c = min(float(np.percentile(vals, 90)), float(np.median(vals)) + _ridge_max_m)
+                relief = float(_p90c - np.percentile(vals, 10))
         if h is None:                                   # DSM欠落/未被覆 → クラス×面積×ジッタで段階推定
             afac = _building_area_height_factor(tp, area_m2)
             h = base_m * afac * (1.0 + _building_height_jitter(ext))
@@ -937,8 +954,12 @@ def build_building_maps(
             _fin = np.isfinite(_zp) & ins
             if int(_fin.sum()) >= 6:
                 _v = _zp[_fin]
+                _medf = float(np.median(_v))
                 _eave = max(float(np.percentile(_v, _eave_pct)), min_h_m)
-                _ridge = max(float(np.percentile(_v, _ridge_pct)), _eave + 0.5)
+                # 尾根は分位クリップに加え「支配的屋根(median)+_ridge_max_m」でも抑える。
+                # 部分的に高い突起(隣接構造/マスト)が屋根から棒状に立ち上がるのを防ぐ。
+                _ridge = max(min(float(np.percentile(_v, _ridge_pct)), _medf + _ridge_max_m),
+                             _eave + 0.5)
                 # footprint内のみ実測値、外は eave（近傍建物/樹木の混入を断つ）
                 _zc = np.where(_fin, np.clip(_zp, _eave, _ridge), _eave).astype(np.float32)
                 _zc = _median_filter(_zc, size=3)
@@ -973,7 +994,8 @@ def build_building_maps(
     if _dsm_roof and dsm_h_block is not None:
         print(f"  [roof-dsm] {_n_dsm_roof} buildings roofed from DSM surface "
               f"(flat_thr={_flat_thr}m, eave/ridge pct={_eave_pct:.0f}/{_ridge_pct:.0f}, "
-              f"footprint-confined; spikes clamped={_n_roof_spikes})")
+              f"footprint-confined; spikes clamped={_n_roof_spikes}; "
+              f"height→median(robust)={_n_h_robust}, ridge_max={_ridge_max_m}m)")
     return {"mask": mask, "height": hmap, "id": idmap,
             "wall_keys": wall_keys, "roof_keys": roof_keys, "style_keys": style_keys,
             "facade": facade_keys, "roof_solid": roof_solid_keys}
