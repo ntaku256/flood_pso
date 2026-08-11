@@ -1223,6 +1223,46 @@ def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
     return ymax[0]
 
 
+def add_landmark_markers(blocks, landmarks, patch_bbox_latlon, nz, nx, *,
+                         y_surf_land) -> int:
+    """OSM ランドマーク（駅/役所/学校/病院/消防/警察/寺社）を **category色の発光柱**で強調。
+    専用3Dモデルが無い御坊で「どれがランドマークか」を遠望で識別できるようにする。
+    建物より高い柱＋頂部 sea_lantern/glowstone。LANDMARK_MARKERS=0 で無効、
+    LANDMARK_MARKER_H で高さ。返り値: 置いた最大 y。"""
+    import os as _os_lm
+    from landmark_osm import LANDMARK_STYLE, DEFAULT_LANDMARK_BLOCK, CATEGORY_JA
+    if _os_lm.environ.get("LANDMARK_MARKERS", "1") == "0" or not landmarks:
+        return 0
+    H = max(10, int(_os_lm.environ.get("LANDMARK_MARKER_H", "30")))
+    ymax = 0
+    n = 0
+    cats: dict = {}
+    for lm in landmarks:
+        x_, z_ = _lonlat_to_grid_xy(lm["lat"], lm["lon"], patch_bbox_latlon, nz, nx)
+        ix, iz = int(round(x_)), int(round(z_))
+        if not (0 <= ix < nx and 0 <= iz < nz):
+            continue
+        y0v = y_surf_land[iz, ix]
+        if not np.isfinite(y0v):
+            continue
+        y0 = int(y0v)
+        col = LANDMARK_STYLE.get(lm["category"], DEFAULT_LANDMARK_BLOCK)
+        for fy in range(y0 + 1, y0 + H):
+            blocks.append(nbtlib.Compound({
+                "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(fy), nbtlib.Int(iz)]),
+                "state": block_id(col)}))
+        for ty, tk in ((y0 + H, "sea_lantern"), (y0 + H + 1, "glowstone")):
+            blocks.append(nbtlib.Compound({
+                "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(ix), nbtlib.Int(ty), nbtlib.Int(iz)]),
+                "state": block_id(tk)}))
+        ymax = max(ymax, y0 + H + 1)
+        n += 1
+        cats[lm["category"]] = cats.get(lm["category"], 0) + 1
+    _summary = " ".join(f"{CATEGORY_JA.get(k, k)}{v}" for k, v in sorted(cats.items()))
+    print(f"  [landmark] {n} ランドマーク強調（色分け発光柱）: {_summary}")
+    return ymax
+
+
 def add_wstr_blocks(blocks, wstr_lines, patch_bbox_latlon, nz, nx, *,
                     y_surf_land, sea_mask=None) -> int:
     """FG-GML WStrL（水部構造物線）を **実測線上に壁として立てる**。
@@ -2702,6 +2742,7 @@ def dem_to_blocks_enhanced(
     power_towers: list | None = None,
     rails: list | None = None,
     wstr_lines: list | None = None,
+    landmarks: list | None = None,
     parkings: list | None = None,
     ortho_rgb: np.ndarray | None = None,
     patch_bbox_latlon: tuple | None = None,
@@ -3753,6 +3794,12 @@ def dem_to_blocks_enhanced(
                     "state": block_id("sea_lantern"),
                 }))
             max_y = max(max_y, y0 + EVAC_H + 2)
+
+    # --- ランドマーク強調（OSM 駅/役所/学校/病院/消防/警察/寺社）。category色の発光柱 ---
+    if landmarks and patch_bbox_latlon is not None:
+        lm_ymax = add_landmark_markers(
+            blocks, landmarks, patch_bbox_latlon, nz, nx, y_surf_land=y_surf_land)
+        max_y = max(max_y, lm_ymax + 2)
 
     # --- 土台層: 全セルの y=_lift-1 に1段（海底の砂/砂利等がブロック更新で落ちないよう下から支える）---
     #     deepslate（割れる）なので、これより下の凡例層は掘って到達できる。

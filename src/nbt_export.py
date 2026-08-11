@@ -430,6 +430,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   fgd_wa_xml: str | None = None,
                   fgd_rail_xml: str | None = None,
                   fgd_wstrl_xml: str | None = None,
+                  emphasize_landmarks: bool = False,
                   building_list: list | None = None,
                   remove_bld_polys: list | None = None,  # 重心がこの[lat,lon]環内のFGD建物を除去
                   add_bld_list: list | None = None,       # FGD建物に追加する新設建物dict
@@ -1022,6 +1023,19 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
             )
 
+        # OSM ランドマーク（駅/役所/学校/病院/消防/警察/寺社）を強調マーカーで
+        landmark_render = None
+        if emphasize_landmarks:
+            try:
+                from landmark_osm import load_landmarks
+                landmark_render = load_landmarks(
+                    lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                    lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                )
+                print(f"  [landmark] OSM ランドマーク {len(landmark_render)} 件を取得")
+            except Exception as _e_lm:
+                print(f"  [landmark] 取得スキップ（劣化継続）: {_e_lm}")
+
         # 道路境界線(curb)の交差点偽枠線対策: OSM道路センターラインを塗りつぶし回廊にした mask を
         # 用意して dem_to_blocks_enhanced に渡す（centerline は交差点を連続して貫くので「同一道路」
         # 判定に使える）。オフライン等で取得失敗時は None=極小穴埋めのみにフォールバック。
@@ -1144,6 +1158,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             power_towers=power_towers,
             rails=rail_render,
             wstr_lines=wstr_render,
+            landmarks=landmark_render,
             parkings=parking_render,
             ortho_rgb=ortho_rgb,
             evac_facilities=evac_render,
