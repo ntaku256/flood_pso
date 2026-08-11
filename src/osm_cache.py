@@ -320,6 +320,12 @@ GEOM_QUERIES: dict[str, str] = {
                 'node["power"~"^(tower|pole)$"]({S},{W},{N},{E});'),
     "parking": ('way["amenity"="parking"]({S},{W},{N},{E});'
                 'relation["amenity"="parking"]({S},{W},{N},{E});'),
+    # ランドマーク（駅/役所/学校/病院/消防/警察/寺社）。node/way 両方。強調マーカー用。
+    "landmark": ('node["railway"="station"]({S},{W},{N},{E});'
+                 'way["railway"="station"]({S},{W},{N},{E});'
+                 'way["building"="train_station"]({S},{W},{N},{E});'
+                 'node["amenity"~"^(townhall|school|university|college|hospital|fire_station|police|place_of_worship)$"]({S},{W},{N},{E});'
+                 'way["amenity"~"^(townhall|school|university|college|hospital|fire_station|police|place_of_worship)$"]({S},{W},{N},{E});'),
 }
 
 
