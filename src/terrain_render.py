@@ -1223,6 +1223,49 @@ def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
     return ymax[0]
 
 
+def add_wstr_blocks(blocks, wstr_lines, patch_bbox_latlon, nz, nx, *,
+                    y_surf_land, sea_mask=None) -> int:
+    """FG-GML WStrL（水部構造物線）を **実測線上に壁として立てる**。
+    従来 WStrA(面) は水面として平坦描画されるだけで、堰/水門/防波堤/砂防ダム/護岸が
+    「水」になっていた。本関数は測量された線ジオメトリを type 別の材質・高さで壁化する：
+    防波堤/砂防ダム=高いコンクリ/石、水門/せき=中低コンクリ、水制/護岸=低い石。
+    WSTR_STRUCT=0 で無効、WSTR_HEIGHT_SCALE で高さ倍率。返り値: 置いた最大 y。"""
+    import os as _os_ws
+    from fgd_vector import WSTR_STYLE_BY_TYPE, DEFAULT_WSTR_STYLE
+    if _os_ws.environ.get("WSTR_STRUCT", "1") == "0" or not wstr_lines:
+        return 0
+    _hmul = float(_os_ws.environ.get("WSTR_HEIGHT_SCALE", "1.0"))
+    ymax = 0
+    seen: set = set()
+    n_cell = 0
+    for R in wstr_lines:
+        tp = R.get("tags", {}).get("fgd_type", "")
+        key, h_steps = WSTR_STYLE_BY_TYPE.get(tp, DEFAULT_WSTR_STYLE)
+        h_steps = max(1, int(round(h_steps * _hmul)))
+        # 防波堤/桟橋/砂防ダムは幅を持たせ、その他は約1セル幅の壁。
+        bufc = 1.0 if tp in ("防波堤", "桟橋", "砂防ダム") else 0.6
+        m = polyline_buffer_mask_from_latlon(R["coords"], patch_bbox_latlon, nz, nx, bufc)
+        for j, i_ in zip(*np.where(m)):
+            j = int(j); i_ = int(i_)
+            if sea_mask is not None and sea_mask[j, i_] and tp not in ("防波堤", "桟橋"):
+                continue  # 防波堤/桟橋は海上に立つ。他の構造物は陸上のみ
+            gy = int(y_surf_land[j, i_])
+            for fy in range(gy + 1, gy + 1 + h_steps):
+                k = (i_, fy, j)
+                if k in seen:
+                    continue
+                seen.add(k)
+                blocks.append(nbtlib.Compound({
+                    "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(i_), nbtlib.Int(fy), nbtlib.Int(j)]),
+                    "state": block_id(key)}))
+                if fy > ymax:
+                    ymax = fy
+            n_cell += 1
+    print(f"  [wstr] {len(wstr_lines)} lines → {n_cell} cells raised "
+          f"(水部構造物: 堰/水門/防波堤/砂防ダム/護岸/水制)")
+    return ymax
+
+
 def add_rail_blocks(blocks, rails, patch_bbox_latlon, nz, nx, *,
                     y_surf_land, sea_mask=None,
                     ballast_key="gravel", sleeper_key="spruce_log",
@@ -2658,6 +2701,7 @@ def dem_to_blocks_enhanced(
     powerlines: list | None = None,
     power_towers: list | None = None,
     rails: list | None = None,
+    wstr_lines: list | None = None,
     parkings: list | None = None,
     ortho_rgb: np.ndarray | None = None,
     patch_bbox_latlon: tuple | None = None,
@@ -3669,6 +3713,14 @@ def dem_to_blocks_enhanced(
             y_surf_land=y_surf_land, sea_mask=sea_mask,
         )
         max_y = max(max_y, rail_ymax + 2)
+
+    # --- 水部構造物（FG-GML WStrL）。堰/水門/防波堤/砂防ダム/護岸/水制を実測線上に壁化 ---
+    if wstr_lines and patch_bbox_latlon is not None:
+        wstr_ymax = add_wstr_blocks(
+            blocks, wstr_lines, patch_bbox_latlon, nz, nx,
+            y_surf_land=y_surf_land, sea_mask=sea_mask,
+        )
+        max_y = max(max_y, wstr_ymax + 2)
 
     # --- 駐車場の停車車両（オルソ検出）を 1 段持ち上げて配置 ---
     for (ix, iy, iz, key) in _parking_cars:

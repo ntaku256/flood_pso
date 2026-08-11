@@ -168,10 +168,13 @@ def load_rail(xml_path: str, *, lat_min, lat_max, lon_min, lon_max) -> list[dict
     return out
 
 
-def load_water(xml_path: str, *, lat_min, lat_max, lon_min, lon_max) -> list[dict]:
-    """WA / WStrA（水域面）→ [{"coords":[[lat,lon],...], "tags":{...}}]"""
+def load_water(xml_path: str, *, lat_min, lat_max, lon_min, lon_max,
+               include_wstra: bool = True) -> list[dict]:
+    """WA / WStrA（水域面）→ [{"coords":[[lat,lon],...], "tags":{...}}]。
+    include_wstra=False で WStrA(水部構造物面＝堰/防波堤/水門等。実際は水でなく構造物)を
+    水面から除外する（WStrL の構造物描画と併用し「構造物が平坦な水面」誤描画を回避）。"""
     out = []
-    for ln in ("WA", "WStrA"):
+    for ln in (("WA", "WStrA") if include_wstra else ("WA",)):
         try:
             for el in _iter_features(xml_path, ln):
                 pl = el.find(f".//{POSLIST}")
@@ -186,6 +189,39 @@ def load_water(xml_path: str, *, lat_min, lat_max, lon_min, lon_max) -> list[dic
                 out.append({"coords": coords, "tags": {"fgd_type": tp}})
         except Exception:
             pass
+    return out
+
+
+# 水部構造物(WStrL) type → (壁ブロックキー, 高さ[段])。実測線上に構造物を立てる高さ・材質。
+WSTR_STYLE_BY_TYPE = {
+    "防波堤": ("gray_concrete", 4),   # 海の防波堤: 高いコンクリ
+    "砂防ダム": ("stone", 4),          # 渓流の砂防ダム: 高い石積
+    "水門": ("gray_concrete", 3),      # 水門・樋門: 中高コンクリ
+    "せき": ("gray_concrete", 2),      # 堰: 低コンクリ
+    "不透過水制": ("cobblestone", 2),  # 水制(不透過)
+    "透過水制": ("cobblestone", 1),    # 水制(透過): 低い石
+    "護岸": ("andesite", 1),           # 護岸: 石の護岸面
+    "桟橋": ("oak_planks", 1),         # 桟橋: 木デッキ
+}
+DEFAULT_WSTR_STYLE = ("andesite", 2)
+
+
+def load_wstr_lines(xml_path: str, *, lat_min, lat_max, lon_min, lon_max) -> list[dict]:
+    """WStrL（水部構造物線＝堰/水門/防波堤/砂防ダム/護岸/水制/桟橋）
+    → [{"coords":[[lat,lon],...], "tags":{"fgd_type"}}]。RailCL と同じ polyline。
+    面(WStrA)ではなく実測の線ジオメトリなので、構造物の稜線をそのまま壁化できる。"""
+    out = []
+    for el in _iter_features(xml_path, "WStrL"):
+        pl = el.find(f".//{POSLIST}")
+        if pl is None or not pl.text:
+            continue
+        coords = _parse_poslist(pl.text)
+        if len(coords) < 2:
+            continue
+        if not _coords_intersect_bbox(coords, lat_min, lat_max, lon_min, lon_max):
+            continue
+        tp = el.findtext(f"{{{FGD}}}type") or ""
+        out.append({"coords": coords, "tags": {"fgd_type": tp}})
     return out
 
 

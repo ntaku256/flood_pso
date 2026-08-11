@@ -429,6 +429,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   fgd_rdedg_xml: str | None = None,
                   fgd_wa_xml: str | None = None,
                   fgd_rail_xml: str | None = None,
+                  fgd_wstrl_xml: str | None = None,
                   building_list: list | None = None,
                   remove_bld_polys: list | None = None,  # 重心がこの[lat,lon]環内のFGD建物を除去
                   add_bld_list: list | None = None,       # FGD建物に追加する新設建物dict
@@ -850,9 +851,12 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             road_mask = rm_f if road_mask is None else (road_mask | rm_f)
             road_major_mask = rmaj_f if road_major_mask is None else (road_major_mask | rmaj_f)
             # FG-GML 水域(WA/WStrA: 河川・池) → 地表を水面に。fgd_wa_xml はカンマ区切り複数可
+            # WStrL 構造物を立てる場合は WStrA(＝堰/防波堤等の構造物面)を水面から除外する
+            # （構造物が平坦な水面に誤描画されるバグ回避。WStrA は WStrL の壁で表現する）。
             if fgd_wa_xml:
                 from fgd_vector import load_water
                 from terrain_render import polygon_mask_from_latlon
+                _inc_wstra = not bool(fgd_wstrl_xml)
                 wm = np.zeros((nz_g, nx_g), dtype=bool)
                 _nw = 0
                 for wx in str(fgd_wa_xml).split(","):
@@ -860,11 +864,13 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                     if not wx:
                         continue
                     for w in load_water(wx, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
-                                        lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3]):
+                                        lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                                        include_wstra=_inc_wstra):
                         wm |= polygon_mask_from_latlon(w["coords"], patch_bbox_latlon, nz_g, nx_g)
                         _nw += 1
                 water_mask = wm if water_mask is None else (water_mask | wm)
-                print(f"  [fgd-water] WA/WStrA {_nw}面 → 水面mask cells={int(wm.sum())}")
+                print(f"  [fgd-water] {'WA/WStrA' if _inc_wstra else 'WA(WStrAは構造物へ)'} "
+                      f"{_nw}面 → 水面mask cells={int(wm.sum())}")
             building_height_block = bmaps["height"]
             building_id_grid = bmaps["id"]
             building_wall_keys = bmaps["wall_keys"]
@@ -981,6 +987,20 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                         lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
                     )
             print(f"  [rail] FG-GML RailCL {len(rail_render)} 本を敷設")
+
+        # FG-GML 水部構造物線（WStrL＝堰/水門/防波堤/砂防ダム/護岸）を patch 範囲で読む
+        wstr_render = None
+        if fgd_wstrl_xml:
+            from fgd_vector import load_wstr_lines
+            wstr_render = []
+            for sx in str(fgd_wstrl_xml).split(","):
+                sx = sx.strip()
+                if sx and Path(sx).exists():
+                    wstr_render += load_wstr_lines(
+                        sx, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                        lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                    )
+            print(f"  [wstr] FG-GML WStrL {len(wstr_render)} 本（水部構造物）を読込")
 
         # OSM 駐車場（amenity=parking）を patch 範囲で読む
         parking_render = None
@@ -1123,6 +1143,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             powerlines=power_lines,
             power_towers=power_towers,
             rails=rail_render,
+            wstr_lines=wstr_render,
             parkings=parking_render,
             ortho_rgb=ortho_rgb,
             evac_facilities=evac_render,
