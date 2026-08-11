@@ -845,7 +845,11 @@ def build_building_maps(
     _flat_thr = float(_os_rf.environ.get("ROOF_DSM_FLAT_THR", "1.5"))
     _eave_pct = float(_os_rf.environ.get("ROOF_DSM_EAVE_PCT", "25"))
     _ridge_pct = float(_os_rf.environ.get("ROOF_DSM_RIDGE_PCT", "92"))
+    # 点状突起(アンテナ/屋上設備)を「局所メディアン+この余裕[m]」で抑える。尾根線は沿線
+    # メディアンに近いので保たれる。0 で無効。
+    _spike_m = float(_os_rf.environ.get("ROOF_DSM_SPIKE_M", "2.0"))
     _n_dsm_roof = 0
+    _n_roof_spikes = 0
     mask = np.zeros((grid_h, grid_w), dtype=bool)
     hmap = np.full((grid_h, grid_w), np.nan, dtype=np.float32)
     idmap = np.full((grid_h, grid_w), -1, dtype=np.int32)
@@ -925,17 +929,24 @@ def build_building_maps(
             _roofed = True
         elif (_dsm_roof and dsm_h_block is not None
               and int(ins.sum()) >= 6 and relief >= _flat_thr):
-            # DSM実測の屋根面をそのまま高さに接地（合成の切妻/寄棟に代えて実形状で）。
-            # eave〜ridge の分位でクリップ＋3x3 メディアンで植生/縁スパイクを抑え、実屋根の
-            # 尾根方向・勾配・L字/寄棟をそのまま反映。DSM欠落セルは eave で埋める。
+            # DSM実測の屋根面を高さに接地（合成の切妻/寄棟に代えて実形状で）。
+            # 重要: footprint **外** のセル（隣の高い建物・樹木）はメディアンで縁に混入して
+            # 「変な突起」を生むので、footprint外/非有限は eave で埋めてから平滑する。
+            # アンテナ/屋上設備の点状突起は「局所メディアン+_spike_m」で抑える（尾根線は保つ）。
             _zp = dsm_h_block[y0:y1, x0:x1]
             _fin = np.isfinite(_zp) & ins
             if int(_fin.sum()) >= 6:
                 _v = _zp[_fin]
                 _eave = max(float(np.percentile(_v, _eave_pct)), min_h_m)
                 _ridge = max(float(np.percentile(_v, _ridge_pct)), _eave + 0.5)
-                _zc = np.clip(np.where(np.isfinite(_zp), _zp, _eave), _eave, _ridge)
+                # footprint内のみ実測値、外は eave（近傍建物/樹木の混入を断つ）
+                _zc = np.where(_fin, np.clip(_zp, _eave, _ridge), _eave).astype(np.float32)
                 _zc = _median_filter(_zc, size=3)
+                if _spike_m > 0:                      # 点状突起(設備/アンテナ)を局所比で抑制
+                    _cap = _median_filter(_zc, size=3) + _spike_m
+                    _n_roof_spikes += int(np.count_nonzero((_zc[ins] > _cap[ins])))
+                    _zc = np.minimum(_zc, _cap)
+                    _zc = _median_filter(_zc, size=3)
                 sub_h[ins] = np.maximum(_zc[ins], min_h_m).astype(np.float32)
                 _n_dsm_roof += 1
                 _roofed = True
@@ -961,7 +972,8 @@ def build_building_maps(
         bid += 1
     if _dsm_roof and dsm_h_block is not None:
         print(f"  [roof-dsm] {_n_dsm_roof} buildings roofed from DSM surface "
-              f"(flat_thr={_flat_thr}m, eave/ridge pct={_eave_pct:.0f}/{_ridge_pct:.0f})")
+              f"(flat_thr={_flat_thr}m, eave/ridge pct={_eave_pct:.0f}/{_ridge_pct:.0f}, "
+              f"footprint-confined; spikes clamped={_n_roof_spikes})")
     return {"mask": mask, "height": hmap, "id": idmap,
             "wall_keys": wall_keys, "roof_keys": roof_keys, "style_keys": style_keys,
             "facade": facade_keys, "roof_solid": roof_solid_keys}
