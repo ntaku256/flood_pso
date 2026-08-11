@@ -854,6 +854,13 @@ def build_building_maps(
     # 建物高: p75 と median の差がこれを超える footprint は「部分突起で p75 汚染」とみなし
     # 支配的屋根(median)を高さに使う（普通の家の棒立ちタワー化を防ぐ）。
     _h_spike_m = float(_os_rf.environ.get("ROOF_DSM_HEIGHT_SPIKE_M", "6.0"))
+    # 木造(普通建物)・無壁舎(倉庫上屋)の現実的な高さ上限[m]。DSM の過大や隣接構造の混入で
+    # 木造が高層タワー化するのを防ぐ（RC=堅ろう建物/高層建物 は対象外で高くできる）。0 で無効。
+    _lowrise_max_m = float(_os_rf.environ.get("ROOF_LOWRISE_MAX_M", "12.0"))
+    _LOWRISE_TP = ("普通建物", "普通無壁舎", "堅ろう無壁舎")
+    # 全建物の高さ上限[m]（型不問のグローバル上限。0=無効）。街に高層が無い地域で
+    # DSM過大/隣接混入による突飛なタワーを一律に抑えたいときに使う。
+    _building_max_m = float(_os_rf.environ.get("BUILDING_MAX_M", "0"))
     _n_dsm_roof = 0
     _n_roof_spikes = 0
     _n_h_robust = 0
@@ -925,6 +932,15 @@ def build_building_maps(
             afac = _building_area_height_factor(tp, area_m2)
             h = base_m * afac * (1.0 + _building_height_jitter(ext))
         h = max(h, min_h_m)
+        # 木造/無壁舎は現実的な高さ上限、さらに全型グローバル上限でクランプ
+        # （DSM過大・隣接構造の混入による棒立ちタワー防止）。
+        _hcap = float("inf")
+        if _lowrise_max_m > 0 and tp in _LOWRISE_TP:
+            _hcap = _lowrise_max_m
+        if _building_max_m > 0:
+            _hcap = min(_hcap, _building_max_m)
+        if h > _hcap:
+            h = _hcap; relief = min(relief, 2.0); _n_h_robust += 1
         arch = building_archetype(tp, h, relief, area_m2)
         spec = ARCHETYPE_STYLE[arch]
         if arch == "wood_house":                 # 壁/トリムを座標決定的に多様化（他種別は不変）
@@ -956,10 +972,11 @@ def build_building_maps(
                 _v = _zp[_fin]
                 _medf = float(np.median(_v))
                 _eave = max(float(np.percentile(_v, _eave_pct)), min_h_m)
-                # 尾根は分位クリップに加え「支配的屋根(median)+_ridge_max_m」でも抑える。
-                # 部分的に高い突起(隣接構造/マスト)が屋根から棒状に立ち上がるのを防ぐ。
-                _ridge = max(min(float(np.percentile(_v, _ridge_pct)), _medf + _ridge_max_m),
+                # 尾根は分位クリップに加え「支配的屋根(median)+_ridge_max_m」と型別高さ上限
+                # (_hcap: 木造/無壁舎)でも抑える。部分突起や DSM過大で屋根が棒状に立ち上がるのを防ぐ。
+                _ridge = max(min(float(np.percentile(_v, _ridge_pct)), _medf + _ridge_max_m, _hcap),
                              _eave + 0.5)
+                _eave = min(_eave, _ridge)
                 # footprint内のみ実測値、外は eave（近傍建物/樹木の混入を断つ）
                 _zc = np.where(_fin, np.clip(_zp, _eave, _ridge), _eave).astype(np.float32)
                 _zc = _median_filter(_zc, size=3)
