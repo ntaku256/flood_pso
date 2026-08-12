@@ -140,6 +140,10 @@ def main():
                          "カンマ区切りで複数可。空文字で水域無効")
     ap.add_argument("--fgd-rail", default=None,
                     help="鉄道 RailCL GML パス（道床+枕木+レールで敷設）。カンマ区切りで複数メッシュ可")
+    ap.add_argument("--fgd-wstrl", default=None,
+                    help="水部構造物線 WStrL GML パス（堰/水門/防波堤/砂防ダム/護岸を実測線上に壁化）")
+    ap.add_argument("--fgd-cstline", default=None,
+                    help="海岸線 Cstline GML パス（実測海岸線を護岸andesiteで接地）")
     ap.add_argument("--remove-bld-geojson", default=None,
                     help="この Polygon 群に重心が入る FGD 建物を除去（現況で解体済みの建物用）。緯度経度 GeoJSON")
     ap.add_argument("--add-bld-geojson", default=None,
@@ -886,6 +890,8 @@ def main():
                 barriers_fetch=args.barriers,
                 busstops_json=(args.busstops_json or None),
                 busstops_fetch=args.busstops,
+                fgd_wstrl_xml=(args.fgd_wstrl or None),
+                fgd_cstline_xml=(args.fgd_cstline or None),
                 hollow_buildings=args.hollow_buildings,
                 legend_layer=args.legend_layer,
                 tile_crop=t_crop,

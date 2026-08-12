@@ -462,6 +462,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   barriers_fetch: bool = False,
                   busstops_json: str | None = None,
                   busstops_fetch: bool = False,
+                  fgd_wstrl_xml: str | None = None,
+                  fgd_cstline_xml: str | None = None,
                   hollow_buildings: bool = True,
                   legend_layer: bool = False,
                   tile_crop: tuple | None = None,
@@ -1105,6 +1107,23 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
                 fetch_if_missing=busstops_fetch)
             print(f"  [busstop] OSM バス停 {len(busstops_render)} 件を取得")
+        # FG-GML 水部構造物(WStrL)・海岸線(Cstline) を patch 範囲で読む
+        def _load_fgd_lines(xmls, layer):
+            from fgd_vector import load_fgd_line_layer
+            out = []
+            for xx in str(xmls).split(","):
+                xx = xx.strip()
+                if xx and Path(xx).exists():
+                    out += load_fgd_line_layer(
+                        xx, layer, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                        lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3])
+            return out
+        wstr_render = _load_fgd_lines(fgd_wstrl_xml, "WStrL") if fgd_wstrl_xml else None
+        coast_render = _load_fgd_lines(fgd_cstline_xml, "Cstline") if fgd_cstline_xml else None
+        if wstr_render is not None:
+            print(f"  [wstr] FG-GML WStrL {len(wstr_render)} 本を読込")
+        if coast_render is not None:
+            print(f"  [coastline] FG-GML Cstline {len(coast_render)} 本を読込")
 
         # 道路境界線(curb)の交差点偽枠線対策: OSM道路センターラインを塗りつぶし回廊にした mask を
         # 用意して dem_to_blocks_enhanced に渡す（centerline は交差点を連続して貫くので「同一道路」
@@ -1185,6 +1204,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             railway=railway_render,
             barriers=barriers_render,
             busstops=busstops_render,
+            wstr_lines=wstr_render,
+            coast_lines=coast_render,
             patch_bbox_latlon=patch_bbox_latlon,
             water_mask=water_mask,
             road_major_mask=road_major_mask,

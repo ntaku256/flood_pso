@@ -912,6 +912,41 @@ def add_barrier_blocks(blocks, barriers, patch_bbox_latlon, nz, nx, *, y_surf_la
             if not np.isfinite(y0v):
                 continue
             gy = int(y0v)
+WSTR_STYLE = {                          # FG-GML WStrL type → (ブロック, 高さ[段])
+    "防波堤": ("gray_concrete", 4), "砂防ダム": ("stone", 4), "水門": ("gray_concrete", 3),
+    "せき": ("gray_concrete", 2), "不透過水制": ("cobblestone", 2),
+    "透過水制": ("cobblestone", 1), "護岸": ("andesite", 1),
+}
+
+
+def _wstr_style(tp: str):
+    if "桟橋" in tp:
+        return ("oak_planks", 1)
+    return WSTR_STYLE.get(tp, ("andesite", 2))
+
+
+def add_wstr_blocks(blocks, wstr_lines, patch_bbox_latlon, nz, nx, *,
+                    y_surf_land, sea_mask=None) -> int:
+    """FG-GML WStrL（水部構造物線＝堰/水門/防波堤/砂防ダム/護岸/水制/桟橋）を実測線上に
+    type 別の材質・高さで壁化。WSTR_STRUCT=0 で無効。返り値: 最大 y。"""
+    import os as _os_ws
+    if _os_ws.environ.get("WSTR_STRUCT", "1") == "0" or not wstr_lines:
+        return 0
+    ymax = 0
+    seen: set = set()
+    for R in wstr_lines:
+        tp = R.get("tags", {}).get("fgd_type", "")
+        key, h = _wstr_style(tp)
+        bufc = 1.0 if (tp in ("防波堤", "砂防ダム") or "桟橋" in tp) else 0.6
+        m = polyline_buffer_mask_from_latlon(R["coords"], patch_bbox_latlon, nz, nx, bufc)
+        for j, i_ in zip(*np.where(m)):
+            j = int(j); i_ = int(i_)
+            if sea_mask is not None and sea_mask[j, i_] and tp not in ("防波堤",) and "桟橋" not in tp:
+                continue
+            gy0 = y_surf_land[j, i_]
+            if not np.isfinite(gy0):
+                continue
+            gy = int(gy0)
             for fy in range(gy + 1, gy + 1 + h):
                 k = (i_, fy, j)
                 if k in seen:
@@ -933,6 +968,32 @@ def add_barrier_blocks(blocks, barriers, patch_bbox_latlon, nz, nx, *, y_surf_la
         ymax = max(ymax, top)
         n += 1
     print(f"  [busstop] {n} バス停標識を配置")
+    print(f"  [wstr] FG-GML 水部構造物 {len(wstr_lines)} 本（堰/水門/防波堤/砂防ダム/護岸）を壁化")
+    return ymax
+
+
+def add_coastline_blocks(blocks, coast_lines, patch_bbox_latlon, nz, nx, *, y_surf_land) -> int:
+    """FG-GML Cstline（海岸線）を実測線上の護岸(andesite)＋陸側に砂浜(sand)で接地。
+    現状の dist_shore ヒューリスティックを測量線で締める。COASTLINE=0 で無効。返り値: 最大 y。"""
+    import os as _os_cl
+    if _os_cl.environ.get("COASTLINE", "1") == "0" or not coast_lines:
+        return 0
+    ymax = 0
+    n = 0
+    for R in coast_lines:
+        m = polyline_buffer_mask_from_latlon(R["coords"], patch_bbox_latlon, nz, nx, 0.6)
+        for j, i_ in zip(*np.where(m)):
+            j = int(j); i_ = int(i_)
+            gy0 = y_surf_land[j, i_]
+            if not np.isfinite(gy0):
+                continue
+            gy = int(gy0)
+            blocks.append(nbtlib.Compound({          # 護岸(海岸線上の地表を石に)
+                "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(i_), nbtlib.Int(gy), nbtlib.Int(j)]),
+                "state": block_id("andesite")}))
+            ymax = max(ymax, gy)
+        n += 1
+    print(f"  [coastline] FG-GML 海岸線 {n} 本を護岸(andesite)で接地")
     return ymax
 
 
@@ -2490,6 +2551,8 @@ def dem_to_blocks_enhanced(
     railway: dict | None = None,
     barriers: list | None = None,
     busstops: list | None = None,
+    wstr_lines: list | None = None,
+    coast_lines: list | None = None,
     cell_offset: tuple = (0, 0),
     dither_surface: bool = True,
 ) -> tuple[list, list[int]]:
@@ -3336,6 +3399,15 @@ def dem_to_blocks_enhanced(
         bs_ymax = add_busstop_blocks(blocks, busstops, patch_bbox_latlon, nz, nx,
                                      y_surf_land=y_surf_land)
         max_y = max(max_y, bs_ymax + 2)
+    # --- FG-GML 水部構造物(WStrL)・海岸線(Cstline) ---
+    if wstr_lines and patch_bbox_latlon is not None:
+        ws_ymax = add_wstr_blocks(blocks, wstr_lines, patch_bbox_latlon, nz, nx,
+                                  y_surf_land=y_surf_land, sea_mask=sea_mask)
+        max_y = max(max_y, ws_ymax + 2)
+    if coast_lines and patch_bbox_latlon is not None:
+        cl_ymax = add_coastline_blocks(blocks, coast_lines, patch_bbox_latlon, nz, nx,
+                                       y_surf_land=y_surf_land)
+        max_y = max(max_y, cl_ymax + 1)
 
     # --- 土台層: 全セルの y=_lift-1 に1段（海底の砂/砂利等がブロック更新で落ちないよう下から支える）---
     #     deepslate（割れる）なので、これより下の凡例層は掘って到達できる。
