@@ -231,6 +231,9 @@ def main():
                     help="OSM 送電線(power=line)+鉄塔/電柱(power=tower/pole)の Overpass geom JSON。"
                          "指定すると voltage→高さの架線(iron_bars)+鉄塔ラティスを立体化。"
                          "例: data_cache/osm/gobo_power_geom.json（FG-GMLに電力設備が無いため）")
+    ap.add_argument("--power-poles", action="store_true",
+                    help="配電柱を FG-GML 道路縁(RdEdg)から手続き生成(約33m間隔・片側)。"
+                         "御坊は OSM に個別電柱がほぼ無い(実測0本)ための代替。--power-json と併用可")
     ap.add_argument("--parking-json", type=str, default="",
                     help="OSM 駐車場(amenity=parking)の Overpass geom JSON。指定すると地表を"
                          "アスファルト舗装(black_concrete)+白線枠で上書き。例: data_cache/osm/gobo_parking_geom.json")
@@ -849,6 +852,7 @@ def main():
                 bridges_json=(args.bridges_json or None),
                 tunnels_json=(args.tunnels_json or None),
                 power_json=(args.power_json or None),
+                power_poles_from_roads=args.power_poles,
                 parking_json=(args.parking_json or None),
                 waterways_json=(args.waterways_json or None),
                 waterways_fetch=args.waterways_fetch,
