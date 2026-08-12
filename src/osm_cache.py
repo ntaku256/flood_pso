@@ -320,6 +320,10 @@ GEOM_QUERIES: dict[str, str] = {
                 'node["power"~"^(tower|pole)$"]({S},{W},{N},{E});'),
     "parking": ('way["amenity"="parking"]({S},{W},{N},{E});'
                 'relation["amenity"="parking"]({S},{W},{N},{E});'),
+    # 鉄道付帯物: 踏切(level_crossing ノード)・ホーム(platform 面/線)・駅(station ノード)。
+    "railway": ('node["railway"="level_crossing"]({S},{W},{N},{E});'
+                'way["railway"="platform"]({S},{W},{N},{E});'
+                'node["railway"="station"]({S},{W},{N},{E});'),
 }
 
 

@@ -239,6 +239,10 @@ def main():
     ap.add_argument("--evac-xml", type=str,
                     default=str(REPO_ROOT / "data_cache" / "ksj" / "P20-12_30.xml"),
                     help="--evac の P20 避難施設 GML パス（既定: 和歌山県 P20-12）")
+    ap.add_argument("--railway", action="store_true",
+                    help="OSM 鉄道付帯物(踏切/ホーム/駅)を立体化。--fgd-rail の線路に足す(要オンライン)")
+    ap.add_argument("--railway-json", type=str, default="",
+                    help="鉄道付帯物の Overpass geom JSON（無指定＋--railway で Overpass 取得）")
     ap.add_argument("--v-exag", type=float, default=None,
                     help="陸の垂直誇張倍率を上書き（プリセットの v_exag を override）")
     ap.add_argument("--smooth-sigma", type=float, default=1.0,
@@ -839,6 +843,8 @@ def main():
                 power_json=(args.power_json or None),
                 parking_json=(args.parking_json or None),
                 evac_xml=(args.evac_xml if args.evac else None),
+                railway_json=(args.railway_json or None),
+                railway_fetch=args.railway,
                 hollow_buildings=args.hollow_buildings,
                 legend_layer=args.legend_layer,
                 tile_crop=t_crop,
