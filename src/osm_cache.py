@@ -332,6 +332,9 @@ GEOM_QUERIES: dict[str, str] = {
     "railway": ('node["railway"="level_crossing"]({S},{W},{N},{E});'
                 'way["railway"="platform"]({S},{W},{N},{E});'
                 'node["railway"="station"]({S},{W},{N},{E});'),
+    # 擁壁・塀・柵・生垣（barrier ライン）。道路・宅地の段差や境界。
+    "barrier": ('way["barrier"~"^(retaining_wall|wall|fence|hedge|guard_rail)$"]'
+                '({S},{W},{N},{E});'),
 }
 
 

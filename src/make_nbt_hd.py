@@ -264,6 +264,10 @@ def main():
                     help="OSM 鉄道付帯物(踏切/ホーム/駅)を立体化。--fgd-rail の線路に足す(要オンライン)")
     ap.add_argument("--railway-json", type=str, default="",
                     help="鉄道付帯物の Overpass geom JSON（無指定＋--railway で Overpass 取得）")
+    ap.add_argument("--barriers", action="store_true",
+                    help="OSM barrier(擁壁/塀/柵/生垣/ガードレール)を kind別材質で壁化(要オンライン)")
+    ap.add_argument("--barriers-json", type=str, default="",
+                    help="barrier の Overpass geom JSON（無指定＋--barriers で Overpass 取得）")
     ap.add_argument("--v-exag", type=float, default=None,
                     help="陸の垂直誇張倍率を上書き（プリセットの v_exag を override）")
     ap.add_argument("--smooth-sigma", type=float, default=1.0,
@@ -874,6 +878,8 @@ def main():
                 signals_fetch=args.signals,
                 railway_json=(args.railway_json or None),
                 railway_fetch=args.railway,
+                barriers_json=(args.barriers_json or None),
+                barriers_fetch=args.barriers,
                 hollow_buildings=args.hollow_buildings,
                 legend_layer=args.legend_layer,
                 tile_crop=t_crop,
