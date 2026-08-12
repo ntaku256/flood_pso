@@ -806,31 +806,6 @@ def add_signal_blocks(blocks, signals, patch_bbox_latlon, nz, nx, *, y_surf_land
     if _os_sg.environ.get("SIGNALS", "1") == "0" or not signals:
         return 0
     H = max(3, int(_os_sg.environ.get("SIGNAL_H", "6")))
-def add_railway_blocks(blocks, railway, patch_bbox_latlon, nz, nx, *,
-                       y_surf_land, sea_mask=None) -> int:
-    """OSM 鉄道付帯物を立体化: 踏切=黄黒縞の警標ポール2本(線路両脇), ホーム=1段上げた
-    andesite スラブ, 駅=水色マーカー柱+発光。FG-GML RailCL(--fgd-rail)の線路に足す。
-    RAILWAY_FEATURES=0 で無効。返り値: 最大 y。"""
-    import os as _os_rw
-    if _os_rw.environ.get("RAILWAY_FEATURES", "1") == "0" or not railway:
-        return 0
-def add_busstop_blocks(blocks, busstops, patch_bbox_latlon, nz, nx, *, y_surf_land) -> int:
-    """OSM バス停（highway=bus_stop）を **標識ポール**で立体化: light_gray_concrete の柱に
-    上部へ青＋白の標識、頂部に緑の froglight（夜間灯）。BUS_STOPS=0 で無効、BUS_STOP_H で
-    柱高(既定4)、BUS_STOP_LIGHT=0 で緑灯を省略。返り値: 最大 y。"""
-    import os as _os_bs
-    if _os_bs.environ.get("BUS_STOPS", "1") == "0" or not busstops:
-        return 0
-    H = max(3, int(_os_bs.environ.get("BUS_STOP_H", "4")))
-    light = _os_bs.environ.get("BUS_STOP_LIGHT", "1") != "0"
-def add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx, *, y_surf_land) -> int:
-    """OSM man_made を立体化: タンク=白い円柱, 煙突=灰の高い柱, 堤防/防波堤=土/石の堤。
-    FG-GML WStrL と補完（WStrL に無いタンク・煙突を足す）。MANMADE=0 で無効。返り値: 最大 y。"""
-    import os as _os_mm
-    if _os_mm.environ.get("MANMADE", "1") == "0" or not manmade:
-        return 0
-    TANK_H = max(4, int(_os_mm.environ.get("MANMADE_TANK_H", "10")))
-    CH_H = max(6, int(_os_mm.environ.get("MANMADE_CHIMNEY_H", "18")))
 
     def _b(ix, iy, iz, key):
         if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
@@ -840,6 +815,42 @@ def add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx, *, y_surf_lan
     ymax = 0
     n = 0
     for s in signals:
+        x_, z_ = _lonlat_to_grid_xy(s["lat"], s["lon"], patch_bbox_latlon, nz, nx)
+        ix, iz = int(round(x_)), int(round(z_))
+        if not (0 <= ix < nx and 0 <= iz < nz):
+            continue
+        y0v = y_surf_land[iz, ix]
+        if not np.isfinite(y0v):
+            continue
+        y0 = int(y0v)
+        for fy in range(y0 + 1, y0 + H):                 # 柱
+            _b(ix, fy, iz, "light_gray_concrete")
+        top = y0 + H
+        # 横型3灯を同じ高さで（x 方向に 青・黄・赤）。柱頭に水平に張り出す。
+        _b(ix - 1, top, iz, "lime_concrete")
+        _b(ix, top, iz, "yellow_concrete")
+        _b(ix + 1, top, iz, "red_concrete")
+        ymax = max(ymax, top)
+        n += 1
+    print(f"  [signals] {n} 交通信号を配置（横型3灯）")
+    return ymax
+
+
+def add_railway_blocks(blocks, railway, patch_bbox_latlon, nz, nx, *,
+                       y_surf_land, sea_mask=None) -> int:
+    """OSM 鉄道付帯物を立体化: 踏切=黄黒縞の警標ポール2本(線路両脇), ホーム=1段上げた
+    andesite スラブ, 駅=水色マーカー柱+発光。FG-GML RailCL(--fgd-rail)の線路に足す。
+    RAILWAY_FEATURES=0 で無効。返り値: 最大 y。"""
+    import os as _os_rw
+    if _os_rw.environ.get("RAILWAY_FEATURES", "1") == "0" or not railway:
+        return 0
+
+    def _b(ix, iy, iz, key):
+        if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
+            blocks.append(nbtlib.Compound({
+                "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(int(ix)), nbtlib.Int(int(iy)), nbtlib.Int(int(iz))]),
+                "state": block_id(key)}))
+    ymax = 0
     nc = 0
     for c in railway.get("crossings", []):        # 踏切: 両脇に黄黒縞ポール
         x_, z_ = _lonlat_to_grid_xy(c["lat"], c["lon"], patch_bbox_latlon, nz, nx)
@@ -867,7 +878,6 @@ def add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx, *, y_surf_lan
         npl += 1
     ns = 0
     for s in railway.get("stations", []):         # 駅: 水色マーカー柱+発光
-    for s in busstops:
         x_, z_ = _lonlat_to_grid_xy(s["lat"], s["lon"], patch_bbox_latlon, nz, nx)
         ix, iz = int(round(x_)), int(round(z_))
         if not (0 <= ix < nx and 0 <= iz < nz):
@@ -876,16 +886,6 @@ def add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx, *, y_surf_lan
         if not np.isfinite(y0v):
             continue
         y0 = int(y0v)
-        for fy in range(y0 + 1, y0 + H):                 # 柱
-            _b(ix, fy, iz, "light_gray_concrete")
-        top = y0 + H
-        # 横型3灯を同じ高さで（x 方向に 青・黄・赤）。柱頭に水平に張り出す。
-        _b(ix - 1, top, iz, "lime_concrete")
-        _b(ix, top, iz, "yellow_concrete")
-        _b(ix + 1, top, iz, "red_concrete")
-        ymax = max(ymax, top)
-        n += 1
-    print(f"  [signals] {n} 交通信号を配置（横型3灯）")
         for fy in range(y0 + 1, y0 + 10):
             _b(ix, fy, iz, "light_blue_concrete")
         for ty in (y0 + 10, y0 + 11):
@@ -893,6 +893,9 @@ def add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx, *, y_surf_lan
         ymax = max(ymax, y0 + 11)
         ns += 1
     print(f"  [railway] 踏切 {nc} / ホーム {npl} / 駅 {ns} を配置")
+    return ymax
+
+
 BARRIER_STYLE = {                       # OSM barrier kind → (ブロックキー, 高さ[段])
     "retaining_wall": ("andesite", 2),          # 擁壁: 石の擁壁
     "wall":           ("light_gray_concrete", 2),  # 塀: ブロック塀
@@ -920,6 +923,61 @@ def add_barrier_blocks(blocks, barriers, patch_bbox_latlon, nz, nx, *, y_surf_la
             if not np.isfinite(y0v):
                 continue
             gy = int(y0v)
+            for fy in range(gy + 1, gy + 1 + h):
+                k = (i_, fy, j)
+                if k in seen:
+                    continue
+                seen.add(k)
+                blocks.append(nbtlib.Compound({
+                    "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(i_), nbtlib.Int(fy), nbtlib.Int(j)]),
+                    "state": block_id(key)}))
+                if fy > ymax:
+                    ymax = fy
+        kinds[b["kind"]] = kinds.get(b["kind"], 0) + 1
+    print(f"  [barrier] {len(barriers)} ライン（{kinds}）を壁化")
+    return ymax
+
+
+def add_busstop_blocks(blocks, busstops, patch_bbox_latlon, nz, nx, *, y_surf_land) -> int:
+    """OSM バス停（highway=bus_stop）を **標識ポール**で立体化: light_gray_concrete の柱に
+    上部へ青＋白の標識、頂部に緑の froglight（夜間灯）。BUS_STOPS=0 で無効、BUS_STOP_H で
+    柱高(既定4)、BUS_STOP_LIGHT=0 で緑灯を省略。返り値: 最大 y。"""
+    import os as _os_bs
+    if _os_bs.environ.get("BUS_STOPS", "1") == "0" or not busstops:
+        return 0
+    H = max(3, int(_os_bs.environ.get("BUS_STOP_H", "4")))
+    light = _os_bs.environ.get("BUS_STOP_LIGHT", "1") != "0"
+
+    def _b(ix, iy, iz, key):
+        if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
+            blocks.append(nbtlib.Compound({
+                "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(int(ix)), nbtlib.Int(int(iy)), nbtlib.Int(int(iz))]),
+                "state": block_id(key)}))
+    ymax = 0
+    n = 0
+    for s in busstops:
+        x_, z_ = _lonlat_to_grid_xy(s["lat"], s["lon"], patch_bbox_latlon, nz, nx)
+        ix, iz = int(round(x_)), int(round(z_))
+        if not (0 <= ix < nx and 0 <= iz < nz):
+            continue
+        y0v = y_surf_land[iz, ix]
+        if not np.isfinite(y0v):
+            continue
+        y0 = int(y0v)
+        for fy in range(y0 + 1, y0 + H):                 # 柱
+            _b(ix, fy, iz, "light_gray_concrete")
+        _b(ix, y0 + H, iz, "blue_concrete")              # 標識(青)
+        _b(ix, y0 + H + 1, iz, "white_concrete")         # 標識(白)
+        top = y0 + H + 1
+        if light:
+            _b(ix, y0 + H + 2, iz, "verdant_froglight")  # 頂部の緑灯(発光)
+            top = y0 + H + 2
+        ymax = max(ymax, top)
+        n += 1
+    print(f"  [busstop] {n} バス停標識を配置")
+    return ymax
+
+
 WSTR_STYLE = {                          # FG-GML WStrL type → (ブロック, 高さ[段])
     "防波堤": ("gray_concrete", 4), "砂防ダム": ("stone", 4), "水門": ("gray_concrete", 3),
     "せき": ("gray_concrete", 2), "不透過水制": ("cobblestone", 2),
@@ -965,17 +1023,6 @@ def add_wstr_blocks(blocks, wstr_lines, patch_bbox_latlon, nz, nx, *,
                     "state": block_id(key)}))
                 if fy > ymax:
                     ymax = fy
-        kinds[b["kind"]] = kinds.get(b["kind"], 0) + 1
-    print(f"  [barrier] {len(barriers)} ライン（{kinds}）を壁化")
-        _b(ix, y0 + H, iz, "blue_concrete")              # 標識(青)
-        _b(ix, y0 + H + 1, iz, "white_concrete")         # 標識(白)
-        top = y0 + H + 1
-        if light:
-            _b(ix, y0 + H + 2, iz, "verdant_froglight")  # 頂部の緑灯(発光)
-            top = y0 + H + 2
-        ymax = max(ymax, top)
-        n += 1
-    print(f"  [busstop] {n} バス停標識を配置")
     print(f"  [wstr] FG-GML 水部構造物 {len(wstr_lines)} 本（堰/水門/防波堤/砂防ダム/護岸）を壁化")
     return ymax
 
@@ -1002,6 +1049,24 @@ def add_coastline_blocks(blocks, coast_lines, patch_bbox_latlon, nz, nx, *, y_su
             ymax = max(ymax, gy)
         n += 1
     print(f"  [coastline] FG-GML 海岸線 {n} 本を護岸(andesite)で接地")
+    return ymax
+
+
+def add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx, *, y_surf_land) -> int:
+    """OSM man_made を立体化: タンク=白い円柱, 煙突=灰の高い柱, 堤防/防波堤=土/石の堤。
+    FG-GML WStrL と補完（WStrL に無いタンク・煙突を足す）。MANMADE=0 で無効。返り値: 最大 y。"""
+    import os as _os_mm
+    if _os_mm.environ.get("MANMADE", "1") == "0" or not manmade:
+        return 0
+    TANK_H = max(4, int(_os_mm.environ.get("MANMADE_TANK_H", "10")))
+    CH_H = max(6, int(_os_mm.environ.get("MANMADE_CHIMNEY_H", "18")))
+
+    def _b(ix, iy, iz, key):
+        if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
+            blocks.append(nbtlib.Compound({
+                "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(int(ix)), nbtlib.Int(int(iy)), nbtlib.Int(int(iz))]),
+                "state": block_id(key)}))
+    ymax = 0
     nt = nc = nb = 0
     for t in manmade.get("tanks", []):           # タンク: 白い円柱
         if t.get("coords"):
@@ -3440,21 +3505,25 @@ def dem_to_blocks_enhanced(
         sig_ymax = add_signal_blocks(blocks, signals, patch_bbox_latlon, nz, nx,
                                      y_surf_land=y_surf_land)
         max_y = max(max_y, sig_ymax + 2)
+
     # --- 鉄道付帯物（OSM 踏切/ホーム/駅）。FG-GML の線路(--fgd-rail)に足す ---
     if railway and patch_bbox_latlon is not None:
         rw_ymax = add_railway_blocks(blocks, railway, patch_bbox_latlon, nz, nx,
                                      y_surf_land=y_surf_land, sea_mask=sea_mask)
         max_y = max(max_y, rw_ymax + 2)
+
     # --- 擁壁・塀・柵・生垣（OSM barrier）を壁化 ---
     if barriers and patch_bbox_latlon is not None:
         ba_ymax = add_barrier_blocks(blocks, barriers, patch_bbox_latlon, nz, nx,
                                      y_surf_land=y_surf_land)
         max_y = max(max_y, ba_ymax + 2)
+
     # --- バス停（OSM highway=bus_stop）を標識ポールで配置 ---
     if busstops and patch_bbox_latlon is not None:
         bs_ymax = add_busstop_blocks(blocks, busstops, patch_bbox_latlon, nz, nx,
                                      y_surf_land=y_surf_land)
         max_y = max(max_y, bs_ymax + 2)
+
     # --- FG-GML 水部構造物(WStrL)・海岸線(Cstline) ---
     if wstr_lines and patch_bbox_latlon is not None:
         ws_ymax = add_wstr_blocks(blocks, wstr_lines, patch_bbox_latlon, nz, nx,
@@ -3464,6 +3533,7 @@ def dem_to_blocks_enhanced(
         cl_ymax = add_coastline_blocks(blocks, coast_lines, patch_bbox_latlon, nz, nx,
                                        y_surf_land=y_surf_land)
         max_y = max(max_y, cl_ymax + 1)
+
     # --- 人工構造物（OSM man_made: タンク/煙突/堤防） ---
     if manmade and patch_bbox_latlon is not None:
         mm_ymax = add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx,
