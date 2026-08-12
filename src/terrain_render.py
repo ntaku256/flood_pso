@@ -28,7 +28,8 @@ import nbtlib
 
 # nbt_export 側のパレットを再利用（同じ block_id/PALETTE 定義）
 from nbt_export import block_id
-from block_palette import ROOF_STAIR_SLAB as _ROOF_SS, BLOCKS as _BProof  # (prefix, stairs_mc, slab_mc, rgb)
+from block_palette import (ROOF_STAIR_SLAB as _ROOF_SS, WALL_POST_MATERIALS as _WALL_POSTS,
+                           BLOCKS as _BProof)  # (prefix, stairs_mc, slab_mc, rgb) / (prefix, wall_mc, rgb)
 
 # 屋根の下り勾配方向 → 階段の facing。階段は facing 側に高い段(ascending)が来るので、
 # 下り方向の逆を facing にする（要検証: 断面図で確認して必要なら反転）。
@@ -50,6 +51,24 @@ def _nearest_roof_stair_mat(color) -> str:
             bd, best = d, pfx
     _ROOF_MAT_CACHE[color] = best
     return best
+
+
+_WALLPOST_CACHE: dict = {}
+
+
+def _nearest_wall_post_mat(color) -> str:
+    """ファサード色に最も近い塀(wall)ポスト材の palette キー(<prefix>_wallpost)を返す。"""
+    c = _WALLPOST_CACHE.get(color)
+    if c is not None:
+        return c
+    best, bd = _WALL_POSTS[0][0], 1e18
+    for pfx, _mc, rc in _WALL_POSTS:
+        d = (rc[0] - color[0]) ** 2 + (rc[1] - color[1]) ** 2 + (rc[2] - color[2]) ** 2
+        if d < bd:
+            bd, best = d, pfx
+    key = f"{best}_wallpost"
+    _WALLPOST_CACHE[color] = key
+    return key
 
 
 def _despike_roof_heights(bh, mask, bid, passes: int = 2):
@@ -574,11 +593,28 @@ def building_style_for_type(tp: str) -> str:
 ARCHETYPE_STYLE = {
     # archetype:    wall                     trim                   window                       style           parapet shopfront floor_band
     "wood_house":   dict(wall="white_terracotta",     trim="stripped_oak_log",    window="glass",                  style="wood_house",    parapet=0, shopfront=False, floor_band=False),
-    "apartment":    dict(wall="white_concrete",       trim="light_gray_concrete", window="light_blue_stained_glass", style="apartment",   parapet=1, shopfront=False, floor_band=True),
-    "shop":         dict(wall="light_gray_terracotta",trim="gray_terracotta",     window="glass",                  style="shop",          parapet=1, shopfront=True,  floor_band=True),
-    "rc_building":  dict(wall="light_gray_concrete",  trim="white_concrete",      window="light_blue_stained_glass", style="rc",          parapet=2, shopfront=False, floor_band=True),
+    "apartment":    dict(wall="white_concrete",       trim="light_gray_concrete", window="light_blue_stained_glass", style="apartment",   parapet=1, shopfront=False, floor_band=True, balcony=True),
+    "shop":         dict(wall="light_gray_terracotta",trim="gray_terracotta",     window="glass",                  style="shop",          parapet=1, shopfront=True,  floor_band=True, sign=True),
+    "rc_building":  dict(wall="light_gray_concrete",  trim="white_concrete",      window="light_blue_stained_glass", style="rc",          parapet=2, shopfront=False, floor_band=True, cornice=True, cornice_mat="stone_brick_slab"),
     "warehouse":    dict(wall="gray_concrete",        trim="andesite",            window="glass",                  style="warehouse",     parapet=1, shopfront=False, floor_band=False),
-    "institutional":dict(wall="white_concrete",       trim="light_gray_terracotta",window="glass",                 style="institutional", parapet=1, shopfront=False, floor_band=True),
+    "institutional":dict(wall="white_concrete",       trim="light_gray_terracotta",window="glass",                 style="institutional", parapet=1, shopfront=False, floor_band=True, cornice=True, cornice_mat="andesite_slab"),
+}
+# 店舗の看板帯の色（建物ごとに決定的に選び、商店街に色が並ぶ）
+SIGN_COLORS = ("red_concrete", "blue_concrete", "green_concrete", "orange_concrete",
+               "yellow_concrete", "cyan_concrete", "white_concrete")
+
+# ランドマーク建物の専用外装(facade_lab round2 由来)。build_building_maps が OSM POI と
+# footprint の点内包で割り当てる。shrine=朱塗り真壁+下屋庇, civic=列柱+コーニス, sento=木造+暖簾帯。
+LANDMARK_STYLE = {
+    "shrine": dict(wall="white_concrete", trim="red_concrete", window="orange_stained_glass",
+                   style="wood_house", parapet=0, shopfront=False, floor_band=False,
+                   timber="red_concrete", pent=True, pent_mat="dark_oak_slab"),
+    "civic":  dict(wall="white_concrete", trim="light_gray_terracotta", window="glass",
+                   style="institutional", parapet=1, shopfront=False, floor_band=True,
+                   cornice=True, cornice_mat="andesite_slab", colonnade=True, colonnade_mat="stone_brick_wallpost"),
+    "sento":  dict(wall="white_terracotta", trim="dark_oak_planks", window="glass",
+                   style="wood_house", parapet=0, shopfront=False, floor_band=False,
+                   timber="dark_oak_planks", sign="red_concrete", pent=True, pent_mat="blackstone_slab"),
 }
 
 _WAREHOUSE_FGD = ("普通無壁舎", "堅ろう無壁舎", "工場", "倉庫", "農業施設")
@@ -595,6 +631,24 @@ _HOUSE_WALL_VARIANTS = ("white_terracotta", "light_gray_terracotta", "white_conc
                         "sandstone", "light_gray_concrete", "clay")
 _HOUSE_TRIM_VARIANTS = ("stripped_oak_log", "oak_log", "spruce_log", "dark_oak_planks")
 
+# facade_lab(80パターン)由来の外装プロファイル。御坊の約95%を占める wood_house を街並みらしく
+# 多様化するため、座標ハッシュで下記のいずれかを決定的に選ぶ。任意フィールド:
+#   timber=真壁の柱梁材(縦柱 run%3 + 各階頂の梁) / namako=下半のなまこ壁(2色市松)の暗色 /
+#   lap=下見板の陰影ライン材(交互の行) / pent=各階境に下屋庇(外側へスラブ張出し) / pent_mat=庇材。
+HOUSE_PROFILES = (
+    dict(name="minka",     wall="white_terracotta", trim="dark_oak_planks", window="glass",
+         timber="dark_oak_planks"),
+    dict(name="kura",      wall="white_terracotta", trim="black_terracotta", window="iron_bars",
+         namako="black_terracotta"),
+    dict(name="shirakabe", wall="white_concrete",   trim="andesite",        window="glass"),
+    dict(name="shitami",   wall="spruce_planks",    trim="spruce_log",      window="white_stained_glass",
+         lap="stripped_oak_log"),
+    dict(name="machiya",   wall="white_terracotta", trim="dark_oak_planks", window="glass",
+         timber="dark_oak_planks", pent=True, pent_mat="andesite_slab"),
+    dict(name="clapboard", wall="light_gray_terracotta", trim="oak_log", window="glass",
+         lap="stripped_oak_log"),
+)
+
 
 def _det_hash64(*vals) -> int:
     """プロセス非依存の決定的整数ハッシュ（splitmix64 ミックス）。Python の hash() は
@@ -610,13 +664,19 @@ def _det_hash64(*vals) -> int:
 
 
 def _house_facade_variant(spec: dict, ext) -> dict:
-    """wood_house の壁/トリムを footprint 重心(緯度経度)から決定的に選んだ spec を返す。"""
+    """wood_house に facade_lab 由来の外装プロファイル(民家/蔵/白壁/下見板/町家/下見)を
+    footprint 重心(緯度経度)ハッシュで決定的に1つ選んで合成した spec を返す。
+    HOUSE_DECOR=0 で従来の単純な壁/トリム多様化にフォールバック。"""
     arr = np.asarray(ext, dtype=np.float64)
     qlat = int(round(float(arr[:, 0].mean()) * 1e5))   # ≈1m 量子化した重心緯度
     qlon = int(round(float(arr[:, 1].mean()) * 1e5))   # 〃 経度
-    wall = _HOUSE_WALL_VARIANTS[_det_hash64(qlat, qlon, 0xA17) % len(_HOUSE_WALL_VARIANTS)]
-    trim = _HOUSE_TRIM_VARIANTS[_det_hash64(qlat, qlon, 0xB29) % len(_HOUSE_TRIM_VARIANTS)]
-    return {**spec, "wall": wall, "trim": trim}
+    import os as _os_hd
+    if _os_hd.environ.get("HOUSE_DECOR", "1") == "0":
+        wall = _HOUSE_WALL_VARIANTS[_det_hash64(qlat, qlon, 0xA17) % len(_HOUSE_WALL_VARIANTS)]
+        trim = _HOUSE_TRIM_VARIANTS[_det_hash64(qlat, qlon, 0xB29) % len(_HOUSE_TRIM_VARIANTS)]
+        return {**spec, "wall": wall, "trim": trim}
+    prof = HOUSE_PROFILES[_det_hash64(qlat, qlon, 0xC0FFEE) % len(HOUSE_PROFILES)]
+    return {**spec, **prof, "style": "wood_house"}
 
 
 def building_archetype(tp: str, h_m: float, relief_m: float, area_m2: float) -> str:
@@ -698,6 +758,9 @@ def build_building_maps(
     min_h_m: float = 2.0,
     roof_slope: float = 0.35,
     roof_cap: float = 3.0,
+    road_mask: np.ndarray | None = None,
+    road_major_mask: np.ndarray | None = None,
+    landmarks: list | None = None,
 ) -> dict:
     """FG-GML 各建物を1棟単位でラスタ化し、描画に必要な block-grid マップ一式を返す。
 
@@ -762,9 +825,37 @@ def build_building_maps(
         h = max(h, min_h_m)
         area_m2 = float(int(ins.sum()) * _cell_m2)
         arch = building_archetype(tp, h, relief, area_m2)
-        spec = ARCHETYPE_STYLE[arch]
-        if arch == "wood_house":                 # 壁/トリムを座標決定的に多様化（他種別は不変）
-            spec = _house_facade_variant(spec, ext)
+        import os as _os_ad
+        # 商業ストリート化: 幹線道路に面した住宅(wood_house)を、中規模→shop / 多層→apartment に
+        # 寄せて店舗・アパートを増やす(御坊のFGDは大半が普通建物で shop/apartment が出にくいため)。
+        # COMMERCIAL_STREETS=0 で無効。道路正面判定は footprint 外周3セル以内に幹線road。
+        if (arch == "wood_house" and road_major_mask is not None
+                and _os_ad.environ.get("COMMERCIAL_STREETS", "1") != "0"):
+            _ring = binary_dilation(ins, iterations=3) & ~ins
+            _rmaj = road_major_mask[y0:y1, x0:x1]
+            if _ring.shape == _rmaj.shape and bool((_ring & _rmaj).any()):   # 幹線に正面
+                if h >= 6.5 and area_m2 >= 80:
+                    arch = "apartment"
+                elif area_m2 >= 45:
+                    arch = "shop"
+        _fa = _os_ad.environ.get("FORCE_ARCH")            # 検証用: 全建物を指定種別に上書き
+        if _fa in ARCHETYPE_STYLE:
+            arch = _fa
+        # ランドマーク: OSM POI(社寺/駅/学校/役所/銭湯…)が footprint 内にある建物は専用外装で上書き。
+        lm_type = None
+        if landmarks:
+            for _lm in landmarks:
+                _gx, _gy = _lonlat_to_grid_xy(_lm["lat"], _lm["lon"], patch_bbox_latlon, grid_h, grid_w)
+                if x0 <= _gx < x1 and y0 <= _gy < y1 and mpath.Path(pts).contains_point((_gx, _gy)):
+                    lm_type = _lm["type"]; break
+        if lm_type in LANDMARK_STYLE:
+            arch = "landmark_" + lm_type
+        if lm_type in LANDMARK_STYLE:
+            spec = LANDMARK_STYLE[lm_type]
+        else:
+            spec = ARCHETYPE_STYLE[arch]
+            if arch == "wood_house":              # 壁/トリムを座標決定的に多様化（他種別は不変）
+                spec = _house_facade_variant(spec, ext)
         sub_m = mask[y0:y1, x0:x1]; sub_m[ins] = True
         # 屋根形状: 普通建物(住宅)は寄棟風の勾配屋根(縁=壁top, 内側ほど高い)。
         # 堅ろう建物(RC)・無壁舎(倉庫)は陸屋根(フラット)のまま。
@@ -3087,6 +3178,9 @@ def dem_to_blocks_enhanced(
         # 屋根面をなめらかにする。ROOF_SMOOTH=0 で従来のフルブロック屋根。float高さ(block)も保持。
         import os as _os_rs
         roof_smooth = _os_rs.environ.get("ROOF_SMOOTH", "1") != "0"
+        # 壁装飾: 外壁に付柱(塀ポストの縦積み)を一定間隔で立て凹凸(relief)を出す。
+        wall_decor = _os_rs.environ.get("WALL_DECOR", "1") != "0"
+        pil_step = max(2, int(_os_rs.environ.get("WALL_PILASTER_STEP", "4")))
         if bh_ds is not None:
             bh_float_grid = np.where(np.isfinite(bh_ds), bh_ds * scale_land,
                                      float(default_bh)).astype(np.float32)
@@ -3333,6 +3427,18 @@ def dem_to_blocks_enhanced(
             shopfront = bool(fac["shopfront"]) if fac else False
             floor_band = bool(fac["floor_band"]) if fac else False
             parapet_n = int(fac["parapet"]) if fac else 0
+            timber_kind = fac.get("timber") if fac else None       # 真壁の柱梁材
+            namako_kind = fac.get("namako") if fac else None       # なまこ壁の暗色
+            lap_kind = fac.get("lap") if fac else None             # 下見板の陰影ライン材
+            pent_here = bool(fac.get("pent")) if fac else False    # 下屋庇(各階境の張出し)
+            pent_mat = fac.get("pent_mat", "andesite_slab") if fac else "andesite_slab"
+            sign_kind = (SIGN_COLORS[_det_hash64(bid_c, 0x5164) % len(SIGN_COLORS)]
+                         if (fac and fac.get("sign")) else None)   # 店頭の看板帯(色は棟別)
+            balcony_here = bool(fac.get("balcony")) if fac else False   # ベランダ/外廊下
+            cornice_here = bool(fac.get("cornice")) if fac else False   # 頂部コーニス(張出し)
+            cornice_mat = fac.get("cornice_mat", "andesite_slab") if fac else "andesite_slab"
+            colonnade_here = bool(fac.get("colonnade")) if fac else False   # 外周の列柱(civic/社寺)
+            colonnade_mat = fac.get("colonnade_mat", "stone_brick_wallpost") if fac else "stone_brick_wallpost"
             # 屋根色(オルソ)を壁に反映: 暖色屋根の戸建は暖色壁へ(色も種別の代理特徴=ユーザ方針)
             if (fac and style == "wood_house" and roof_dom_rgb is not None
                     and 0 <= bid_c < len(roof_dom_rgb) and roof_dom_rgb[bid_c] is not None):
@@ -3386,10 +3492,18 @@ def dem_to_blocks_enhanced(
                     else:
                         _run = bz_v if wall_x[j, i_] else bx_v            # 壁の走る向きに沿って窓を間引く
                         _ground = (fy <= y_base + fh)                    # 1F(地上階)
-                        if shopfront and _ground and r != 0:
+                        if sign_kind and _ground and r == fh - 1:
+                            kind = sign_kind                             # 店頭の看板帯(1F頂部)
+                        elif timber_kind and (_run % 3 == 0 or r == fh - 1):
+                            kind = timber_kind                           # 真壁: 縦柱(run%3)＋各階頂の梁
+                        elif namako_kind and rel < (bh_blocks // 2 + 1) and (_run + rel) % 2 == 0:
+                            kind = namako_kind                           # なまこ壁: 下半を2色市松
+                        elif shopfront and _ground and r != 0:
                             kind = win_kind if (_run % 2 == 0) else wall_kind   # 店頭=広いガラス面
                         elif _is_window(style, r, fh, _run):
                             kind = win_kind                              # 窓(アーキタイプ別パターン)
+                        elif lap_kind and r % 2 == 1:
+                            kind = lap_kind                              # 下見板の陰影ライン(交互の行)
                         else:
                             kind = wall_kind
                 else:
@@ -3411,6 +3525,89 @@ def dem_to_blocks_enhanced(
                                                           nbtlib.Int(top_y + _pz), nbtlib.Int(bz_v)]),
                         "state": block_id(_pk),
                     }))
+            # 付柱(ピラスター): 直線外壁の一定間隔で、外側1セルに塀ポスト(wall)を縦積みして
+            # 外壁に凹凸(relief)を付ける。角/ドア/通路は除外。外向きが空き地(建物/道路/水以外)のみ。
+            if (wall_decor and hollow_buildings and is_wall and not is_corner
+                    and not is_door and not tunnel_here and bid_c >= 0):
+                _run3 = bz_v if wall_x[j, i_] else bx_v
+                if _run3 % pil_step == 0:
+                    _out = None
+                    if wall_y[j, i_]:                     # N/S面(壁はx方向)→外向きは±z(j)
+                        for _dj in (1, -1):
+                            if 0 <= j + _dj < nz and not building_mask[j + _dj, i_]:
+                                _out = (j + _dj, i_); break
+                    elif wall_x[j, i_]:                   # E/W面(壁はz方向)→外向きは±x(i)
+                        for _di in (1, -1):
+                            if 0 <= i_ + _di < nx and not building_mask[j, i_ + _di]:
+                                _out = (j, i_ + _di); break
+                    if _out is not None:
+                        _oj, _oi = _out
+                        _road = (road_mask is not None and road_mask.shape == building_mask.shape
+                                 and road_mask[_oj, _oi])
+                        _wat = (water_mask is not None and water_mask.shape == building_mask.shape
+                                and water_mask[_oj, _oi])
+                        if not _road and not _wat:
+                            _pk = _nearest_wall_post_mat(_BProof[trim_kind][1]
+                                                         if trim_kind in _BProof else (128, 128, 128))
+                            _gy = int(y_surf_land[_oj, _oi]) if np.isfinite(y_surf_land[_oj, _oi]) else y_base
+                            for _py in range(min(_gy, y_base) + 1, ceil_y):
+                                blocks.append(nbtlib.Compound({
+                                    "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(int(_oi)),
+                                                                    nbtlib.Int(int(_py)), nbtlib.Int(int(_oj))]),
+                                    "state": block_id(_pk)}))
+            # 下屋(pent庇): 各階の境に外側1ブロックへスラブを張り出す（町家/寺の重層庇＝relief）。
+            if pent_here and is_wall and not tunnel_here and bid_c >= 0:
+                for _f in range(1, max(1, bh_blocks // fh)):
+                    _py = y_base + _f * fh
+                    if _py >= ceil_y:
+                        break
+                    for _di, _dj in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                        _ni, _nj = i_ + _di, j + _dj
+                        if 0 <= _ni < nx and 0 <= _nj < nz and \
+                                (building_id is None or building_id[_nj, _ni] < 0):
+                            blocks.append(nbtlib.Compound({
+                                "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(int(BX[_nj, _ni])),
+                                                                nbtlib.Int(int(_py)), nbtlib.Int(int(BZ[_nj, _ni]))]),
+                                "state": block_id(pent_mat)}))
+            # ベランダ/外廊下: 各階境に外側へ床スラブ+手すり(iron_bars)を張り出す（団地/マンション）。
+            if balcony_here and is_wall and not tunnel_here and bid_c >= 0:
+                for _f in range(1, max(1, bh_blocks // fh)):
+                    _yy = y_base + _f * fh
+                    if _yy >= top_y:
+                        break
+                    for _di, _dj in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                        _ni, _nj = i_ + _di, j + _dj
+                        if 0 <= _ni < nx and 0 <= _nj < nz and \
+                                (building_id is None or building_id[_nj, _ni] < 0):
+                            _bx2, _bz2 = int(BX[_nj, _ni]), int(BZ[_nj, _ni])
+                            blocks.append(nbtlib.Compound({"pos": nbtlib.List[nbtlib.Int](
+                                [nbtlib.Int(_bx2), nbtlib.Int(int(_yy)), nbtlib.Int(_bz2)]), "state": block_id("stone_slab")}))
+                            blocks.append(nbtlib.Compound({"pos": nbtlib.List[nbtlib.Int](
+                                [nbtlib.Int(_bx2), nbtlib.Int(int(_yy) + 1), nbtlib.Int(_bz2)]), "state": block_id("iron_bars")}))
+            # 列柱(colonnade): 外周に細い柱を2セル間隔で全高に立てる（civic/社寺の列柱）。
+            if colonnade_here and is_wall and not is_corner and not tunnel_here and bid_c >= 0:
+                _run4 = bz_v if wall_x[j, i_] else bx_v
+                if _run4 % 2 == 0:
+                    for _di, _dj in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                        _ni, _nj = i_ + _di, j + _dj
+                        if 0 <= _ni < nx and 0 <= _nj < nz and \
+                                (building_id is None or building_id[_nj, _ni] < 0):
+                            _cbx, _cbz = int(BX[_nj, _ni]), int(BZ[_nj, _ni])
+                            for _cy2 in range(y_base + 1, ceil_y):
+                                blocks.append(nbtlib.Compound({"pos": nbtlib.List[nbtlib.Int](
+                                    [nbtlib.Int(_cbx), nbtlib.Int(int(_cy2)), nbtlib.Int(_cbz)]),
+                                    "state": block_id(colonnade_mat)}))
+                            break
+            # 頂部コーニス: 屋根直下に外側へスラブを一周張り出す（rc/公共の水平ライン）。
+            if cornice_here and is_wall and not tunnel_here and bid_c >= 0:
+                _cy = max(y_base + 1, top_y - 1)
+                for _di, _dj in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    _ni, _nj = i_ + _di, j + _dj
+                    if 0 <= _ni < nx and 0 <= _nj < nz and \
+                            (building_id is None or building_id[_nj, _ni] < 0):
+                        blocks.append(nbtlib.Compound({"pos": nbtlib.List[nbtlib.Int](
+                            [nbtlib.Int(int(BX[_nj, _ni])), nbtlib.Int(int(_cy)), nbtlib.Int(int(BZ[_nj, _ni]))]),
+                            "state": block_id(cornice_mat)}))
             # 軒(庇): 屋根レベルを footprint 外1ブロックに張り出す（壁より屋根が出る家らしさ）
             for di, dj in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 ni, nj = i_ + di, j + dj

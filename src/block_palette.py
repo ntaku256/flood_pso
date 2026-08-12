@@ -180,6 +180,31 @@ for _pfx, _st_mc, _sl_mc, _rgb in ROOF_STAIR_SLAB:
     _ks = f"{_pfx}_slab"
     BLOCKS[_ks] = (_sl_mc, _rgb, "opaque"); ROOF_SMOOTH_KEYS.add(_ks)
 
+# ── 壁の装飾用 wall(塀)ポスト ───────────────────────────────────────────────
+# 建物ファサードに縦に積んで付柱(ピラスター)＝凹凸(relief)を出す。`<prefix>_wallpost` →
+# minecraft:<prefix>_wall を up=true の細い柱形で置く。母材色に近い塀材へスナップ(最近傍色)。
+# 地表オルソの色マッチには使わない(_NON_MATCH)。
+WALL_POST_MATERIALS: list[tuple[str, str, tuple[int, int, int]]] = [
+    ("cobblestone",       "minecraft:cobblestone_wall",       (122, 122, 122)),
+    ("mossy_cobblestone", "minecraft:mossy_cobblestone_wall", (110, 118, 92)),
+    ("stone_brick",       "minecraft:stone_brick_wall",       (122, 121, 120)),
+    ("brick",             "minecraft:brick_wall",             (150, 84, 75)),
+    ("andesite",          "minecraft:andesite_wall",          (136, 136, 137)),
+    ("diorite",           "minecraft:diorite_wall",           (189, 189, 191)),
+    ("granite",           "minecraft:granite_wall",           (149, 103, 84)),
+    ("sandstone",         "minecraft:sandstone_wall",         (216, 203, 156)),
+    ("red_sandstone",     "minecraft:red_sandstone_wall",     (190, 106, 42)),
+    ("blackstone",        "minecraft:blackstone_wall",        (42, 38, 44)),
+    ("cobbled_deepslate", "minecraft:cobbled_deepslate_wall", (77, 77, 80)),
+    ("mud_brick",         "minecraft:mud_brick_wall",         (137, 101, 75)),
+    ("nether_brick",      "minecraft:nether_brick_wall",      (44, 22, 26)),
+    ("prismarine",        "minecraft:prismarine_wall",        (99, 156, 151)),
+]
+WALL_POST_KEYS: set[str] = set()
+for _pfx, _wl_mc, _rgb in WALL_POST_MATERIALS:
+    _k = f"{_pfx}_wallpost"
+    BLOCKS[_k] = (_wl_mc, _rgb, "opaque"); WALL_POST_KEYS.add(_k)
+
 # パレットキーの確定順（NBT パレット index になる。air=0 を保証）
 PALETTE_KEYS: list[str] = list(BLOCKS.keys())
 
@@ -192,6 +217,7 @@ _NON_MATCH = {"sea_lantern", "verdant_froglight", "glass", "glowstone", "iron_ba
               # 鉄道レールは色マッチで地表/屋根に湧くと「レール屋根」になるため候補から除外
               "rail_ns", "rail_ew", "rail_ne", "rail_nw", "rail_se", "rail_sw"}
 _NON_MATCH |= ROOF_SMOOTH_KEYS          # stairs/slab は屋根専用（地表オルソには使わない）
+_NON_MATCH |= WALL_POST_KEYS            # wall ポストは装飾専用
 MATCH_KEYS: list[str] = [k for k, (_, _, role) in BLOCKS.items()
                          if role == "opaque" and k not in _NON_MATCH]
 
@@ -239,6 +265,8 @@ def block_state_properties_for_key(key: str) -> dict[str, str] | None:
     それ以外は名前ベースの block_state_properties() に委譲する。"""
     if key in RAIL_SHAPES:
         return {"shape": RAIL_SHAPES[key]}
+    if key.endswith("_wallpost"):
+        return {"up": "true"}          # 塀を細い縦柱(ポスト)形で置く=付柱(ピラスター)
     if key.endswith("_slab"):
         return {"type": "bottom"}
     for _suf, _face in (("_stairs_e", "east"), ("_stairs_w", "west"),
