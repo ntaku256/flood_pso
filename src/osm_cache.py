@@ -320,6 +320,9 @@ GEOM_QUERIES: dict[str, str] = {
                 'node["power"~"^(tower|pole)$"]({S},{W},{N},{E});'),
     "parking": ('way["amenity"="parking"]({S},{W},{N},{E});'
                 'relation["amenity"="parking"]({S},{W},{N},{E});'),
+    # 人工構造物: タンク/煙突/堤防/防波堤/桟橋（man_made, way+node）。
+    "manmade": ('way["man_made"~"^(storage_tank|silo|water_tower|gasometer|chimney|embankment|breakwater|pier)$"]({S},{W},{N},{E});'
+                'node["man_made"~"^(storage_tank|silo|water_tower|gasometer|chimney)$"]({S},{W},{N},{E});'),
 }
 
 
