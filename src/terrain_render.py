@@ -800,11 +800,13 @@ def assign_global_power_anchors(lines, dem_full, lat_max, lon_min, res_lat, res_
 
 def add_busstop_blocks(blocks, busstops, patch_bbox_latlon, nz, nx, *, y_surf_land) -> int:
     """OSM バス停（highway=bus_stop）を **標識ポール**で立体化: light_gray_concrete の柱に
-    上部へ青＋白の標識。BUS_STOPS=0 で無効、BUS_STOP_H で柱高(既定4)。返り値: 最大 y。"""
+    上部へ青＋白の標識、頂部に緑の froglight（夜間灯）。BUS_STOPS=0 で無効、BUS_STOP_H で
+    柱高(既定4)、BUS_STOP_LIGHT=0 で緑灯を省略。返り値: 最大 y。"""
     import os as _os_bs
     if _os_bs.environ.get("BUS_STOPS", "1") == "0" or not busstops:
         return 0
     H = max(3, int(_os_bs.environ.get("BUS_STOP_H", "4")))
+    light = _os_bs.environ.get("BUS_STOP_LIGHT", "1") != "0"
 
     def _b(ix, iy, iz, key):
         if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
@@ -826,7 +828,11 @@ def add_busstop_blocks(blocks, busstops, patch_bbox_latlon, nz, nx, *, y_surf_la
             _b(ix, fy, iz, "light_gray_concrete")
         _b(ix, y0 + H, iz, "blue_concrete")              # 標識(青)
         _b(ix, y0 + H + 1, iz, "white_concrete")         # 標識(白)
-        ymax = max(ymax, y0 + H + 1)
+        top = y0 + H + 1
+        if light:
+            _b(ix, y0 + H + 2, iz, "verdant_froglight")  # 頂部の緑灯(発光)
+            top = y0 + H + 2
+        ymax = max(ymax, top)
         n += 1
     print(f"  [busstop] {n} バス停標識を配置")
     return ymax
