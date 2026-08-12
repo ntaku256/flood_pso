@@ -320,6 +320,9 @@ GEOM_QUERIES: dict[str, str] = {
                 'node["power"~"^(tower|pole)$"]({S},{W},{N},{E});'),
     "parking": ('way["amenity"="parking"]({S},{W},{N},{E});'
                 'relation["amenity"="parking"]({S},{W},{N},{E});'),
+    # 擁壁・塀・柵・生垣（barrier ライン）。道路・宅地の段差や境界。
+    "barrier": ('way["barrier"~"^(retaining_wall|wall|fence|hedge|guard_rail)$"]'
+                '({S},{W},{N},{E});'),
 }
 
 

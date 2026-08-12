@@ -798,6 +798,48 @@ def assign_global_power_anchors(lines, dem_full, lat_max, lon_min, res_lat, res_
         L["ground_y"] = [anchor(float(la), float(lo)) for la, lo in cs]
 
 
+BARRIER_STYLE = {                       # OSM barrier kind → (ブロックキー, 高さ[段])
+    "retaining_wall": ("andesite", 2),          # 擁壁: 石の擁壁
+    "wall":           ("light_gray_concrete", 2),  # 塀: ブロック塀
+    "fence":          ("iron_bars", 2),         # 柵
+    "guard_rail":     ("iron_bars", 1),         # ガードレール
+    "hedge":          ("oak_leaves", 1),        # 生垣
+}
+
+
+def add_barrier_blocks(blocks, barriers, patch_bbox_latlon, nz, nx, *, y_surf_land) -> int:
+    """OSM barrier ライン（擁壁/塀/柵/生垣/ガードレール）を kind 別の材質・高さで壁化。
+    BARRIERS=0 で無効。返り値: 最大 y。"""
+    import os as _os_ba
+    if _os_ba.environ.get("BARRIERS", "1") == "0" or not barriers:
+        return 0
+    ymax = 0
+    seen: set = set()
+    kinds: dict = {}
+    for b in barriers:
+        key, h = BARRIER_STYLE.get(b["kind"], ("cobblestone", 1))
+        m = polyline_buffer_mask_from_latlon(b["coords"], patch_bbox_latlon, nz, nx, 0.5)
+        for j, i_ in zip(*np.where(m)):
+            j = int(j); i_ = int(i_)
+            y0v = y_surf_land[j, i_]
+            if not np.isfinite(y0v):
+                continue
+            gy = int(y0v)
+            for fy in range(gy + 1, gy + 1 + h):
+                k = (i_, fy, j)
+                if k in seen:
+                    continue
+                seen.add(k)
+                blocks.append(nbtlib.Compound({
+                    "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(i_), nbtlib.Int(fy), nbtlib.Int(j)]),
+                    "state": block_id(key)}))
+                if fy > ymax:
+                    ymax = fy
+        kinds[b["kind"]] = kinds.get(b["kind"], 0) + 1
+    print(f"  [barrier] {len(barriers)} ライン（{kinds}）を壁化")
+    return ymax
+
+
 def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
                      y_surf_land, sea_mask, scale_land,
                      wire_key="iron_bars", pylon_key="iron_bars",
@@ -2348,6 +2390,7 @@ def dem_to_blocks_enhanced(
     water_mask: np.ndarray | None = None,
     water_block: str = "water",
     evac_facilities: list | None = None,
+    barriers: list | None = None,
     cell_offset: tuple = (0, 0),
     dither_surface: bool = True,
 ) -> tuple[list, list[int]]:
@@ -3173,6 +3216,12 @@ def dem_to_blocks_enhanced(
                     "state": block_id("sea_lantern"),
                 }))
             max_y = max(max_y, y0 + EVAC_H + 2)
+
+    # --- 擁壁・塀・柵・生垣（OSM barrier）を壁化 ---
+    if barriers and patch_bbox_latlon is not None:
+        ba_ymax = add_barrier_blocks(blocks, barriers, patch_bbox_latlon, nz, nx,
+                                     y_surf_land=y_surf_land)
+        max_y = max(max_y, ba_ymax + 2)
 
     # --- 土台層: 全セルの y=_lift-1 に1段（海底の砂/砂利等がブロック更新で落ちないよう下から支える）---
     #     deepslate（割れる）なので、これより下の凡例層は掘って到達できる。
