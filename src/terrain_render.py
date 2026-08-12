@@ -806,6 +806,14 @@ def add_signal_blocks(blocks, signals, patch_bbox_latlon, nz, nx, *, y_surf_land
     if _os_sg.environ.get("SIGNALS", "1") == "0" or not signals:
         return 0
     H = max(3, int(_os_sg.environ.get("SIGNAL_H", "6")))
+def add_railway_blocks(blocks, railway, patch_bbox_latlon, nz, nx, *,
+                       y_surf_land, sea_mask=None) -> int:
+    """OSM 鉄道付帯物を立体化: 踏切=黄黒縞の警標ポール2本(線路両脇), ホーム=1段上げた
+    andesite スラブ, 駅=水色マーカー柱+発光。FG-GML RailCL(--fgd-rail)の線路に足す。
+    RAILWAY_FEATURES=0 で無効。返り値: 最大 y。"""
+    import os as _os_rw
+    if _os_rw.environ.get("RAILWAY_FEATURES", "1") == "0" or not railway:
+        return 0
 
     def _b(ix, iy, iz, key):
         if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
@@ -815,6 +823,33 @@ def add_signal_blocks(blocks, signals, patch_bbox_latlon, nz, nx, *, y_surf_land
     ymax = 0
     n = 0
     for s in signals:
+    nc = 0
+    for c in railway.get("crossings", []):        # 踏切: 両脇に黄黒縞ポール
+        x_, z_ = _lonlat_to_grid_xy(c["lat"], c["lon"], patch_bbox_latlon, nz, nx)
+        ix, iz = int(round(x_)), int(round(z_))
+        if not (0 <= ix < nx and 0 <= iz < nz):
+            continue
+        y0v = y_surf_land[iz, ix]
+        if not np.isfinite(y0v):
+            continue
+        y0 = int(y0v)
+        for (xx, zz) in ((ix - 1, iz), (ix + 1, iz)):
+            for k, key in enumerate(("black_concrete", "yellow_concrete",
+                                     "black_concrete", "yellow_concrete")):
+                _b(xx, y0 + 1 + k, zz, key)
+        ymax = max(ymax, y0 + 5)
+        nc += 1
+    npl = 0
+    for pf in railway.get("platforms", []):       # ホーム: 1段上げた andesite スラブ
+        m = polyline_buffer_mask_from_latlon(pf["coords"], patch_bbox_latlon, nz, nx, 1.5)
+        for j, i_ in zip(*np.where(m)):
+            j = int(j); i_ = int(i_)
+            y0v = y_surf_land[j, i_]
+            if np.isfinite(y0v):
+                _b(i_, int(y0v) + 1, j, "andesite")
+        npl += 1
+    ns = 0
+    for s in railway.get("stations", []):         # 駅: 水色マーカー柱+発光
         x_, z_ = _lonlat_to_grid_xy(s["lat"], s["lon"], patch_bbox_latlon, nz, nx)
         ix, iz = int(round(x_)), int(round(z_))
         if not (0 <= ix < nx and 0 <= iz < nz):
@@ -833,6 +868,13 @@ def add_signal_blocks(blocks, signals, patch_bbox_latlon, nz, nx, *, y_surf_land
         ymax = max(ymax, top)
         n += 1
     print(f"  [signals] {n} 交通信号を配置（横型3灯）")
+        for fy in range(y0 + 1, y0 + 10):
+            _b(ix, fy, iz, "light_blue_concrete")
+        for ty in (y0 + 10, y0 + 11):
+            _b(ix, ty, iz, "sea_lantern")
+        ymax = max(ymax, y0 + 11)
+        ns += 1
+    print(f"  [railway] 踏切 {nc} / ホーム {npl} / 駅 {ns} を配置")
     return ymax
 
 
@@ -2387,6 +2429,7 @@ def dem_to_blocks_enhanced(
     water_block: str = "water",
     evac_facilities: list | None = None,
     signals: list | None = None,
+    railway: dict | None = None,
     cell_offset: tuple = (0, 0),
     dither_surface: bool = True,
 ) -> tuple[list, list[int]]:
@@ -3218,6 +3261,11 @@ def dem_to_blocks_enhanced(
         sig_ymax = add_signal_blocks(blocks, signals, patch_bbox_latlon, nz, nx,
                                      y_surf_land=y_surf_land)
         max_y = max(max_y, sig_ymax + 2)
+    # --- 鉄道付帯物（OSM 踏切/ホーム/駅）。FG-GML の線路(--fgd-rail)に足す ---
+    if railway and patch_bbox_latlon is not None:
+        rw_ymax = add_railway_blocks(blocks, railway, patch_bbox_latlon, nz, nx,
+                                     y_surf_land=y_surf_land, sea_mask=sea_mask)
+        max_y = max(max_y, rw_ymax + 2)
 
     # --- 土台層: 全セルの y=_lift-1 に1段（海底の砂/砂利等がブロック更新で落ちないよう下から支える）---
     #     deepslate（割れる）なので、これより下の凡例層は掘って到達できる。

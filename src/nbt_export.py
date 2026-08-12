@@ -456,6 +456,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   evac_xml: str | None = None,
                   signals_json: str | None = None,
                   signals_fetch: bool = False,
+                  railway_json: str | None = None,
+                  railway_fetch: bool = False,
                   hollow_buildings: bool = True,
                   legend_layer: bool = False,
                   tile_crop: tuple | None = None,
@@ -1068,6 +1070,17 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
                 fetch_if_missing=signals_fetch)
             print(f"  [signals] OSM 交通信号 {len(signals_render)} 基を取得")
+        # OSM 鉄道付帯物（踏切/ホーム/駅）を立体化
+        railway_render = None
+        if railway_json or railway_fetch:
+            from railway_osm import load_railway
+            railway_render = load_railway(
+                railway_json or None,
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                fetch_if_missing=railway_fetch)
+            print(f"  [railway] OSM 踏切{len(railway_render['crossings'])} "
+                  f"ホーム{len(railway_render['platforms'])} 駅{len(railway_render['stations'])} を取得")
 
         # 道路境界線(curb)の交差点偽枠線対策: OSM道路センターラインを塗りつぶし回廊にした mask を
         # 用意して dem_to_blocks_enhanced に渡す（centerline は交差点を連続して貫くので「同一道路」
@@ -1145,6 +1158,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             ortho_rgb=ortho_rgb,
             evac_facilities=evac_render,
             signals=signals_render,
+            railway=railway_render,
             patch_bbox_latlon=patch_bbox_latlon,
             water_mask=water_mask,
             road_major_mask=road_major_mask,

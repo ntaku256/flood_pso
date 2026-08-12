@@ -260,6 +260,10 @@ def main():
                     help="OSM 交通信号(highway=traffic_signals)を信号柱＋横型3灯で配置(要オンライン)")
     ap.add_argument("--signals-json", type=str, default="",
                     help="交通信号の Overpass geom JSON（無指定＋--signals で Overpass 取得）")
+    ap.add_argument("--railway", action="store_true",
+                    help="OSM 鉄道付帯物(踏切/ホーム/駅)を立体化。--fgd-rail の線路に足す(要オンライン)")
+    ap.add_argument("--railway-json", type=str, default="",
+                    help="鉄道付帯物の Overpass geom JSON（無指定＋--railway で Overpass 取得）")
     ap.add_argument("--v-exag", type=float, default=None,
                     help="陸の垂直誇張倍率を上書き（プリセットの v_exag を override）")
     ap.add_argument("--smooth-sigma", type=float, default=1.0,
@@ -868,6 +872,8 @@ def main():
                 evac_xml=(args.evac_xml if args.evac else None),
                 signals_json=(args.signals_json or None),
                 signals_fetch=args.signals,
+                railway_json=(args.railway_json or None),
+                railway_fetch=args.railway,
                 hollow_buildings=args.hollow_buildings,
                 legend_layer=args.legend_layer,
                 tile_crop=t_crop,

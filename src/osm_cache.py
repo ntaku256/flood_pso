@@ -328,6 +328,10 @@ GEOM_QUERIES: dict[str, str] = {
     # 交通信号（highway=traffic_signals ノード）。灯器位置ではなく停止線ノードだが、
     # 1m/block では見た目の差は出ない。信号柱＋3灯で立体化する。
     "signal":  'node["highway"="traffic_signals"]({S},{W},{N},{E});',
+    # 鉄道付帯物: 踏切(level_crossing ノード)・ホーム(platform 面/線)・駅(station ノード)。
+    "railway": ('node["railway"="level_crossing"]({S},{W},{N},{E});'
+                'way["railway"="platform"]({S},{W},{N},{E});'
+                'node["railway"="station"]({S},{W},{N},{E});'),
 }
 
 
