@@ -449,6 +449,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   power_json: str | None = None,
                   parking_json: str | None = None,
                   evac_xml: str | None = None,
+                  busstops_json: str | None = None,
+                  busstops_fetch: bool = False,
                   hollow_buildings: bool = True,
                   legend_layer: bool = False,
                   tile_crop: tuple | None = None,
@@ -989,6 +991,17 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
             )
 
+        # OSM バス停（highway=bus_stop）を標識で立体化
+        busstops_render = None
+        if busstops_json or busstops_fetch:
+            from busstop_osm import load_busstops
+            busstops_render = load_busstops(
+                busstops_json or None,
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                fetch_if_missing=busstops_fetch)
+            print(f"  [busstop] OSM バス停 {len(busstops_render)} 件を取得")
+
         # 道路境界線(curb)の交差点偽枠線対策: OSM道路センターラインを塗りつぶし回廊にした mask を
         # 用意して dem_to_blocks_enhanced に渡す（centerline は交差点を連続して貫くので「同一道路」
         # 判定に使える）。オフライン等で取得失敗時は None=極小穴埋めのみにフォールバック。
@@ -1064,6 +1077,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             parkings=parking_render,
             ortho_rgb=ortho_rgb,
             evac_facilities=evac_render,
+            busstops=busstops_render,
             patch_bbox_latlon=patch_bbox_latlon,
             water_mask=water_mask,
             road_major_mask=road_major_mask,

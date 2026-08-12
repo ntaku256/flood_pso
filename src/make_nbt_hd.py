@@ -239,6 +239,10 @@ def main():
     ap.add_argument("--evac-xml", type=str,
                     default=str(REPO_ROOT / "data_cache" / "ksj" / "P20-12_30.xml"),
                     help="--evac の P20 避難施設 GML パス（既定: 和歌山県 P20-12）")
+    ap.add_argument("--busstops", action="store_true",
+                    help="OSM バス停(highway=bus_stop)を標識ポールで配置(要オンライン)")
+    ap.add_argument("--busstops-json", type=str, default="",
+                    help="バス停の Overpass geom JSON（無指定＋--busstops で Overpass 取得）")
     ap.add_argument("--v-exag", type=float, default=None,
                     help="陸の垂直誇張倍率を上書き（プリセットの v_exag を override）")
     ap.add_argument("--smooth-sigma", type=float, default=1.0,
@@ -839,6 +843,8 @@ def main():
                 power_json=(args.power_json or None),
                 parking_json=(args.parking_json or None),
                 evac_xml=(args.evac_xml if args.evac else None),
+                busstops_json=(args.busstops_json or None),
+                busstops_fetch=args.busstops,
                 hollow_buildings=args.hollow_buildings,
                 legend_layer=args.legend_layer,
                 tile_crop=t_crop,

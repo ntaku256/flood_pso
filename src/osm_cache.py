@@ -320,6 +320,8 @@ GEOM_QUERIES: dict[str, str] = {
                 'node["power"~"^(tower|pole)$"]({S},{W},{N},{E});'),
     "parking": ('way["amenity"="parking"]({S},{W},{N},{E});'
                 'relation["amenity"="parking"]({S},{W},{N},{E});'),
+    # バス停（highway=bus_stop ノード）。標識1本で表す。
+    "busstop": 'node["highway"="bus_stop"]({S},{W},{N},{E});',
 }
 
 

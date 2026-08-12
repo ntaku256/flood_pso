@@ -798,6 +798,40 @@ def assign_global_power_anchors(lines, dem_full, lat_max, lon_min, res_lat, res_
         L["ground_y"] = [anchor(float(la), float(lo)) for la, lo in cs]
 
 
+def add_busstop_blocks(blocks, busstops, patch_bbox_latlon, nz, nx, *, y_surf_land) -> int:
+    """OSM バス停（highway=bus_stop）を **標識ポール**で立体化: light_gray_concrete の柱に
+    上部へ青＋白の標識。BUS_STOPS=0 で無効、BUS_STOP_H で柱高(既定4)。返り値: 最大 y。"""
+    import os as _os_bs
+    if _os_bs.environ.get("BUS_STOPS", "1") == "0" or not busstops:
+        return 0
+    H = max(3, int(_os_bs.environ.get("BUS_STOP_H", "4")))
+
+    def _b(ix, iy, iz, key):
+        if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
+            blocks.append(nbtlib.Compound({
+                "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(int(ix)), nbtlib.Int(int(iy)), nbtlib.Int(int(iz))]),
+                "state": block_id(key)}))
+    ymax = 0
+    n = 0
+    for s in busstops:
+        x_, z_ = _lonlat_to_grid_xy(s["lat"], s["lon"], patch_bbox_latlon, nz, nx)
+        ix, iz = int(round(x_)), int(round(z_))
+        if not (0 <= ix < nx and 0 <= iz < nz):
+            continue
+        y0v = y_surf_land[iz, ix]
+        if not np.isfinite(y0v):
+            continue
+        y0 = int(y0v)
+        for fy in range(y0 + 1, y0 + H):                 # 柱
+            _b(ix, fy, iz, "light_gray_concrete")
+        _b(ix, y0 + H, iz, "blue_concrete")              # 標識(青)
+        _b(ix, y0 + H + 1, iz, "white_concrete")         # 標識(白)
+        ymax = max(ymax, y0 + H + 1)
+        n += 1
+    print(f"  [busstop] {n} バス停標識を配置")
+    return ymax
+
+
 def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
                      y_surf_land, sea_mask, scale_land,
                      wire_key="iron_bars", pylon_key="iron_bars",
@@ -2348,6 +2382,7 @@ def dem_to_blocks_enhanced(
     water_mask: np.ndarray | None = None,
     water_block: str = "water",
     evac_facilities: list | None = None,
+    busstops: list | None = None,
     cell_offset: tuple = (0, 0),
     dither_surface: bool = True,
 ) -> tuple[list, list[int]]:
@@ -3173,6 +3208,12 @@ def dem_to_blocks_enhanced(
                     "state": block_id("sea_lantern"),
                 }))
             max_y = max(max_y, y0 + EVAC_H + 2)
+
+    # --- バス停（OSM highway=bus_stop）を標識ポールで配置 ---
+    if busstops and patch_bbox_latlon is not None:
+        bs_ymax = add_busstop_blocks(blocks, busstops, patch_bbox_latlon, nz, nx,
+                                     y_surf_land=y_surf_land)
+        max_y = max(max_y, bs_ymax + 2)
 
     # --- 土台層: 全セルの y=_lift-1 に1段（海底の砂/砂利等がブロック更新で落ちないよう下から支える）---
     #     deepslate（割れる）なので、これより下の凡例層は掘って到達できる。
