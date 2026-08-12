@@ -466,6 +466,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   fgd_cstline_xml: str | None = None,
                   manmade_json: str | None = None,
                   manmade_fetch: bool = False,
+                  landmarks_fetch: bool = False,
                   hollow_buildings: bool = True,
                   legend_layer: bool = False,
                   tile_crop: tuple | None = None,
@@ -848,8 +849,17 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 with _warnings.catch_warnings():
                     _warnings.simplefilter("ignore", RuntimeWarning)
                     dsm_h_block = np.nanmean(bpf, axis=(1, 3))
+            _landmarks = None
+            if landmarks_fetch:
+                from landmark_osm import load_landmarks
+                _landmarks = load_landmarks(
+                    None, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                    lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3], fetch_if_missing=True)
+                print(f"  [landmark] OSM POI {len(_landmarks)} 件を建物に割当（社寺/駅/学校/役所/銭湯）")
             bmaps = build_building_maps(
                 _blds, dsm_h_block, patch_bbox_latlon, nz_g, nx_g,
+                road_mask=rm_f, road_major_mask=rmaj_f,   # 幹線正面の建物を商業化(shop/apartment)
+                landmarks=_landmarks,                     # OSM POI で社寺/civic/銭湯を特定
             )
             bm_f = bmaps["mask"]
             building_mask = bm_f if building_mask is None else (building_mask | bm_f)

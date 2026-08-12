@@ -276,6 +276,8 @@ def main():
                     help="OSM バス停(highway=bus_stop)を標識ポールで配置(要オンライン)")
     ap.add_argument("--busstops-json", type=str, default="",
                     help="バス停の Overpass geom JSON（無指定＋--busstops で Overpass 取得）")
+    ap.add_argument("--landmarks", action="store_true",
+                    help="OSM POI(社寺/駅/学校/役所/銭湯/病院)で建物を特定し専用外装を割当(要オンライン)")
     ap.add_argument("--manmade", action="store_true",
                     help="OSM man_made(タンク/煙突/堤防/防波堤)を立体化(要オンライン)")
     ap.add_argument("--manmade-json", type=str, default="",
@@ -898,6 +900,7 @@ def main():
                 fgd_cstline_xml=(args.fgd_cstline or None),
                 manmade_json=(args.manmade_json or None),
                 manmade_fetch=args.manmade,
+                landmarks_fetch=args.landmarks,
                 hollow_buildings=args.hollow_buildings,
                 legend_layer=args.legend_layer,
                 tile_crop=t_crop,
