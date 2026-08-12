@@ -759,6 +759,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         v_es = v_exag_sea if v_exag_sea is not None else v_exag * 0.33
 
         # OSM 取得 + ブロック grid 上の建物・道路 mask を事前生成
+        _blds = None                   # 建物footprint(lat/lon)。電柱の建物内回避に流用
         building_mask = road_mask = water_mask = road_major_mask = None
         building_height_block = None   # P1: per-building 集約のフラット高さ（FG-GML 経路）
         building_id_grid = None        # P2: 建物ごとの整数ラベル
@@ -951,14 +952,17 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         # から約33m間隔・片側で生やし、既存の add_power_blocks で立体化する。
         if power_poles_from_roads and fgd_rdedg_xml:
             from fgd_vector import load_roads
-            from power_procedural import poles_from_roads
+            from power_procedural import poles_from_roads, building_blocker
             _rd = []
             for rx in str(fgd_rdedg_xml).split(","):
                 rx = rx.strip()
                 if rx and Path(rx).exists():
                     _rd += load_roads(rx, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
                                       lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3])
-            _pp = poles_from_roads(_rd)
+            # 電柱が建物を貫通しないよう、建物footprint内に落ちる候補を間引く
+            import os as _os_pp
+            _blk = building_blocker(_blds) if _os_pp.environ.get("POLE_AVOID_BLD", "1") != "0" else None
+            _pp = poles_from_roads(_rd, blocked=_blk)
             power_lines = (power_lines or []) + _pp["lines"]
             power_towers = (power_towers or []) + _pp["towers"]
         # 径間端点（鉄塔/電柱）の地表Yを全域DEMで事前計算（--tiles 分割で端点がタイル外に
