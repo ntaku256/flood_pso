@@ -464,6 +464,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   busstops_fetch: bool = False,
                   fgd_wstrl_xml: str | None = None,
                   fgd_cstline_xml: str | None = None,
+                  manmade_json: str | None = None,
+                  manmade_fetch: bool = False,
                   hollow_buildings: bool = True,
                   legend_layer: bool = False,
                   tile_crop: tuple | None = None,
@@ -1124,6 +1126,17 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             print(f"  [wstr] FG-GML WStrL {len(wstr_render)} 本を読込")
         if coast_render is not None:
             print(f"  [coastline] FG-GML Cstline {len(coast_render)} 本を読込")
+        # OSM 人工構造物（man_made: タンク/煙突/堤防）を立体化
+        manmade_render = None
+        if manmade_json or manmade_fetch:
+            from manmade_osm import load_manmade
+            manmade_render = load_manmade(
+                manmade_json or None,
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                fetch_if_missing=manmade_fetch)
+            print(f"  [manmade] OSM タンク{len(manmade_render['tanks'])} "
+                  f"煙突{len(manmade_render['chimneys'])} 堤防等{len(manmade_render['banks'])} を取得")
 
         # 道路境界線(curb)の交差点偽枠線対策: OSM道路センターラインを塗りつぶし回廊にした mask を
         # 用意して dem_to_blocks_enhanced に渡す（centerline は交差点を連続して貫くので「同一道路」
@@ -1206,6 +1219,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             busstops=busstops_render,
             wstr_lines=wstr_render,
             coast_lines=coast_render,
+            manmade=manmade_render,
             patch_bbox_latlon=patch_bbox_latlon,
             water_mask=water_mask,
             road_major_mask=road_major_mask,

@@ -337,6 +337,9 @@ GEOM_QUERIES: dict[str, str] = {
                 '({S},{W},{N},{E});'),
     # バス停（highway=bus_stop ノード）。標識1本で表す。
     "busstop": 'node["highway"="bus_stop"]({S},{W},{N},{E});',
+    # 人工構造物: タンク/煙突/堤防/防波堤/桟橋（man_made, way+node）。
+    "manmade": ('way["man_made"~"^(storage_tank|silo|water_tower|gasometer|chimney|embankment|breakwater|pier)$"]({S},{W},{N},{E});'
+                'node["man_made"~"^(storage_tank|silo|water_tower|gasometer|chimney)$"]({S},{W},{N},{E});'),
 }
 
 

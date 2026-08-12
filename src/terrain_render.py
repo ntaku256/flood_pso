@@ -823,6 +823,14 @@ def add_busstop_blocks(blocks, busstops, patch_bbox_latlon, nz, nx, *, y_surf_la
         return 0
     H = max(3, int(_os_bs.environ.get("BUS_STOP_H", "4")))
     light = _os_bs.environ.get("BUS_STOP_LIGHT", "1") != "0"
+def add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx, *, y_surf_land) -> int:
+    """OSM man_made を立体化: タンク=白い円柱, 煙突=灰の高い柱, 堤防/防波堤=土/石の堤。
+    FG-GML WStrL と補完（WStrL に無いタンク・煙突を足す）。MANMADE=0 で無効。返り値: 最大 y。"""
+    import os as _os_mm
+    if _os_mm.environ.get("MANMADE", "1") == "0" or not manmade:
+        return 0
+    TANK_H = max(4, int(_os_mm.environ.get("MANMADE_TANK_H", "10")))
+    CH_H = max(6, int(_os_mm.environ.get("MANMADE_CHIMNEY_H", "18")))
 
     def _b(ix, iy, iz, key):
         if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
@@ -994,6 +1002,53 @@ def add_coastline_blocks(blocks, coast_lines, patch_bbox_latlon, nz, nx, *, y_su
             ymax = max(ymax, gy)
         n += 1
     print(f"  [coastline] FG-GML 海岸線 {n} 本を護岸(andesite)で接地")
+    nt = nc = nb = 0
+    for t in manmade.get("tanks", []):           # タンク: 白い円柱
+        if t.get("coords"):
+            m = polygon_mask_from_latlon(t["coords"], patch_bbox_latlon, nz, nx)
+            cells = np.argwhere(m)
+        else:
+            x_, z_ = _lonlat_to_grid_xy(t["lat"], t["lon"], patch_bbox_latlon, nz, nx)
+            cx, cz = int(round(x_)), int(round(z_))
+            cells = np.array([[cz + dz, cx + dx] for dz in range(-2, 3) for dx in range(-2, 3)
+                              if dx * dx + dz * dz <= 4])
+        ys = [int(y_surf_land[j, i]) for j, i in cells
+              if 0 <= j < nz and 0 <= i < nx and np.isfinite(y_surf_land[j, i])]
+        if not ys:
+            continue
+        gy = min(ys)
+        for j, i in cells:
+            if not (0 <= j < nz and 0 <= i < nx):
+                continue
+            for fy in range(gy + 1, gy + 1 + TANK_H):
+                _b(i, fy, j, "white_concrete")
+            _b(i, gy + 1 + TANK_H, j, "light_gray_concrete")
+        ymax = max(ymax, gy + 1 + TANK_H)
+        nt += 1
+    for c in manmade.get("chimneys", []):         # 煙突: 灰の高い2x2柱
+        x_, z_ = _lonlat_to_grid_xy(c["lat"], c["lon"], patch_bbox_latlon, nz, nx)
+        cx, cz = int(round(x_)), int(round(z_))
+        if not (0 <= cx < nx and 0 <= cz < nz) or not np.isfinite(y_surf_land[cz, cx]):
+            continue
+        gy = int(y_surf_land[cz, cx])
+        for dz in (0, 1):
+            for dx in (0, 1):
+                for fy in range(gy + 1, gy + 1 + CH_H):
+                    _b(cx + dx, fy, cz + dz, "gray_concrete")
+        ymax = max(ymax, gy + CH_H)
+        nc += 1
+    for bk in manmade.get("banks", []):           # 堤防/防波堤/桟橋: 土or石の堤
+        key = "stone" if bk.get("kind") in ("breakwater", "pier") else "coarse_dirt"
+        m = polyline_buffer_mask_from_latlon(bk["coords"], patch_bbox_latlon, nz, nx, 1.0)
+        for j, i_ in zip(*np.where(m)):
+            j = int(j); i_ = int(i_)
+            if not np.isfinite(y_surf_land[j, i_]):
+                continue
+            gy = int(y_surf_land[j, i_])
+            for fy in range(gy + 1, gy + 3):
+                _b(i_, fy, j, key)
+        nb += 1
+    print(f"  [manmade] タンク {nt} / 煙突 {nc} / 堤防等 {nb} を配置")
     return ymax
 
 
@@ -2553,6 +2608,7 @@ def dem_to_blocks_enhanced(
     busstops: list | None = None,
     wstr_lines: list | None = None,
     coast_lines: list | None = None,
+    manmade: dict | None = None,
     cell_offset: tuple = (0, 0),
     dither_surface: bool = True,
 ) -> tuple[list, list[int]]:
@@ -3408,6 +3464,11 @@ def dem_to_blocks_enhanced(
         cl_ymax = add_coastline_blocks(blocks, coast_lines, patch_bbox_latlon, nz, nx,
                                        y_surf_land=y_surf_land)
         max_y = max(max_y, cl_ymax + 1)
+    # --- 人工構造物（OSM man_made: タンク/煙突/堤防） ---
+    if manmade and patch_bbox_latlon is not None:
+        mm_ymax = add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx,
+                                     y_surf_land=y_surf_land)
+        max_y = max(max_y, mm_ymax + 2)
 
     # --- 土台層: 全セルの y=_lift-1 に1段（海底の砂/砂利等がブロック更新で落ちないよう下から支える）---
     #     deepslate（割れる）なので、これより下の凡例層は掘って到達できる。
