@@ -146,6 +146,40 @@ BLOCKS: dict[str, tuple[str, tuple[int, int, int], str]] = {
     "black_wool":      ("minecraft:black_wool", (20, 21, 25), "opaque"),
 }
 
+# ── 屋根平滑化用 stairs / slabs ──────────────────────────────────────────────
+# バニラで stairs+slab が両方ある材だけを、屋根の勾配(=階段)・半段(=スラブ)に使うため登録。
+# key = "<prefix>_stairs_<e|w|n|s>"(facing別) / "<prefix>_slab"。色は母材と同じ。
+# 屋根は「その材の階段しか使えない」ではなく、母材色に最も近い階段材へスナップして使う
+# （最近傍色マッチは terrain_render 側）。地表オルソ色マッチには使わない(_NON_MATCH)。
+ROOF_STAIR_SLAB: list[tuple[str, str, str, tuple[int, int, int]]] = [
+    ("andesite",          "minecraft:andesite_stairs",          "minecraft:andesite_slab",          (136, 136, 137)),
+    ("stone",             "minecraft:stone_stairs",             "minecraft:stone_slab",             (125, 125, 125)),
+    ("cobblestone",       "minecraft:cobblestone_stairs",       "minecraft:cobblestone_slab",       (122, 122, 122)),
+    ("stone_brick",       "minecraft:stone_brick_stairs",       "minecraft:stone_brick_slab",       (122, 121, 120)),
+    ("diorite",           "minecraft:diorite_stairs",           "minecraft:diorite_slab",           (189, 189, 191)),
+    ("cobbled_deepslate", "minecraft:cobbled_deepslate_stairs", "minecraft:cobbled_deepslate_slab", (77, 77, 80)),
+    ("blackstone",        "minecraft:blackstone_stairs",        "minecraft:blackstone_slab",        (42, 38, 44)),
+    ("granite",           "minecraft:granite_stairs",           "minecraft:granite_slab",           (149, 103, 84)),
+    ("brick",             "minecraft:brick_stairs",             "minecraft:brick_slab",             (150, 84, 75)),
+    ("nether_brick",      "minecraft:nether_brick_stairs",      "minecraft:nether_brick_slab",      (44, 22, 26)),
+    ("mud_brick",         "minecraft:mud_brick_stairs",         "minecraft:mud_brick_slab",         (137, 101, 75)),
+    ("sandstone",         "minecraft:sandstone_stairs",         "minecraft:sandstone_slab",         (216, 203, 156)),
+    ("red_sandstone",     "minecraft:red_sandstone_stairs",     "minecraft:red_sandstone_slab",     (190, 106, 42)),
+    ("spruce",            "minecraft:spruce_stairs",            "minecraft:spruce_slab",            (114, 84, 48)),
+    ("dark_oak",          "minecraft:dark_oak_stairs",          "minecraft:dark_oak_slab",          (66, 43, 20)),
+    ("oak",               "minecraft:oak_stairs",               "minecraft:oak_slab",               (162, 131, 79)),
+    ("quartz",            "minecraft:quartz_stairs",            "minecraft:quartz_slab",            (235, 229, 222)),
+    ("prismarine",        "minecraft:prismarine_stairs",        "minecraft:prismarine_slab",        (99, 156, 151)),
+]
+STAIR_FACING: dict[str, str] = {"e": "east", "w": "west", "n": "north", "s": "south"}
+ROOF_SMOOTH_KEYS: set[str] = set()          # 生成した stairs/slab キー（色マッチ除外・orient分岐用）
+for _pfx, _st_mc, _sl_mc, _rgb in ROOF_STAIR_SLAB:
+    for _d in STAIR_FACING:
+        _k = f"{_pfx}_stairs_{_d}"
+        BLOCKS[_k] = (_st_mc, _rgb, "opaque"); ROOF_SMOOTH_KEYS.add(_k)
+    _ks = f"{_pfx}_slab"
+    BLOCKS[_ks] = (_sl_mc, _rgb, "opaque"); ROOF_SMOOTH_KEYS.add(_ks)
+
 # パレットキーの確定順（NBT パレット index になる。air=0 を保証）
 PALETTE_KEYS: list[str] = list(BLOCKS.keys())
 
@@ -157,6 +191,7 @@ _NON_MATCH = {"sea_lantern", "verdant_froglight", "glass", "glowstone", "iron_ba
               "green_stained_glass", "black_stained_glass",
               # 鉄道レールは色マッチで地表/屋根に湧くと「レール屋根」になるため候補から除外
               "rail_ns", "rail_ew", "rail_ne", "rail_nw", "rail_se", "rail_sw"}
+_NON_MATCH |= ROOF_SMOOTH_KEYS          # stairs/slab は屋根専用（地表オルソには使わない）
 MATCH_KEYS: list[str] = [k for k, (_, _, role) in BLOCKS.items()
                          if role == "opaque" and k not in _NON_MATCH]
 
@@ -204,6 +239,12 @@ def block_state_properties_for_key(key: str) -> dict[str, str] | None:
     それ以外は名前ベースの block_state_properties() に委譲する。"""
     if key in RAIL_SHAPES:
         return {"shape": RAIL_SHAPES[key]}
+    if key.endswith("_slab"):
+        return {"type": "bottom"}
+    for _suf, _face in (("_stairs_e", "east"), ("_stairs_w", "west"),
+                        ("_stairs_n", "north"), ("_stairs_s", "south")):
+        if key.endswith(_suf):
+            return {"facing": _face, "half": "bottom", "shape": "straight"}
     return block_state_properties(BLOCKS[key][0])
 
 
