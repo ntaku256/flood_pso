@@ -325,6 +325,9 @@ GEOM_QUERIES: dict[str, str] = {
     #   後から補えなくなり、量子化キャッシュを引き直す羽目になる）。
     "waterway": ('way["waterway"~"^(stream|drain|ditch|canal|river)$"]'
                  '({S},{W},{N},{E});'),
+    # 交通信号（highway=traffic_signals ノード）。灯器位置ではなく停止線ノードだが、
+    # 1m/block では見た目の差は出ない。信号柱＋3灯で立体化する。
+    "signal":  'node["highway"="traffic_signals"]({S},{W},{N},{E});',
 }
 
 

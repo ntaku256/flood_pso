@@ -798,6 +798,44 @@ def assign_global_power_anchors(lines, dem_full, lat_max, lon_min, res_lat, res_
         L["ground_y"] = [anchor(float(la), float(lo)) for la, lo in cs]
 
 
+def add_signal_blocks(blocks, signals, patch_bbox_latlon, nz, nx, *, y_surf_land) -> int:
+    """OSM 交通信号（highway=traffic_signals）を **信号柱＋横型3灯(青黄赤)** で立体化。
+    日本の車両用信号は横型で左から 青・黄・赤。柱は light_gray_concrete、灯は
+    lime/yellow/red_concrete。SIGNALS=0 で無効、SIGNAL_H で柱高(既定6)。返り値: 最大 y。"""
+    import os as _os_sg
+    if _os_sg.environ.get("SIGNALS", "1") == "0" or not signals:
+        return 0
+    H = max(3, int(_os_sg.environ.get("SIGNAL_H", "6")))
+
+    def _b(ix, iy, iz, key):
+        if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
+            blocks.append(nbtlib.Compound({
+                "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(int(ix)), nbtlib.Int(int(iy)), nbtlib.Int(int(iz))]),
+                "state": block_id(key)}))
+    ymax = 0
+    n = 0
+    for s in signals:
+        x_, z_ = _lonlat_to_grid_xy(s["lat"], s["lon"], patch_bbox_latlon, nz, nx)
+        ix, iz = int(round(x_)), int(round(z_))
+        if not (0 <= ix < nx and 0 <= iz < nz):
+            continue
+        y0v = y_surf_land[iz, ix]
+        if not np.isfinite(y0v):
+            continue
+        y0 = int(y0v)
+        for fy in range(y0 + 1, y0 + H):                 # 柱
+            _b(ix, fy, iz, "light_gray_concrete")
+        top = y0 + H
+        # 横型3灯を同じ高さで（x 方向に 青・黄・赤）。柱頭に水平に張り出す。
+        _b(ix - 1, top, iz, "lime_concrete")
+        _b(ix, top, iz, "yellow_concrete")
+        _b(ix + 1, top, iz, "red_concrete")
+        ymax = max(ymax, top)
+        n += 1
+    print(f"  [signals] {n} 交通信号を配置（横型3灯）")
+    return ymax
+
+
 def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
                      y_surf_land, sea_mask, scale_land,
                      wire_key="iron_bars", pylon_key="iron_bars",
@@ -2348,6 +2386,7 @@ def dem_to_blocks_enhanced(
     water_mask: np.ndarray | None = None,
     water_block: str = "water",
     evac_facilities: list | None = None,
+    signals: list | None = None,
     cell_offset: tuple = (0, 0),
     dither_surface: bool = True,
 ) -> tuple[list, list[int]]:
@@ -3173,6 +3212,12 @@ def dem_to_blocks_enhanced(
                     "state": block_id("sea_lantern"),
                 }))
             max_y = max(max_y, y0 + EVAC_H + 2)
+
+    # --- 交通信号（OSM highway=traffic_signals）。信号柱＋横型3灯を配置 ---
+    if signals and patch_bbox_latlon is not None:
+        sig_ymax = add_signal_blocks(blocks, signals, patch_bbox_latlon, nz, nx,
+                                     y_surf_land=y_surf_land)
+        max_y = max(max_y, sig_ymax + 2)
 
     # --- 土台層: 全セルの y=_lift-1 に1段（海底の砂/砂利等がブロック更新で落ちないよう下から支える）---
     #     deepslate（割れる）なので、これより下の凡例層は掘って到達できる。
