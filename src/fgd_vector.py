@@ -168,6 +168,25 @@ def load_rail(xml_path: str, *, lat_min, lat_max, lon_min, lon_max) -> list[dict
     return out
 
 
+def load_fgd_line_layer(xml_path: str, layer: str, *,
+                        lat_min, lat_max, lon_min, lon_max) -> list[dict]:
+    """任意の FG-GML **線**レイヤ（WStrL 水部構造物線 / Cstline 海岸線 / WL 水涯線 等）を
+    → [{"coords":[[lat,lon],...], "tags":{"fgd_type"}}]。RailCL/RdEdg と同じ posList 経路。"""
+    out = []
+    for el in _iter_features(xml_path, layer):
+        pl = el.find(f".//{POSLIST}")
+        if pl is None or not pl.text:
+            continue
+        coords = _parse_poslist(pl.text)
+        if len(coords) < 2:
+            continue
+        if not _coords_intersect_bbox(coords, lat_min, lat_max, lon_min, lon_max):
+            continue
+        tp = el.findtext(f"{{{FGD}}}type") or ""
+        out.append({"coords": coords, "tags": {"fgd_type": tp}})
+    return out
+
+
 def load_water(xml_path: str, *, lat_min, lat_max, lon_min, lon_max) -> list[dict]:
     """WA / WStrA（水域面）→ [{"coords":[[lat,lon],...], "tags":{...}}]"""
     out = []
