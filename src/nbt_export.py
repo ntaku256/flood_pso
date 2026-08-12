@@ -447,6 +447,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   bridges_json: str | None = None,
                   tunnels_json: str | None = None,
                   power_json: str | None = None,
+                  power_poles_from_roads: bool = False,
                   parking_json: str | None = None,
                   evac_xml: str | None = None,
                   hollow_buildings: bool = True,
@@ -946,14 +947,28 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             )
             power_lines, power_towers = _pw["lines"], _pw["towers"]
             print(f"  [power] OSM 送電線 {len(power_lines)} 本 / 鉄塔・電柱 {len(power_towers)} 基を配置")
-            # 径間端点（鉄塔）の地表Yを全域DEMで事前計算（--tiles 分割で端点がタイル外に
-            # 出ても全タイルが同一の架線直線を引く＝継ぎ目の段差と対地クリアランス破綻を防ぐ）。
-            if global_anchors and power_lines:
-                from terrain_render import assign_global_power_anchors
-                assign_global_power_anchors(
-                    power_lines, dem, lat_max, lon_min, res_lat, res_lon,
-                    scale_land=(v_exag / max(v_res, 1e-6)),
-                    lift=(6 if legend_layer else 1))
+        # 電柱の手続き生成: 御坊は OSM に個別電柱がほぼ無い(実測0本)ので FG-GML 道路縁(RdEdg)
+        # から約33m間隔・片側で生やし、既存の add_power_blocks で立体化する。
+        if power_poles_from_roads and fgd_rdedg_xml:
+            from fgd_vector import load_roads
+            from power_procedural import poles_from_roads
+            _rd = []
+            for rx in str(fgd_rdedg_xml).split(","):
+                rx = rx.strip()
+                if rx and Path(rx).exists():
+                    _rd += load_roads(rx, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                                      lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3])
+            _pp = poles_from_roads(_rd)
+            power_lines = (power_lines or []) + _pp["lines"]
+            power_towers = (power_towers or []) + _pp["towers"]
+        # 径間端点（鉄塔/電柱）の地表Yを全域DEMで事前計算（--tiles 分割で端点がタイル外に
+        # 出ても全タイルが同一の架線直線を引く＝継ぎ目の段差と対地クリアランス破綻を防ぐ）。
+        if global_anchors and power_lines:
+            from terrain_render import assign_global_power_anchors
+            assign_global_power_anchors(
+                power_lines, dem, lat_max, lon_min, res_lat, res_lon,
+                scale_land=(v_exag / max(v_res, 1e-6)),
+                lift=(6 if legend_layer else 1))
 
         # FG-GML 鉄道中心線（RailCL）を patch 範囲で読む
         rail_render = None
