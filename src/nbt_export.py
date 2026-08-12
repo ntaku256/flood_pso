@@ -445,6 +445,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   tellus_world_scale: float = 1.0,
                   tellus_sea_level_y: int = 0,
                   bridges_json: str | None = None,
+                  bridges_fetch: bool = False,
                   tunnels_json: str | None = None,
                   power_json: str | None = None,
                   parking_json: str | None = None,
@@ -885,7 +886,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
 
         # OSM 橋（bridge=yes + layer）を読み、patch 範囲に交差するものを立体化対象に
         bridges_render = None
-        if bridges_json:
+        if bridges_json or bridges_fetch:
             from bridge_osm import load_bridges
             import math as _math
             _ctx_m = 650.0
@@ -899,9 +900,10 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 min(float(dem_info["lon_max"]), patch_bbox_latlon[3] + _ctx_lon),
             )
             bridges_render = load_bridges(
-                bridges_json,
+                bridges_json or "",
                 lat_min=_bridge_bbox[0], lat_max=_bridge_bbox[1],
                 lon_min=_bridge_bbox[2], lon_max=_bridge_bbox[3],
+                fetch_if_missing=bridges_fetch,
             )
             print(f"  [bridge] OSM 橋 {len(bridges_render)} 本を patch 周辺({_ctx_m:.0f}m)に配置"
                   + (f"（例: {', '.join(b['name'] for b in bridges_render if b['name'])[:60]}）"

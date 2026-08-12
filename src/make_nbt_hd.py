@@ -223,6 +223,9 @@ def main():
                          "北東部等の橋が0本になる）。"
                          "空文字で無効化。**明示指定したパスが存在しなければエラーで停止**"
                          "（無言で橋0本のワールドが出来るのを防ぐ）")
+    ap.add_argument("--bridges-fetch", action="store_true",
+                    help="橋JSONが無い場合に Overpass から御坊全域の橋(bridge=yes)を取得(全140本化)。"
+                         "厳選JSONに頼らず全件立体化する。要オンライン・bbox量子化キャッシュ")
     ap.add_argument("--tunnels-json", type=str, default=None,
                     help="OSM トンネル(tunnel=yes highway/railway)の Overpass geom JSON。存在すれば"
                          "山を貫く道路/鉄道を地形に刳り貫いて坑道+路面+照明を生成（橋の逆処理）。"
@@ -835,6 +838,7 @@ def main():
                 tellus_world_scale=args.tellus_world_scale,
                 tellus_sea_level_y=args.tellus_sea_level_y,
                 bridges_json=(args.bridges_json or None),
+                bridges_fetch=args.bridges_fetch,
                 tunnels_json=(args.tunnels_json or None),
                 power_json=(args.power_json or None),
                 parking_json=(args.parking_json or None),
