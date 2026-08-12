@@ -28,6 +28,53 @@ import nbtlib
 
 # nbt_export 側のパレットを再利用（同じ block_id/PALETTE 定義）
 from nbt_export import block_id
+from block_palette import ROOF_STAIR_SLAB as _ROOF_SS, BLOCKS as _BProof  # (prefix, stairs_mc, slab_mc, rgb)
+
+# 屋根の下り勾配方向 → 階段の facing。階段は facing 側に高い段(ascending)が来るので、
+# 下り方向の逆を facing にする（要検証: 断面図で確認して必要なら反転）。
+_DOWNSLOPE_TO_FACING = {"e": "w", "w": "e", "s": "n", "n": "s"}
+_ROOF_MAT_CACHE: dict = {}
+
+
+def _nearest_roof_stair_mat(color) -> str:
+    """母材色 (r,g,b) に最も近い stair/slab 材の prefix を返す（例: 安山岩色→'andesite',
+    赤茶→'brick'）。屋根が「その材専用の階段しか使えない」を避け、近い色の階段/スラブへ
+    スナップして使うための最近傍色マッチ。"""
+    c = _ROOF_MAT_CACHE.get(color)
+    if c is not None:
+        return c
+    best, bd = _ROOF_SS[0][0], 1e18
+    for pfx, _s, _sl, rc in _ROOF_SS:
+        d = (rc[0] - color[0]) ** 2 + (rc[1] - color[1]) ** 2 + (rc[2] - color[2]) ** 2
+        if d < bd:
+            bd, best = d, pfx
+    _ROOF_MAT_CACHE[color] = best
+    return best
+
+
+def _despike_roof_heights(bh, mask, bid, passes: int = 2):
+    """屋根高フィールドの 1セル スパイク/ピット(=変な凹凸)を軽減する。各建物セルを
+    「同一棟の4近傍高さの [min-1, max+1]」にクランプ。勾配(隣が±1)は保つが、周囲より
+    2以上飛び出す/凹むセルだけ均す。ROOF_SMOOTH 時のみ適用。"""
+    h = bh.astype(np.float32).copy()
+    m = mask.astype(bool)
+    for _ in range(max(1, passes)):
+        nb_stack = []
+        for dj, di in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+            nb_h = np.roll(np.roll(h, dj, axis=0), di, axis=1)
+            same = m & np.roll(np.roll(m, dj, axis=0), di, axis=1)
+            if bid is not None:
+                same &= (bid == np.roll(np.roll(bid, dj, axis=0), di, axis=1))
+            nb_stack.append(np.where(same, nb_h, np.nan))
+        allnb = np.stack(nb_stack)                       # (4, nz, nx)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            nb_min = np.nanmin(allnb, axis=0)
+            nb_max = np.nanmax(allnb, axis=0)
+        has_nb = np.isfinite(nb_min)
+        clamped = np.clip(h, nb_min - 1.0, nb_max + 1.0)
+        h = np.where(m & has_nb, clamped, h)
+    return np.round(h).astype(np.int32)
 
 
 # ── 調整可能な既定値（呼出側から引数で上書き可） ─────────────────
@@ -3036,6 +3083,17 @@ def dem_to_blocks_enhanced(
             bh_blocks_grid = np.where(np.isfinite(bh_ds), _bbg, default_bh).astype(np.int32)
         else:
             bh_blocks_grid = np.full(building_mask.shape, default_bh, dtype=np.int32)
+        # 屋根平滑化: 勾配は最近傍色の階段、棟頂/半端高さは半段スラブにして voxel 階段状の
+        # 屋根面をなめらかにする。ROOF_SMOOTH=0 で従来のフルブロック屋根。float高さ(block)も保持。
+        import os as _os_rs
+        roof_smooth = _os_rs.environ.get("ROOF_SMOOTH", "1") != "0"
+        if bh_ds is not None:
+            bh_float_grid = np.where(np.isfinite(bh_ds), bh_ds * scale_land,
+                                     float(default_bh)).astype(np.float32)
+        else:
+            bh_float_grid = bh_blocks_grid.astype(np.float32)
+        if roof_smooth and _os_rs.environ.get("ROOF_DESPIKE", "1") != "0":
+            bh_blocks_grid = _despike_roof_heights(bh_blocks_grid, building_mask, building_id, passes=2)
         eave_blocks_by_bid: dict = {}
         base_y_arr = None
         if hollow_buildings and building_id is not None:
@@ -3223,6 +3281,46 @@ def dem_to_blocks_enhanced(
             # 屋根/軒に重力ブロック(砂利/砂/赤砂)が来ると落ちるので、非重力の同系色へ置換
             roof_kind = {"gravel": "andesite", "sand": "sandstone",
                          "red_sand": "orange_terracotta"}.get(roof_kind, roof_kind)
+            # 屋根に葉ブロックは不可(空中写真の木陰/張り出しで緑判定された屋根セル)。
+            # 棟の代表屋根色へ、それも葉なら中間グレーへ落とす。
+            if str(roof_kind).endswith("_leaves"):
+                _fb = (roof_by_id[bid_c] if (roof_by_id is not None and 0 <= bid_c < len(roof_by_id))
+                       else "gray_concrete")
+                roof_kind = _fb if not str(_fb).endswith("_leaves") else "gray_concrete"
+            # 屋根面ブロック: 勾配→最近傍色の階段, 平坦→フル(下付きハーフは階段と混ざると逆半段の
+            # ギザギザが出るため既定では使わない)。ROOF_MODE=stair(既定)|slab|auto で切替可能:
+            # slab=中勾配を半段スラブのみ, auto=傾斜角度で階段/ハーフを分ける(ROOF_STEEP_THR/SLAB_MIN)。
+            roof_surface_kind = roof_kind
+            if roof_smooth and bid_c >= 0:
+                h_here = int(bh_blocks_grid[j, i_])
+                hf = float(bh_float_grid[j, i_])
+                slope_mag = 0.0
+                downdirs = []
+                for (dj, di, dl) in ((0, 1, 'e'), (0, -1, 'w'), (1, 0, 's'), (-1, 0, 'n')):
+                    nj, ni = j + dj, i_ + di
+                    inb = 0 <= nj < nz and 0 <= ni < nx
+                    if inb and building_mask[nj, ni] and (building_id is None or int(building_id[nj, ni]) == bid_c):
+                        slope_mag = max(slope_mag, abs(hf - float(bh_float_grid[nj, ni])))
+                        d = h_here - int(bh_blocks_grid[nj, ni])       # 同一棟の隣が低い＝下り
+                        if d > 0:
+                            downdirs.append((dl, d))
+                    elif inb and not building_mask[nj, ni]:
+                        downdirs.append((dl, 1))                       # footprint 外(=軒)へ下る
+                _rrgb = _BProof[roof_kind][1] if roof_kind in _BProof else (128, 128, 128)
+                _mat = _nearest_roof_stair_mat(_rrgb)
+                _mode = _os_rs.environ.get("ROOF_MODE", "stair")
+                if _mode == "auto":
+                    _steep = float(_os_rs.environ.get("ROOF_STEEP_THR", "0.6"))
+                    _slabmin = float(_os_rs.environ.get("ROOF_SLAB_MIN", "0.3"))
+                    _mode = "stair" if slope_mag >= _steep else ("slab" if slope_mag >= _slabmin else "flat")
+                if _mode == "stair" and downdirs:
+                    _b = max(downdirs, key=lambda t: t[1])[0]
+                    roof_surface_kind = f"{_mat}_stairs_{_DOWNSLOPE_TO_FACING[_b]}"
+                elif _mode == "slab":
+                    # 中勾配は半段(ボトムスラブ)で 0.5 刻みに。整数高が実高より 0.25 以上高い
+                    # =半段下げるべきセルだけスラブ, 他はフル → 0.5 刻みの滑らかな面(階段は使わない)。
+                    roof_surface_kind = f"{_mat}_slab" if (h_here - hf) >= 0.25 else roof_kind
+                # flat は roof_kind(フル)のまま
             style = (building_style_keys[bid_c]
                      if (building_style_keys is not None and 0 <= bid_c < len(building_style_keys))
                      else "house")
@@ -3269,7 +3367,7 @@ def dem_to_blocks_enhanced(
                 r = rel % fh                       # 階内位置 0..fh-1（0=床スラブ位置）
                 is_slab = (r == 0 and fy != y_base + 1)
                 if fy == top_y:
-                    kind = roof_kind                                      # 屋根面（全 footprint）
+                    kind = roof_surface_kind                              # 屋根面（階段/スラブで平滑化）
                 elif attic and fy > ceil_y:
                     kind = roof_kind                                      # 軒より上＝屋根裏を中実化(筒抜け防止)
                 elif is_slab or (attic and fy == ceil_y):
