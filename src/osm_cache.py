@@ -335,6 +335,8 @@ GEOM_QUERIES: dict[str, str] = {
     # 擁壁・塀・柵・生垣（barrier ライン）。道路・宅地の段差や境界。
     "barrier": ('way["barrier"~"^(retaining_wall|wall|fence|hedge|guard_rail)$"]'
                 '({S},{W},{N},{E});'),
+    # バス停（highway=bus_stop ノード）。標識1本で表す。
+    "busstop": 'node["highway"="bus_stop"]({S},{W},{N},{E});',
 }
 
 

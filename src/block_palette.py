@@ -106,6 +106,7 @@ BLOCKS: dict[str, tuple[str, tuple[int, int, int], str]] = {
     "green_concrete":      ("minecraft:green_concrete", (73, 91, 36), "opaque"),
     "red_concrete":        ("minecraft:red_concrete", (142, 32, 32), "opaque"),
     "sea_lantern":         ("minecraft:sea_lantern", (211, 227, 207), "opaque"),  # 避難所マーカー発光
+    "verdant_froglight":   ("minecraft:verdant_froglight", (105, 203, 96), "opaque"),  # バス停の緑灯(発光)
     "black_concrete":      ("minecraft:black_concrete", (8, 10, 15), "opaque"),
 
     # ── Terracotta 16（dyed） ──
@@ -150,7 +151,7 @@ PALETTE_KEYS: list[str] = list(BLOCKS.keys())
 
 # カラーマッチに使うアンカー（opaque のみ。air/water/ice は除外）
 # 発光等のマーカー専用ブロックは地表オルソ色マッチのアンカーから除外
-_NON_MATCH = {"sea_lantern", "glass", "glowstone", "iron_bars",
+_NON_MATCH = {"sea_lantern", "verdant_froglight", "glass", "glowstone", "iron_bars",
               "white_stained_glass", "red_stained_glass", "orange_stained_glass",
               "light_blue_stained_glass", "blue_stained_glass",
               "green_stained_glass", "black_stained_glass",

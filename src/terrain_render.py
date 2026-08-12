@@ -814,6 +814,15 @@ def add_railway_blocks(blocks, railway, patch_bbox_latlon, nz, nx, *,
     import os as _os_rw
     if _os_rw.environ.get("RAILWAY_FEATURES", "1") == "0" or not railway:
         return 0
+def add_busstop_blocks(blocks, busstops, patch_bbox_latlon, nz, nx, *, y_surf_land) -> int:
+    """OSM バス停（highway=bus_stop）を **標識ポール**で立体化: light_gray_concrete の柱に
+    上部へ青＋白の標識、頂部に緑の froglight（夜間灯）。BUS_STOPS=0 で無効、BUS_STOP_H で
+    柱高(既定4)、BUS_STOP_LIGHT=0 で緑灯を省略。返り値: 最大 y。"""
+    import os as _os_bs
+    if _os_bs.environ.get("BUS_STOPS", "1") == "0" or not busstops:
+        return 0
+    H = max(3, int(_os_bs.environ.get("BUS_STOP_H", "4")))
+    light = _os_bs.environ.get("BUS_STOP_LIGHT", "1") != "0"
 
     def _b(ix, iy, iz, key):
         if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
@@ -850,6 +859,7 @@ def add_railway_blocks(blocks, railway, patch_bbox_latlon, nz, nx, *,
         npl += 1
     ns = 0
     for s in railway.get("stations", []):         # 駅: 水色マーカー柱+発光
+    for s in busstops:
         x_, z_ = _lonlat_to_grid_xy(s["lat"], s["lon"], patch_bbox_latlon, nz, nx)
         ix, iz = int(round(x_)), int(round(z_))
         if not (0 <= ix < nx and 0 <= iz < nz):
@@ -914,6 +924,15 @@ def add_barrier_blocks(blocks, barriers, patch_bbox_latlon, nz, nx, *, y_surf_la
                     ymax = fy
         kinds[b["kind"]] = kinds.get(b["kind"], 0) + 1
     print(f"  [barrier] {len(barriers)} ライン（{kinds}）を壁化")
+        _b(ix, y0 + H, iz, "blue_concrete")              # 標識(青)
+        _b(ix, y0 + H + 1, iz, "white_concrete")         # 標識(白)
+        top = y0 + H + 1
+        if light:
+            _b(ix, y0 + H + 2, iz, "verdant_froglight")  # 頂部の緑灯(発光)
+            top = y0 + H + 2
+        ymax = max(ymax, top)
+        n += 1
+    print(f"  [busstop] {n} バス停標識を配置")
     return ymax
 
 
@@ -2470,6 +2489,7 @@ def dem_to_blocks_enhanced(
     signals: list | None = None,
     railway: dict | None = None,
     barriers: list | None = None,
+    busstops: list | None = None,
     cell_offset: tuple = (0, 0),
     dither_surface: bool = True,
 ) -> tuple[list, list[int]]:
@@ -3311,6 +3331,11 @@ def dem_to_blocks_enhanced(
         ba_ymax = add_barrier_blocks(blocks, barriers, patch_bbox_latlon, nz, nx,
                                      y_surf_land=y_surf_land)
         max_y = max(max_y, ba_ymax + 2)
+    # --- バス停（OSM highway=bus_stop）を標識ポールで配置 ---
+    if busstops and patch_bbox_latlon is not None:
+        bs_ymax = add_busstop_blocks(blocks, busstops, patch_bbox_latlon, nz, nx,
+                                     y_surf_land=y_surf_land)
+        max_y = max(max_y, bs_ymax + 2)
 
     # --- 土台層: 全セルの y=_lift-1 に1段（海底の砂/砂利等がブロック更新で落ちないよう下から支える）---
     #     deepslate（割れる）なので、これより下の凡例層は掘って到達できる。

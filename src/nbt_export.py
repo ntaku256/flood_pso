@@ -460,6 +460,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   railway_fetch: bool = False,
                   barriers_json: str | None = None,
                   barriers_fetch: bool = False,
+                  busstops_json: str | None = None,
+                  busstops_fetch: bool = False,
                   hollow_buildings: bool = True,
                   legend_layer: bool = False,
                   tile_crop: tuple | None = None,
@@ -1093,6 +1095,16 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                 lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
                 fetch_if_missing=barriers_fetch)
             print(f"  [barrier] OSM 擁壁・塀 {len(barriers_render)} ラインを取得")
+        # OSM バス停（highway=bus_stop）を標識で立体化
+        busstops_render = None
+        if busstops_json or busstops_fetch:
+            from busstop_osm import load_busstops
+            busstops_render = load_busstops(
+                busstops_json or None,
+                lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                fetch_if_missing=busstops_fetch)
+            print(f"  [busstop] OSM バス停 {len(busstops_render)} 件を取得")
 
         # 道路境界線(curb)の交差点偽枠線対策: OSM道路センターラインを塗りつぶし回廊にした mask を
         # 用意して dem_to_blocks_enhanced に渡す（centerline は交差点を連続して貫くので「同一道路」
@@ -1172,6 +1184,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             signals=signals_render,
             railway=railway_render,
             barriers=barriers_render,
+            busstops=busstops_render,
             patch_bbox_latlon=patch_bbox_latlon,
             water_mask=water_mask,
             road_major_mask=road_major_mask,

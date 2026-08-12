@@ -268,6 +268,10 @@ def main():
                     help="OSM barrier(擁壁/塀/柵/生垣/ガードレール)を kind別材質で壁化(要オンライン)")
     ap.add_argument("--barriers-json", type=str, default="",
                     help="barrier の Overpass geom JSON（無指定＋--barriers で Overpass 取得）")
+    ap.add_argument("--busstops", action="store_true",
+                    help="OSM バス停(highway=bus_stop)を標識ポールで配置(要オンライン)")
+    ap.add_argument("--busstops-json", type=str, default="",
+                    help="バス停の Overpass geom JSON（無指定＋--busstops で Overpass 取得）")
     ap.add_argument("--v-exag", type=float, default=None,
                     help="陸の垂直誇張倍率を上書き（プリセットの v_exag を override）")
     ap.add_argument("--smooth-sigma", type=float, default=1.0,
@@ -880,6 +884,8 @@ def main():
                 railway_fetch=args.railway,
                 barriers_json=(args.barriers_json or None),
                 barriers_fetch=args.barriers,
+                busstops_json=(args.busstops_json or None),
+                busstops_fetch=args.busstops,
                 hollow_buildings=args.hollow_buildings,
                 legend_layer=args.legend_layer,
                 tile_crop=t_crop,
