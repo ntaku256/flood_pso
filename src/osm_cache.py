@@ -320,6 +320,9 @@ GEOM_QUERIES: dict[str, str] = {
                 'node["power"~"^(tower|pole)$"]({S},{W},{N},{E});'),
     "parking": ('way["amenity"="parking"]({S},{W},{N},{E});'
                 'relation["amenity"="parking"]({S},{W},{N},{E});'),
+    # 交通信号（highway=traffic_signals ノード）。灯器位置ではなく停止線ノードだが、
+    # 1m/block では見た目の差は出ない。信号柱＋3灯で立体化する。
+    "signal":  'node["highway"="traffic_signals"]({S},{W},{N},{E});',
 }
 
 
