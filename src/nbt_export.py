@@ -448,6 +448,9 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   tunnels_json: str | None = None,
                   power_json: str | None = None,
                   parking_json: str | None = None,
+                  waterways_json: str | None = None,
+                  waterways_fetch: bool = False,
+                  waterways_include_river: bool = False,
                   evac_xml: str | None = None,
                   hollow_buildings: bool = True,
                   legend_layer: bool = False,
@@ -520,7 +523,8 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         raise ValueError("write_intermediate_nbt=False は anvil_out 指定時のみ有効"
                          "（両方無しでは出力が何も残らない）")
     for _lbl, _p in (("--bridges-json", bridges_json), ("--tunnels-json", tunnels_json),
-                     ("--power-json", power_json), ("--parking-json", parking_json)):
+                     ("--power-json", power_json), ("--parking-json", parking_json),
+                     ("--waterways-json", waterways_json)):
         if _p and not Path(_p).exists():
             _msg = f"{_lbl} に指定された OSM JSON が存在しません: {_p}"
             if strict_osm_json:
@@ -852,6 +856,48 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                         _nw += 1
                 water_mask = wm if water_mask is None else (water_mask | wm)
                 print(f"  [fgd-water] WA/WStrA {_nw}面 → 水面mask cells={int(wm.sum())}")
+            # OSM 水路（用水路・排水路）→ 幅ぶん太らせて水面に。FG-GML は面のある河川・池
+            # しか持たず、水田地帯を特徴づける幅1〜2mの水路が丸ごと落ちるため線で補う。
+            if waterways_json or waterways_fetch:
+                from waterway_osm import load_waterways
+                from terrain_render import polyline_buffer_mask_from_latlon
+                _ways = load_waterways(
+                    waterways_json or "",
+                    lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                    lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                    include_river=waterways_include_river,
+                    fetch_if_missing=waterways_fetch)
+                if _ways:
+                    ww = np.zeros((nz_g, nx_g), dtype=bool)
+                    for _w in _ways:
+                        # 幅の半分をセル半径に。1m/block では最細の ditch でも 1 セルは残す
+                        _buf = max(0.5, float(_w["width_m"]) / 2.0 / max(h_res, 0.1))
+                        ww |= polyline_buffer_mask_from_latlon(
+                            _w["coords"], patch_bbox_latlon, nz_g, nx_g, _buf)
+                    # 建物の上には水を置かない。
+                    if building_mask is not None:
+                        ww &= ~building_mask
+                    # 道路は最外縁 1 セルを水路に譲る。側溝は実際に路端にあるので、これは
+                    # 位置合わせの妥協ではなく現物どおり。水路が本当に道路の下を横断する所は
+                    # OSM で tunnel=culvert が付き上で既に落としているため、ここに残る重なりは
+                    # 路端の並走と位置誤差。
+                    # 実測(400m四方・水路17本): 生マスク1369セルのうち1179セルが道路と重なる。
+                    # 道路マスク全体を引くと190セルしか残らず水路が見えない。1セル侵食で909セル。
+                    # なお描画される路面(gray_concrete)の減りは侵食の有無によらず301セル(0.8%)。
+                    # road_mask が路面より約1セル広いだけなので侵食では減らない。ただし道路網の
+                    # 連結は保たれる(最大連結成分 15.5%→15.4%、成分数 139→119)ため、路端が
+                    # 側溝に変わるだけで歩行が分断されることはない。
+                    if road_mask is not None:
+                        from scipy.ndimage import binary_erosion
+                        ww &= ~binary_erosion(road_mask, np.ones((3, 3), dtype=bool))
+                    water_mask = ww if water_mask is None else (water_mask | ww)
+                    _kinds = {}
+                    for _w in _ways:
+                        _kinds[_w["kind"]] = _kinds.get(_w["kind"], 0) + 1
+                    _brk = " ".join(f"{k}={n}" for k, n in sorted(_kinds.items(), key=lambda kv: -kv[1]))
+                    print(f"  [waterway] OSM 水路 {len(_ways)}本 ({_brk}) → 水面mask cells={int(ww.sum())}")
+                else:
+                    print("  [waterway] OSM 水路 0本")
             building_height_block = bmaps["height"]
             building_id_grid = bmaps["id"]
             building_wall_keys = bmaps["wall_keys"]

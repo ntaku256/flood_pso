@@ -234,6 +234,17 @@ def main():
     ap.add_argument("--parking-json", type=str, default="",
                     help="OSM 駐車場(amenity=parking)の Overpass geom JSON。指定すると地表を"
                          "アスファルト舗装(black_concrete)+白線枠で上書き。例: data_cache/osm/gobo_parking_geom.json")
+    ap.add_argument("--waterways-json", type=str, default="",
+                    help="OSM 水路(waterway=stream/drain/ditch/canal)の Overpass geom JSON。"
+                         "指定すると幅に応じた水面を地表に刻む。FG-GML WA/WStrA は面のある河川・池"
+                         "だけで、水田地帯の用水路・排水路(御坊で157本)は落ちるため。"
+                         "例: data_cache/osm/gobo_waterways_geom.json")
+    ap.add_argument("--waterways-fetch", action="store_true",
+                    help="--waterways-json が無い場合に Overpass から取得する"
+                         "（osm_cache の量子化キャッシュ + オフラインガード付き）")
+    ap.add_argument("--waterways-include-river", action="store_true",
+                    help="waterway=river も線として足す。既定は除外（FG-GML の面と二重になり"
+                         "両岸から水が1セルはみ出すため）")
     ap.add_argument("--evac", action="store_true",
                     help="国土数値情報 P20 避難施設を緑柱+発光マーカーで配置（パーソナル防災ナビ用）")
     ap.add_argument("--evac-xml", type=str,
@@ -299,7 +310,8 @@ def main():
                      "tunnels_json": str(_osm_dir / "gobo_tunnels_geom.json")}
     _missing = []
     for _key, _flag in (("bridges_json", "--bridges-json"), ("tunnels_json", "--tunnels-json"),
-                        ("power_json", "--power-json"), ("parking_json", "--parking-json")):
+                        ("power_json", "--power-json"), ("parking_json", "--parking-json"),
+                        ("waterways_json", "--waterways-json")):
         _val = getattr(args, _key)
         _explicit = _val is not None and _val != ""
         if _val is None:                       # フラグ未指定 → 従来の既定パスへ
@@ -838,6 +850,9 @@ def main():
                 tunnels_json=(args.tunnels_json or None),
                 power_json=(args.power_json or None),
                 parking_json=(args.parking_json or None),
+                waterways_json=(args.waterways_json or None),
+                waterways_fetch=args.waterways_fetch,
+                waterways_include_river=args.waterways_include_river,
                 evac_xml=(args.evac_xml if args.evac else None),
                 hollow_buildings=args.hollow_buildings,
                 legend_layer=args.legend_layer,

@@ -320,6 +320,11 @@ GEOM_QUERIES: dict[str, str] = {
                 'node["power"~"^(tower|pole)$"]({S},{W},{N},{E});'),
     "parking": ('way["amenity"="parking"]({S},{W},{N},{E});'
                 'relation["amenity"="parking"]({S},{W},{N},{E});'),
+    # 用水路・排水路。river も引いておき、採否は load_waterways 側の kinds で決める
+    # （FG-GML の面がある範囲では river を落とすため。クエリを絞ると面の無い所を
+    #   後から補えなくなり、量子化キャッシュを引き直す羽目になる）。
+    "waterway": ('way["waterway"~"^(stream|drain|ditch|canal|river)$"]'
+                 '({S},{W},{N},{E});'),
 }
 
 
