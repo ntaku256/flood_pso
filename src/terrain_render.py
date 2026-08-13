@@ -1654,6 +1654,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                       scale_land, h_res_block_m, surf_block=None,
                       deck_key="andesite", pier_key="andesite",
                       cap_key="andesite", rail_key="andesite",
+                      road_key="gray_concrete_powder", line_key="white_concrete",
                       arch_rise_m=0.0, y_flood_top=None, road_mask=None) -> int:
     """OSM 橋（polyline + layer + road_class + width）を Tellus 流に立体化して blocks へ追加。
 
@@ -2061,11 +2062,14 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
                 for wi in range(-half_steps, half_steps + 1):
                     w = wi * 0.5
                     ix, iz = col(cx + ox * w, cz + oz * w)
-                    top_key = deck_key
-                    if surf_block is not None and 0 <= iz < nz and 0 <= ix < nx:
-                        sk = surf_block[iz, ix]
-                        if sk and sk != "water":    # 水域(河川/海)の色は橋の路面に使わない
-                            top_key = sk            # 上面=衛星写真の路面色
+                    # 上面=トンネルと同じ舗装(road_key=コンクリパウダー)＋白線(line_key)。
+                    # 中央=破線(車線分離)、端寄り=実線(車道外側線)。オルソ色(安山岩化)は使わない。
+                    if abs(w) < 0.5:                                  # 中央=破線(車線分離)
+                        top_key = line_key if (int(round(station)) // 3) % 2 == 0 else road_key
+                    elif lhw >= 3 and abs(abs(w) - (lhw - 1)) < 0.5:  # 端寄り=実線(車道外側線)
+                        top_key = line_key
+                    else:
+                        top_key = road_key
                     put(ix, dy, iz, top_key)
                     put(ix, dy - 1, iz, deck_key)   # 下面=安山岩(構造)
                     if abs(wi) == half_steps and lhw >= 1 and not in_ext:
