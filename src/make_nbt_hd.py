@@ -488,8 +488,11 @@ def main():
                 fill_building_heights_gap_osm(building_height_grid, dem_info, gap_mask, verbose=True)
 
     # 樹冠高グリッド（LiDAR class3=植生のみの DSM − DEM）。--trees で樹木を立てる。
+    # LiDAR を DEM に使う --wakayama-grd だけでなく、GSI地形＋LiDAR高の decoupled 運用
+    # （--dem-gsi-tiles + --wakayama-org）でも樹冠を作る（org タイルに class3 植生が入って
+    # いるため）。旧実装は --wakayama-grd 限定で、org 運用に切替えた際に木が消えていた。
     tree_height_grid = None
-    if args.wakayama_grd and args.trees:
+    if (args.wakayama_grd or args.wakayama_org) and args.trees:
         org_csv = args.wakayama_org if args.wakayama_org \
             else str(args.wakayama_grd).replace("_grd.txt", "_org.txt")
         org_paths = [p.strip() for p in org_csv.split(",") if p.strip()]
