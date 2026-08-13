@@ -234,6 +234,8 @@ def main():
                     help="OSM トンネル(tunnel=yes highway/railway)の Overpass geom JSON。存在すれば"
                          "山を貫く道路/鉄道を地形に刳り貫いて坑道+路面+照明を生成（橋の逆処理）。"
                          "既定=御坊全域。空文字で無効化")
+    ap.add_argument("--tunnels-fetch", action="store_true",
+                    help="トンネルを Overpass から全件取得（--bridges-fetch のトンネル版。JSON不要）")
     ap.add_argument("--power-json", type=str, default="",
                     help="OSM 送電線(power=line)+鉄塔/電柱(power=tower/pole)の Overpass geom JSON。"
                          "指定すると voltage→高さの架線(iron_bars)+鉄塔ラティスを立体化。"
@@ -883,6 +885,7 @@ def main():
                 bridges_json=(args.bridges_json or None),
                 bridges_fetch=args.bridges_fetch,
                 tunnels_json=(args.tunnels_json or None),
+                tunnels_fetch=args.tunnels_fetch,
                 power_json=(args.power_json or None),
                 power_poles_from_roads=args.power_poles,
                 parking_json=(args.parking_json or None),
