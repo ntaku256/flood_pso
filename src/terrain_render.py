@@ -4099,8 +4099,8 @@ def dem_to_blocks_enhanced(
             return "spruce_log", "spruce_leaves", "cone"
 
         if tree_mode == "sparse":
-            _stride_m = float(os.environ.get("TREE_STRIDE_M", "2.0"))
-            step = max(2, int(round(_stride_m / h_res_block)))   # 千鳥の個別樹木。floor=2が実効レバー(旧max(1,..)は密すぎマット化)
+            _stride_m = float(os.environ.get("TREE_STRIDE_M", "2.5"))
+            step = max(2, int(round(_stride_m / h_res_block)))   # 旧千鳥と同じ間隔(scale1.5でstep4)。TREE_STRIDE_M で調整
             rows = np.arange(nz)[:, None]; cols = np.arange(nx)[None, :]
             # 木の行帯ごとに1ずつ列をずらして斜め格子(千鳥/quincunx)にする（直線的な格子に見えず自然）
             offset = (rows // step) % step
