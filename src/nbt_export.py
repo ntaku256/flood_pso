@@ -800,12 +800,14 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             factor = max(1, round(h_res / h_res_dem))
             nz_g = dem_patch.shape[0] // factor
             nx_g = dem_patch.shape[1] // factor
-            building_mask, road_mask, road_major_mask = build_osm_masks(
+            # 建物maskはOSMからは採用しない（平板化して壁無しの床板になる）。footprintは下で
+            # FGDと同じ build_building_maps に流して壁/高さ付きにする。ここではOSM道路maskのみ使う。
+            _osm_bm, road_mask, road_major_mask = build_osm_masks(
                 osm, patch_bbox_latlon,
                 grid_h=nz_g, grid_w=nx_g, h_res_block_m=h_res,
             )
             print(f"  [osm] buildings={osm['n_buildings']}  roads={osm['n_roads']}  "
-                  f"→ mask cells: building={int(building_mask.sum())}  road={int(road_mask.sum())}")
+                  f"→ mask cells: building={int(_osm_bm.sum())}  road={int(road_mask.sum())}")
 
         # FG-GML（国土地理院ローカルベクタ）建物・道路 mask。OSM と併用時は union。
         if use_fgd or building_list is not None:
@@ -822,6 +824,31 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                     lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
                 )
                 _blds = _fgd["buildings"]; _roads = _fgd["roads"]
+            # FGDメッシュ外(高専以南等)で建物が消える対策: OSM footprint を _blds に足して
+            # build_building_maps で壁/高さ付きに描く。FGD建物の近傍(≈33m)は二重化回避で除外。
+            if building_list is None and use_osm and osm.get("buildings"):
+                _celld = 0.0003
+                def _cen(cc):
+                    return (sum(p[0] for p in cc) / len(cc), sum(p[1] for p in cc) / len(cc))
+                _occ = set()
+                for _b in _blds:
+                    _c = _b.get("coords", [])
+                    if len(_c) >= 3:
+                        _la, _lo = _cen(_c); _occ.add((round(_la / _celld), round(_lo / _celld)))
+                _addb = []
+                for _b in osm["buildings"]:
+                    _c = _b.get("coords", [])
+                    if len(_c) < 4:
+                        continue
+                    _la, _lo = _cen(_c); _k = (round(_la / _celld), round(_lo / _celld))
+                    if any((_k[0] + _dx, _k[1] + _dy) in _occ
+                           for _dx in (-1, 0, 1) for _dy in (-1, 0, 1)):
+                        continue                       # 近傍にFGD建物あり → 二重化回避
+                    _addb.append({"coords": _c, "holes": [],
+                                  "tags": {"fgd_type": "普通建物", "height_m": None}})
+                if _addb:
+                    _blds = _blds + _addb
+                    print(f"  [osm-bld] OSM建物 {len(_addb)} 棟を追加（FGD近傍除外・南部等の欠落補完）")
             # 現況補正: 解体済み建物を除去 → 新設建物を追加（FGD/building_list どちらにも適用）
             if remove_bld_polys:
                 from shapely.geometry import Polygon as _Poly
@@ -1037,16 +1064,22 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         # から約33m間隔・片側で生やし、既存の add_power_blocks で立体化する。
         if power_poles_from_roads and fgd_rdedg_xml:
             from fgd_vector import load_roads
-            from power_procedural import poles_from_roads, building_blocker
+            from power_procedural import poles_from_roads, building_blocker, bridge_blocker
             _rd = []
             for rx in str(fgd_rdedg_xml).split(","):
                 rx = rx.strip()
                 if rx and Path(rx).exists():
                     _rd += load_roads(rx, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
                                       lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3])
-            # 電柱が建物を貫通しないよう、建物footprint内に落ちる候補を間引く
+            # 電柱が建物を貫通しない/橋桁を突き抜けないよう、建物footprint内・橋直下の候補を間引く
             import os as _os_pp
-            _blk = building_blocker(_blds) if _os_pp.environ.get("POLE_AVOID_BLD", "1") != "0" else None
+            _blk_bld = building_blocker(_blds) if _os_pp.environ.get("POLE_AVOID_BLD", "1") != "0" else None
+            _blk_brg = (bridge_blocker(bridges_render)
+                        if bridges_render and _os_pp.environ.get("POLE_AVOID_BRIDGE", "1") != "0" else None)
+            if _blk_bld or _blk_brg:
+                _blk = lambda la, lo: (bool(_blk_bld) and _blk_bld(la, lo)) or (bool(_blk_brg) and _blk_brg(la, lo))
+            else:
+                _blk = None
             _pp = poles_from_roads(_rd, blocked=_blk)
             power_lines = (power_lines or []) + _pp["lines"]
             power_towers = (power_towers or []) + _pp["towers"]

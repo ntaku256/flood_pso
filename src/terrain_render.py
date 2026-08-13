@@ -22,7 +22,11 @@ flood_pso の従来 `nbt_export.dem_to_blocks` の改善点：
 from __future__ import annotations
 
 import warnings
+import os
 import numpy as np
+
+# 道路パウダーの描画幅倍率（小さいほど路面が細くオルソ地表が多く見える）。1.0 で従来。
+ROAD_WIDTH_SCALE = float(os.environ.get("ROAD_WIDTH_SCALE", "0.6"))
 from scipy.ndimage import gaussian_filter, distance_transform_edt, binary_dilation
 import nbtlib
 
@@ -563,7 +567,7 @@ def build_osm_masks(
     for r in osm.get("roads", []):
         # buffer 半径 = 道路幅/2 をブロック単位に
         w = float(r.get("width_m", 4))
-        buf = max(1.0, w / 2.0 / max(h_res_block_m, 0.1))
+        buf = max(1.0, w * ROAD_WIDTH_SCALE / 2.0 / max(h_res_block_m, 0.1))
         m = polyline_buffer_mask_from_latlon(r["coords"], patch_bbox_latlon,
                                               grid_h, grid_w, buffer_cells=buf)
         road_mask |= m
@@ -1306,6 +1310,16 @@ def add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx, *, y_surf_lan
         return 0
     TANK_H = max(4, int(_os_mm.environ.get("MANMADE_TANK_H", "10")))
     CH_H = max(6, int(_os_mm.environ.get("MANMADE_CHIMNEY_H", "18")))
+    WORKS_H = max(6, int(_os_mm.environ.get("MANMADE_WORKS_H", "20")))
+    WORKS_MAXCELLS = int(_os_mm.environ.get("MANMADE_WORKS_MAXCELLS", "40000"))
+    PLANT_STACK_H = max(CH_H, int(_os_mm.environ.get("MANMADE_PLANT_STACK_H", "110")))
+    # 発電所/工場ポリゴン(works: man_made=works / power=plant 等)のマスク。内側の煙突は高い
+    # スタック(発電所の象徴)として描く。敷地境界の大ポリゴンは建屋化しないが高さ判定には使う。
+    _plant_mask = None
+    for _wk in manmade.get("works", []):
+        if len(_wk.get("coords", [])) >= 3:
+            _pm = polygon_mask_from_latlon(_wk["coords"], patch_bbox_latlon, nz, nx)
+            _plant_mask = _pm if _plant_mask is None else (_plant_mask | _pm)
 
     def _b(ix, iy, iz, key):
         if 0 <= ix < nx and 0 <= iz < nz and 0 <= iy <= 500:
@@ -1313,7 +1327,7 @@ def add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx, *, y_surf_lan
                 "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(int(ix)), nbtlib.Int(int(iy)), nbtlib.Int(int(iz))]),
                 "state": block_id(key)}))
     ymax = 0
-    nt = nc = nb = 0
+    nt = nc = nb = nw = 0
     for t in manmade.get("tanks", []):           # タンク: 白い円柱
         if t.get("coords"):
             m = polygon_mask_from_latlon(t["coords"], patch_bbox_latlon, nz, nx)
@@ -1342,11 +1356,12 @@ def add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx, *, y_surf_lan
         if not (0 <= cx < nx and 0 <= cz < nz) or not np.isfinite(y_surf_land[cz, cx]):
             continue
         gy = int(y_surf_land[cz, cx])
+        _ch = PLANT_STACK_H if (_plant_mask is not None and _plant_mask[cz, cx]) else CH_H
         for dz in (0, 1):
             for dx in (0, 1):
-                for fy in range(gy + 1, gy + 1 + CH_H):
+                for fy in range(gy + 1, gy + 1 + _ch):
                     _b(cx + dx, fy, cz + dz, "gray_concrete")
-        ymax = max(ymax, gy + CH_H)
+        ymax = max(ymax, gy + _ch)
         nc += 1
     for bk in manmade.get("banks", []):           # 堤防/防波堤/桟橋: 土or石の堤
         key = "stone" if bk.get("kind") in ("breakwater", "pier") else "coarse_dirt"
@@ -1359,7 +1374,31 @@ def add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx, *, y_surf_lan
             for fy in range(gy + 1, gy + 3):
                 _b(i_, fy, j, key)
         nb += 1
-    print(f"  [manmade] タンク {nt} / 煙突 {nc} / 堤防等 {nb} を配置")
+    for wk in manmade.get("works", []):          # 工場/発電所: 建屋マスを外周壁+屋根の箱に
+        if len(wk.get("coords", [])) < 3:
+            continue
+        m = polygon_mask_from_latlon(wk["coords"], patch_bbox_latlon, nz, nx)
+        ncell = int(m.sum())
+        if ncell == 0 or ncell > WORKS_MAXCELLS:  # 巨大な敷地境界(power=plant全体)は塊化しない
+            continue
+        ys = [int(y_surf_land[j, i]) for j, i in np.argwhere(m)
+              if 0 <= j < nz and 0 <= i < nx and np.isfinite(y_surf_land[j, i])]
+        if not ys:
+            continue
+        from scipy.ndimage import binary_erosion as _bero
+        gy = min(ys); roofy = gy + 1 + WORKS_H
+        perim = m & ~_bero(m)                      # 外周=壁, 内部は屋根のみ
+        for j, i in np.argwhere(m):
+            j = int(j); i = int(i)
+            if not (0 <= j < nz and 0 <= i < nx):
+                continue
+            if perim[j, i]:
+                for fy in range(gy + 1, roofy):
+                    _b(i, fy, j, "light_gray_concrete")
+            _b(i, roofy, j, "light_gray_concrete")
+        ymax = max(ymax, roofy)
+        nw += 1
+    print(f"  [manmade] タンク {nt} / 煙突 {nc} / 堤防等 {nb} / 工場発電所 {nw} を配置")
     return ymax
 
 
@@ -2307,7 +2346,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     # 最高点へ着地したあと、直進方向に道路(road_mask)が続く限り更に延ばす柵なしすり付けの
     # 上限[block]。道路が途切れる/T字で直進の先に道路が無い所で手前停止する。0 で無効。
     BRIDGE_APPROACH_EXTRA = 10
-    def _extend_to_highest(end_pt, in_pt):
+    def _extend_to_highest(end_pt, in_pt, span_len=1.0e9):
         # 端点から外向き(奥に続く道路方向)へ d=0..EXTEND_MAX block 走査し、その区間の最高地形(=道路)点に着地。
         # 「元データから延長して一番高い道路地点から橋をはやす」。チェーン分割後に適用するので
         # この延長部はグループ化の対象外（既に linked/chains 確定後）。川底/低所への降下を防ぐ。
@@ -2332,8 +2371,10 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         if best_h is None:
             return end_pt, terrain_y(*end_pt)
         # 最高点の先へ、直進方向に道路が続く限り更に延長（T字/道路終端で手前停止）。
-        if road_mask is not None and BRIDGE_APPROACH_EXTRA > 0:
-            for d in range(best_d + 1, best_d + int(BRIDGE_APPROACH_EXTRA) + 1):
+        # 短い橋は延長も短く（橋長の半分・floor2・cap=BRIDGE_APPROACH_EXTRA）。長い高架は従来通り。
+        _approach = min(int(BRIDGE_APPROACH_EXTRA), max(2, int(round(0.5 * span_len))))
+        if road_mask is not None and _approach > 0:
+            for d in range(best_d + 1, best_d + _approach + 1):
                 x, z = end_pt[0] + dx * d, end_pt[1] + dz * d
                 i, j = col(x, z)
                 if not (0 <= j < nz and 0 <= i < nx):
@@ -2363,12 +2404,12 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
         return best_s, best_d2
 
     def _ext_head(mpts):                               # 始端を延長 → (新mpts, 延長長, 高さ)
-        e, h = _extend_to_highest(mpts[0], mpts[1])
+        e, h = _extend_to_highest(mpts[0], mpts[1], sum(_seglens(mpts)))
         d = math.hypot(e[0] - mpts[0][0], e[1] - mpts[0][1])
         return (([e] + mpts) if d > 1e-6 else mpts), d, h
 
     def _ext_tail(mpts):                               # 終端を延長 → (新mpts, 延長長, 高さ)
-        e, h = _extend_to_highest(mpts[-1], mpts[-2])
+        e, h = _extend_to_highest(mpts[-1], mpts[-2], sum(_seglens(mpts)))
         d = math.hypot(e[0] - mpts[-1][0], e[1] - mpts[-1][1])
         return ((mpts + [e]) if d > 1e-6 else mpts), d, h
 
@@ -4003,7 +4044,7 @@ def dem_to_blocks_enhanced(
             no_tree |= road_mask
         if water_mask is not None and water_mask.shape == dem_ds.shape:
             no_tree |= water_mask
-        cand = (tree_ds >= 2.0) & land_mask & ~no_tree
+        cand = (tree_ds >= 1.2) & land_mask & ~no_tree   # nanmeanで希釈された部分樹冠も拾う(旧2.0)
         # 空中写真(surf_block)で周囲5ブロックに緑系(草/葉/苔)が無い所には木を置かない
         # （class3 が建物影・ノイズで誤検出した非植生に木が立つのを防ぐ）
         from block_palette import BLOCKS as _BPg
@@ -4036,7 +4077,7 @@ def dem_to_blocks_enhanced(
             return "spruce_log", "spruce_leaves", "cone"
 
         if tree_mode == "sparse":
-            step = max(2, int(round(2.5 / h_res_block)))   # ~2.5m 間隔（森林を密に）
+            step = max(1, int(round(1.5 / h_res_block)))   # ~1.5m 間隔（森林を密に。旧max(2,2.5)は間引き過剰）
             rows = np.arange(nz)[:, None]; cols = np.arange(nx)[None, :]
             # 行帯ごとに半ステップずらして隣列を斜めにずらす（千鳥配置で自然な森に）
             offset = ((rows // step) % 2) * (step // 2)
