@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import math
 
-# 生やさない道路種別（地下・建物内）
-DEFAULT_EXCLUDE_TYPES = ("トンネル内の道路", "建物内の道路")
+# 生やさない道路種別（地下・建物内 + 未舗装の砂利小径）。
+# 「庭園路等」「徒歩道」(幅員2m) は terrain_render が road_unpaved_mask→dirt_path(砂利)で
+# 描く未舗装路。配電柱は真幅道路・軽車道など通常の道路沿いに立つもので、砂利道/歩道には
+# 立てない（＝砂利道に電柱が生えないようにする, nbt_export の未舗装分類と整合）。
+DEFAULT_EXCLUDE_TYPES = ("トンネル内の道路", "建物内の道路", "庭園路等", "徒歩道")
 
 
 def _m_per_deg(lat: float) -> tuple[float, float]:
