@@ -418,7 +418,7 @@ def main():
         # 沿岸の点群欠落は周囲 LiDAR からの近傍補間で平坦化(mapzen 表層だと発電所等の構造物が
         # 地形へ焼き込まれ max 数十 m の凸塊になり激しくずれる)。海/陸は最近傍 LiDAR が継承。
         from gap_fill import fill_terrain_gap_nearest
-        fill_terrain_gap_nearest(dem, dem_info, gap_mask, verbose=True)
+        fill_terrain_gap_nearest(dem, dem_info, gap_mask, sea_level_m=args.sea_level, verbose=True)
     # 軸4-3: FGD 河川/水域(WA/WStrA)ポリゴンを水源にする（矩形 bbox より高精度＝損失精度↑）。
     #   範囲外/未配置でポリゴンが空なら make_river_source 内で矩形 bbox にフォールバック。
     #   ※ 水源ラスタ化は「全域グリッド × 水域ポリゴン数」の matplotlib Path 判定で数分かかる。

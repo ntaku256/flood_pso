@@ -41,7 +41,8 @@ def fill_terrain_gap_mapzen(dem, dem_info, gap_mask, *, zoom: int = 14, verbose:
 
 
 def fill_terrain_gap_nearest(dem, dem_info, gap_mask, *, smooth: float = 1.2,
-                             verbose: bool = True) -> int:
+                             sea_level_m: float = 0.0, preserve_sea_voids: bool = True,
+                             sea_void_margin_m: float = 3.0, verbose: bool = True) -> int:
     """dem の gap(NaN) セルを「最近傍の有効 LiDAR 値」で **in-place** 補完。補完セル数を返す。
 
     mapzen terrarium(=表層 DSM, z14≈4.8m) で埋めると、沿岸の点群欠落域に発電所等の構造物高
@@ -52,25 +53,44 @@ def fill_terrain_gap_nearest(dem, dem_info, gap_mask, *, smooth: float = 1.2,
         → sea_mask(標高ベース) と整合し、海岸線も自然に継承される
       - gap セルのみガウシアン平滑し、最近傍補間の方向縞/境界段差を緩和(実測 LiDAR は不変)
     """
-    from scipy.ndimage import distance_transform_edt, gaussian_filter
+    from scipy.ndimage import distance_transform_edt, gaussian_filter, label
     fin = np.isfinite(dem)
     if not fin.any() or not gap_mask.any():
         return 0
     idx = distance_transform_edt(~fin, return_distances=False, return_indices=True)
-    nn = dem[tuple(idx)]                       # 各セル ← 最近傍の有効 LiDAR 値(海/陸を継承)
+    nn = dem[tuple(idx)]                       # 各セル ← 最近傍の有効値(海/陸を継承)
+    # 施策(海): GSI DEM は外洋を NaN で返す。これを陸値で埋めると海が「標高≈1mの陸」になり、
+    # 暗い海の航空写真から black_concrete 等に塗られる。画像端に連結する広い void で、周囲の
+    # 最近傍実測が海面近く(≤sea_level+margin)のもの＝外洋 とみなし、埋めずに海面下値へ落として
+    # make_sea_mask(標高≤海面 or NaN → 水)で水に分類させる。内陸の小欠損(周囲が高い陸)は従来通り埋める。
+    sea_void = np.zeros_like(gap_mask, dtype=bool)
+    if preserve_sea_voids:
+        lbl, nlab = label(gap_mask)
+        edge_ids = set(int(v) for v in np.unique(
+            np.concatenate([lbl[0, :], lbl[-1, :], lbl[:, 0], lbl[:, -1]])) if v)
+        min_sea = max(2000, int(0.003 * dem.size))     # これ以上の端連結成分のみ「外洋」
+        for c in edge_ids:
+            comp = (lbl == c)
+            if int(comp.sum()) < min_sea:
+                continue
+            if float(np.nanmedian(nn[comp])) <= sea_level_m + sea_void_margin_m:
+                sea_void |= comp
+    fill_mask = gap_mask & ~sea_void          # 実際に陸値で埋める(=内陸欠損)のみ
     out = dem.copy()
-    out[gap_mask] = nn[gap_mask]
-    if smooth and smooth > 0:
-        sm = gaussian_filter(out.astype(np.float32), smooth)
-        out[gap_mask] = sm[gap_mask]          # gap のみ平滑。境界の実測値はブレンドに寄与し不変
-    dem[gap_mask] = out[gap_mask].astype(dem.dtype)
-    n = int(gap_mask.sum())
+    out[fill_mask] = nn[fill_mask]
+    if smooth and smooth > 0 and fill_mask.any():
+        base = np.where(np.isfinite(out), out, sea_level_m - 0.5).astype(np.float32)
+        sm = gaussian_filter(base, smooth)
+        out[fill_mask] = sm[fill_mask]        # gap のみ平滑。境界の実測値はブレンドに寄与し不変
+    dem[fill_mask] = out[fill_mask].astype(dem.dtype)
+    if sea_void.any():
+        dem[sea_void] = np.asarray(sea_level_m - 0.5, dtype=dem.dtype)   # 海面下=水へ分類
+    n_land = int(fill_mask.sum()); n_sea = int(sea_void.sum())
     if verbose:
-        v = dem[gap_mask]
-        print(f"  [gap-fill] 地形(近傍LiDAR補間): {n:,} セル補完 "
-              f"mean={float(np.mean(v)):.2f} max={float(np.max(v)):.2f} "
-              f"(gap {int(gap_mask.sum()):,} / 図郭外)")
-    return n
+        v = dem[fill_mask] if n_land else np.array([0.0], dtype=np.float32)
+        print(f"  [gap-fill] 地形: 陸欠損 {n_land:,} を近傍補間(mean={float(np.mean(v)):.2f} "
+              f"max={float(np.max(v)):.2f}) / 外洋void {n_sea:,} を水(海面下)へ保持")
+    return n_land + n_sea
 
 
 def _osm_height_m(tags: dict, default_levels: float, m_per_level: float) -> float:
