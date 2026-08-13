@@ -338,8 +338,9 @@ GEOM_QUERIES: dict[str, str] = {
     # バス停（highway=bus_stop ノード）。標識1本で表す。
     "busstop": 'node["highway"="bus_stop"]({S},{W},{N},{E});',
     # 人工構造物: タンク/煙突/堤防/防波堤/桟橋（man_made, way+node）。
-    "manmade": ('way["man_made"~"^(storage_tank|silo|water_tower|gasometer|chimney|embankment|breakwater|pier)$"]({S},{W},{N},{E});'
-                'node["man_made"~"^(storage_tank|silo|water_tower|gasometer|chimney)$"]({S},{W},{N},{E});'),
+    "manmade": ('way["man_made"~"^(storage_tank|silo|water_tower|gasometer|chimney|embankment|breakwater|pier|works)$"]({S},{W},{N},{E});'
+                'node["man_made"~"^(storage_tank|silo|water_tower|gasometer|chimney)$"]({S},{W},{N},{E});'
+                'way["power"~"^(plant|generator)$"]({S},{W},{N},{E});'),
     # ランドマーク: 建物を「神社仏閣/駅/学校/役所/銭湯/病院」として特定し専用外装を割当てる用の POI。
     "landmark": ('node["amenity"="place_of_worship"]({S},{W},{N},{E});way["amenity"="place_of_worship"]({S},{W},{N},{E});'
                  'node["railway"="station"]({S},{W},{N},{E});'

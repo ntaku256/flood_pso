@@ -800,12 +800,14 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             factor = max(1, round(h_res / h_res_dem))
             nz_g = dem_patch.shape[0] // factor
             nx_g = dem_patch.shape[1] // factor
-            building_mask, road_mask, road_major_mask = build_osm_masks(
+            # 建物maskはOSMからは採用しない（平板化して壁無しの床板になる）。footprintは下で
+            # FGDと同じ build_building_maps に流して壁/高さ付きにする。ここではOSM道路maskのみ使う。
+            _osm_bm, road_mask, road_major_mask = build_osm_masks(
                 osm, patch_bbox_latlon,
                 grid_h=nz_g, grid_w=nx_g, h_res_block_m=h_res,
             )
             print(f"  [osm] buildings={osm['n_buildings']}  roads={osm['n_roads']}  "
-                  f"→ mask cells: building={int(building_mask.sum())}  road={int(road_mask.sum())}")
+                  f"→ mask cells: building={int(_osm_bm.sum())}  road={int(road_mask.sum())}")
 
         # FG-GML（国土地理院ローカルベクタ）建物・道路 mask。OSM と併用時は union。
         if use_fgd or building_list is not None:
@@ -822,6 +824,53 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                     lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
                 )
                 _blds = _fgd["buildings"]; _roads = _fgd["roads"]
+            # FGDメッシュ外(高専以南等)で建物が消える対策: OSM footprint を _blds に足して
+            # build_building_maps で壁/高さ付きに描く。FGD建物の近傍(≈33m)は二重化回避で除外。
+            if building_list is None and use_osm and osm.get("buildings"):
+                from shapely.geometry import Polygon as _Poly
+                try:
+                    from shapely.strtree import STRtree as _STR
+                except Exception:
+                    _STR = None
+                _fgd_polys = [_Poly([(lo, la) for la, lo in _b.get("coords", [])])
+                              for _b in _blds if len(_b.get("coords", [])) >= 3]
+                _fgd_polys = [p for p in _fgd_polys if p.is_valid and not p.is_empty]
+                _tree = _STR(_fgd_polys) if (_STR is not None and _fgd_polys) else None
+
+                def _overlaps_fgd(op):
+                    # OSM footprint が FGD 建物の footprint と重なるなら追加しない（centroid近傍でなく
+                    # 実面積の交差判定。大きな駅舎等が高いFGD建物に低い棟を重ねて上書きするのを防ぐ）。
+                    cand = _tree.query(op) if _tree is not None else range(len(_fgd_polys))
+                    for q in cand:
+                        poly = q if hasattr(q, "intersects") else _fgd_polys[int(q)]
+                        if poly.intersects(op):
+                            return True
+                    return False
+
+                _addb = []
+                for _b in osm["buildings"]:
+                    _c = _b.get("coords", [])
+                    if len(_c) < 4:
+                        continue
+                    _op = _Poly([(lo, la) for la, lo in _c])
+                    if not _op.is_valid or _op.is_empty:
+                        continue
+                    if _fgd_polys and _overlaps_fgd(_op):
+                        continue
+                    _ot = _b.get("tags", {}) or {}     # OSM の実高さを捨てず反映
+                    _hm = None
+                    try:
+                        if _ot.get("height") is not None:
+                            _hm = float(str(_ot["height"]).split()[0])
+                        elif _ot.get("building:levels") is not None:
+                            _hm = float(str(_ot["building:levels"]).split()[0]) * 3.0
+                    except (ValueError, TypeError):
+                        _hm = None
+                    _addb.append({"coords": _c, "holes": [],
+                                  "tags": {"fgd_type": "普通建物", "height_m": _hm}})
+                if _addb:
+                    _blds = _blds + _addb
+                    print(f"  [osm-bld] OSM建物 {len(_addb)} 棟を追加（FGD footprint重複除外・南部等の欠落補完）")
             # 現況補正: 解体済み建物を除去 → 新設建物を追加（FGD/building_list どちらにも適用）
             if remove_bld_polys:
                 from shapely.geometry import Polygon as _Poly
@@ -870,10 +919,29 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                     None, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
                     lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3], fetch_if_missing=True)
                 print(f"  [landmark] OSM POI {len(_landmarks)} 件を建物に割当（社寺/駅/学校/役所/銭湯）")
+            # 発電所(power=plant)敷地内の建屋を工業ホール高に: works polygon を block-grid mask 化して渡す
+            # （load_manmade は osm_cache 共用でここが初回でも後段の manmade 描画はキャッシュ再利用）。
+            _plant_bmask = None
+            if manmade_fetch or manmade_json:
+                try:
+                    from manmade_osm import load_manmade as _lm
+                    _mmw = _lm(manmade_json or None,
+                               lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                               lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                               fetch_if_missing=manmade_fetch, verbose=False)
+                    if _mmw.get("works"):
+                        from terrain_render import polygon_mask_from_latlon as _pmk
+                        _plant_bmask = np.zeros((nz_g, nx_g), dtype=bool)
+                        for _w in _mmw["works"]:
+                            if len(_w.get("coords", [])) >= 3:
+                                _plant_bmask |= _pmk(_w["coords"], patch_bbox_latlon, nz_g, nx_g)
+                except Exception:
+                    _plant_bmask = None
             bmaps = build_building_maps(
                 _blds, dsm_h_block, patch_bbox_latlon, nz_g, nx_g,
                 road_mask=rm_f, road_major_mask=rmaj_f,   # 幹線正面の建物を商業化(shop/apartment)
                 landmarks=_landmarks,                     # OSM POI で社寺/civic/銭湯を特定
+                plant_mask=_plant_bmask,                  # power=plant 敷地内の建屋を高く
             )
             bm_f = bmaps["mask"]
             building_mask = bm_f if building_mask is None else (building_mask | bm_f)
@@ -1037,16 +1105,22 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
         # から約33m間隔・片側で生やし、既存の add_power_blocks で立体化する。
         if power_poles_from_roads and fgd_rdedg_xml:
             from fgd_vector import load_roads
-            from power_procedural import poles_from_roads, building_blocker
+            from power_procedural import poles_from_roads, building_blocker, bridge_blocker
             _rd = []
             for rx in str(fgd_rdedg_xml).split(","):
                 rx = rx.strip()
                 if rx and Path(rx).exists():
                     _rd += load_roads(rx, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
                                       lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3])
-            # 電柱が建物を貫通しないよう、建物footprint内に落ちる候補を間引く
+            # 電柱が建物を貫通しない/橋桁を突き抜けないよう、建物footprint内・橋直下の候補を間引く
             import os as _os_pp
-            _blk = building_blocker(_blds) if _os_pp.environ.get("POLE_AVOID_BLD", "1") != "0" else None
+            _blk_bld = building_blocker(_blds) if _os_pp.environ.get("POLE_AVOID_BLD", "1") != "0" else None
+            _blk_brg = (bridge_blocker(bridges_render)
+                        if bridges_render and _os_pp.environ.get("POLE_AVOID_BRIDGE", "1") != "0" else None)
+            if _blk_bld or _blk_brg:
+                _blk = lambda la, lo: (bool(_blk_bld) and _blk_bld(la, lo)) or (bool(_blk_brg) and _blk_brg(la, lo))
+            else:
+                _blk = None
             _pp = poles_from_roads(_rd, blocked=_blk)
             power_lines = (power_lines or []) + _pp["lines"]
             power_towers = (power_towers or []) + _pp["towers"]
@@ -1163,6 +1237,21 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             print(f"  [manmade] OSM タンク{len(manmade_render['tanks'])} "
                   f"煙突{len(manmade_render['chimneys'])} 堤防等{len(manmade_render['banks'])} を取得")
 
+        # 埋立地(発電所等)対策: works(power=plant/works)ポリゴン全域を「陸へ持ち上げる」ヒントに使う。
+        # 建屋箱化はしないが、DEM欠損の埋立地(敷地内で建物/道路footprintの無い所)が海判定されて
+        # 発電所の地面が消えるのを防ぐ（dem_to_blocks_enhanced の海判定前の reclaim に渡す）。
+        reclaim_land_mask = None
+        if manmade_render and manmade_render.get("works"):
+            from terrain_render import polygon_mask_from_latlon as _pmask
+            _rfac = max(1, round(h_res / h_res_dem))
+            _rnz = dem_patch.shape[0] // _rfac; _rnx = dem_patch.shape[1] // _rfac
+            reclaim_land_mask = np.zeros((_rnz, _rnx), dtype=bool)
+            for _w in manmade_render["works"]:
+                if len(_w.get("coords", [])) >= 3:
+                    reclaim_land_mask |= _pmask(_w["coords"], patch_bbox_latlon, _rnz, _rnx)
+            if reclaim_land_mask.any():
+                print(f"  [reclaim-hint] works {int(reclaim_land_mask.sum())} セルを陸ヒントに")
+
         # 道路境界線(curb)の交差点偽枠線対策: OSM道路センターラインを塗りつぶし回廊にした mask を
         # 用意して dem_to_blocks_enhanced に渡す（centerline は交差点を連続して貫くので「同一道路」
         # 判定に使える）。オフライン等で取得失敗時は None=極小穴埋めのみにフォールバック。
@@ -1251,6 +1340,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             v_exag_land=v_exag,
             v_exag_sea=v_es,
             sea_level_m=sea_level_m,
+            reclaim_land_mask=reclaim_land_mask,
             ocean_max_depth_m=ocean_max_depth_m,
             smooth_sigma_cells=smooth_sigma_cells,
             cliff_threshold_m_per_m=cliff_threshold_m_per_m,

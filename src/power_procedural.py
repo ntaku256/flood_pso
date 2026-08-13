@@ -31,6 +31,43 @@ def _m_per_deg(lat: float) -> tuple[float, float]:
     return 111320.0, 111320.0 * math.cos(math.radians(lat))
 
 
+def bridge_blocker(bridges, margin_m: float = 8.0):
+    """橋polyline群 → callable(lat,lon)->bool（その点が橋の直下/桁の帯内か）。
+
+    FGD 地上道路が橋と並走/一致していると、その沿道に立てた電柱が橋桁を突き抜ける
+    （または橋が跨ぐ川の中に立つ）。各橋を幅 width_m/2 + margin_m のバッファ帯とみなし、
+    点がどれかの橋線分の帯内なら True を返して電柱候補を除外する。
+    bridges: [{"coords":[[lat,lon],...], "width_m":w}, ...]（nbt_export の bridges_render）。
+    橋が無ければ None。bbox 事前判定 + 点-線分距離(m)。"""
+    segs = []
+    for b in bridges or []:
+        ring = b.get("coords") or []
+        hw = float(b.get("width_m", 5.5)) * 0.5 + margin_m
+        for i in range(len(ring) - 1):
+            la0, lo0 = ring[i]; la1, lo1 = ring[i + 1]
+            segs.append((la0, lo0, la1, lo1, hw,
+                         min(la0, la1), max(la0, la1), min(lo0, lo1), max(lo0, lo1)))
+    if not segs:
+        return None
+
+    def blocked(lat, lon):
+        mlat, mlon = _m_per_deg(lat)
+        for la0, lo0, la1, lo1, hw, bla0, bla1, blo0, blo1 in segs:
+            degpad = hw / 111000.0
+            if not (bla0 - degpad <= lat <= bla1 + degpad and blo0 - degpad <= lon <= blo1 + degpad):
+                continue
+            ax = (lon - lo0) * mlon; ay = (lat - la0) * mlat      # 点-線分距離(m)
+            bx = (lo1 - lo0) * mlon; by = (la1 - la0) * mlat
+            l2 = bx * bx + by * by
+            t = 0.0 if l2 <= 1e-9 else max(0.0, min(1.0, (ax * bx + ay * by) / l2))
+            dx = ax - t * bx; dy = ay - t * by
+            if dx * dx + dy * dy <= hw * hw:
+                return True
+        return False
+
+    return blocked
+
+
 def building_blocker(buildings):
     """建物footprint群 → callable(lat,lon)->bool（その点が建物の中か）。
 
@@ -73,8 +110,8 @@ def building_blocker(buildings):
     return blocked
 
 
-def poles_from_roads(roads, *, spacing_m: float = 33.0, offset_m: float = 3.0,
-                     min_gap_m: float = 16.0, exclude_types=DEFAULT_EXCLUDE_TYPES,
+def poles_from_roads(roads, *, spacing_m: float = 45.0, offset_m: float = 3.0,
+                     min_gap_m: float = 30.0, exclude_types=DEFAULT_EXCLUDE_TYPES,
                      blocked=None, verbose: bool = True) -> dict:
     """RdEdg 道路群 → {"lines":[...],"towers":[...]}（power_osm.load_power 互換）。
 

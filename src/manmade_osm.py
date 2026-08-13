@@ -15,6 +15,7 @@ from pathlib import Path
 TANK = ("storage_tank", "silo", "water_tower", "gasometer")
 CHIMNEY = ("chimney",)
 BANK = ("embankment", "breakwater", "pier")
+WORKS = ("works",)   # 工場/発電所の敷地・建屋ポリゴン（man_made=works or power=plant/generator）
 
 
 def _centroid(geom):
@@ -29,7 +30,7 @@ def load_manmade(json_path: str | None = None, *,
                  fetch_if_missing: bool = True, verbose: bool = True) -> dict:
     """→ {"tanks":[{"lat","lon","coords"?}], "chimneys":[{"lat","lon"}],
           "banks":[{"coords":[[lat,lon],...],"kind"}]}。取得失敗は空。"""
-    empty = {"tanks": [], "chimneys": [], "banks": []}
+    empty = {"tanks": [], "chimneys": [], "banks": [], "works": []}
     elements: list = []
     p = Path(json_path) if json_path else None
     if p is not None and p.exists():
@@ -53,9 +54,11 @@ def load_manmade(json_path: str | None = None, *,
         return None in (lat_min, lat_max, lon_min, lon_max) or \
             (lat_min <= la <= lat_max and lon_min <= lo <= lon_max)
 
-    tanks, chimneys, banks = [], [], []
+    tanks, chimneys, banks, works = [], [], [], []
     for e in elements:
-        mm = (e.get("tags", {}) or {}).get("man_made", "")
+        _tags = e.get("tags", {}) or {}
+        mm = _tags.get("man_made", "")
+        pw = _tags.get("power", "")
         if e.get("type") == "node" and "lat" in e:
             la, lo = e["lat"], e["lon"]
             if not _hit(la, lo):
@@ -76,4 +79,6 @@ def load_manmade(json_path: str | None = None, *,
                 chimneys.append({"lat": la, "lon": lo})
             elif mm in BANK and len(coords) >= 2:
                 banks.append({"coords": coords, "kind": mm})
-    return {"tanks": tanks, "chimneys": chimneys, "banks": banks}
+            elif (mm in WORKS or pw in ("plant", "generator")) and len(coords) >= 3:
+                works.append({"coords": coords, "kind": mm or pw})
+    return {"tanks": tanks, "chimneys": chimneys, "banks": banks, "works": works}
