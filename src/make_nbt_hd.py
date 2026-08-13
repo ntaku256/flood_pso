@@ -614,8 +614,7 @@ def main():
     # 隣接タイルが境界セルを共有し合計==全域。各タイルに DEM セル範囲 tile_crop を直接渡す。
     # mapzen（別グリッド fetch）や単一タイルは従来どおり tile_crop=None。
     _aligned = bool(args.tiles) and args.terrain_source == "gsi" and (n_cols * n_rows > 1)
-    tile_specs = []  # (ttag, t_lat, t_lon, t_w, t_d, tile_crop)
-    _anvil_origin_rc = None  # 施策⑤: 整列タイルを1 Anvil world へ配置する際の world 原点 (R0,C0)
+    tile_specs = []  # (ttag, t_lat, t_lon, t_w, t_d, tile_crop, anvil_blk_offset)
     if _aligned:
         _res_lat = dem_info["res_lat"]; _res_lon = dem_info["res_lon"]
         _lat_max = dem_info["lat_max"]; _lon_min = dem_info["lon_min"]
@@ -626,12 +625,31 @@ def main():
         _g_hc = int((width_m / 2) * _lon_per_m / _res_lon)
         _R0 = max(0, _g_row - _g_hr); _R1 = min(_H, _g_row + _g_hr)
         _C0 = max(0, _g_col - _g_hc); _C1 = min(_W, _g_col + _g_hc)
-        _anvil_origin_rc = (_R0, _C0)   # 全タイル共通の world 原点（タイル offset の基準）
 
         def _edges(a, b, n):
             return [a + round(i * (b - a) / n) for i in range(n + 1)]
         _rb = _edges(_R0, _R1, n_rows)
         _cb = _edges(_C0, _C1, n_cols)
+        # 施策⑤fix: 各タイルを1 Anvil world へ「ブロック空間」で密着配置する offset を先に計算。
+        # t_crop は DEM セル範囲だが、export_to_nbt は h_res で up/down サンプルしてから描く
+        # （GSI 5m DEM を h_res=1m で描くと 1セル≈4ブロック）。セルのまま offset に使うと
+        # タイルが数倍重なってワールドが潰れる（旧バグ）ので、セル境界をレンダ後ブロック数へ
+        # 換算した累積和を offset にする。等倍(wakayama 1m 等)では従来と同じ値になる。
+        _hrd = _res_lat / _lat_per_m                        # DEM セル = 何 m
+        if h_res > 0 and h_res < _hrd * 0.95:
+            _cell2blk, _down = _hrd / h_res, 1              # upsample: 1セル = n ブロック
+        elif h_res > _hrd * 1.05:
+            _down = max(1, round(h_res / _hrd)); _cell2blk = 1.0 / _down  # downsample
+        else:
+            _cell2blk, _down = 1.0, 1                       # 等倍
+        def _blk_span(a, b):   # セル範囲[a,b) のレンダ後ブロック数（nd_zoom=round / 縮約=整数除算 と一致）
+            return (b - a) // _down if _down > 1 else int(round((b - a) * _cell2blk))
+        _col_off = [0]
+        for _ci in range(n_cols):
+            _col_off.append(_col_off[-1] + _blk_span(_cb[_ci], _cb[_ci + 1]))
+        _row_off = [0]
+        for _ri in range(n_rows):
+            _row_off.append(_row_off[-1] + _blk_span(_rb[_ri], _rb[_ri + 1]))
         for ri in range(n_rows):
             for ci in range(n_cols):
                 rr0, rr1 = _rb[ri], _rb[ri + 1]
@@ -641,16 +659,16 @@ def main():
                 t_w = (cc1 - cc0) * _res_lon / _lon_per_m
                 t_d = (rr1 - rr0) * _res_lat / _lat_per_m
                 tile_specs.append((_ttag(ci, ri), t_lat, t_lon, t_w, t_d,
-                                   (rr0, rr1, cc0, cc1)))
+                                   (rr0, rr1, cc0, cc1), (_col_off[ci], _row_off[ri])))
         print(f"  tiles={n_cols}×{n_rows} [整列]  全域セル {_C1-_C0}×{_R1-_R0} を整数分割"
-              f"（col境界={_cb}, 合計==全域・隙間/重複なし）")
+              f"（col境界={_cb}, blk-offset col={_col_off} row={_row_off}）")
     else:
         _tw, _td = width_m / n_cols, depth_m / n_rows
         for ri in range(n_rows):
             for ci in range(n_cols):
                 t_lon = lon_c + (ci - (n_cols - 1) / 2.0) * _tw * _lon_per_m  # col0=西
                 t_lat = lat_c + ((n_rows - 1) / 2.0 - ri) * _td * _lat_per_m  # row0=北
-                tile_specs.append((_ttag(ci, ri), t_lat, t_lon, _tw, _td, None))
+                tile_specs.append((_ttag(ci, ri), t_lat, t_lon, _tw, _td, None, None))
         if args.tiles:
             print(f"  tiles={n_cols}×{n_rows}  各 {_tw:.0f}×{_td:.0f}m  "
                   f"(~{int(_tw/h_res)}×{int(_td/h_res)} blocks/tile)")
@@ -779,7 +797,7 @@ def main():
         eff_v_exag = args.v_exag if args.v_exag is not None else v_exag
 
         # タイルごとに書き出す（--tiles 未指定なら tile_specs は ttag="" の単一要素）。
-        for ttag, t_lat, t_lon, t_w, t_d, t_crop in tile_specs:
+        for ttag, t_lat, t_lon, t_w, t_d, t_crop, t_aoff in tile_specs:
             out = OUT_DIR / f"{base_name}{ttag}.nbt"
             if ttag:
                 print(f"\n  -- tile {ttag}: center=({t_lat:.6f},{t_lon:.6f})  "
@@ -831,10 +849,9 @@ def main():
             #   非整列の複数タイル → ttag 別サブワールド（重なり破綻を避ける）。単一 → そのまま。
             anvil_out = anvil_off = None; anvil_merge = False; anvil_lname = base_name
             if args.anvil_world:
-                if t_crop is not None and _anvil_origin_rc is not None:
+                if t_crop is not None and t_aoff is not None:
                     anvil_out = args.anvil_world
-                    anvil_off = (int(t_crop[2] - _anvil_origin_rc[1]),   # x = col - C0
-                                 int(t_crop[0] - _anvil_origin_rc[0]))   # z = row - R0
+                    anvil_off = (int(t_aoff[0]), int(t_aoff[1]))   # 既にブロック単位（施策⑤fix）
                     anvil_merge = True
                 elif ttag:
                     anvil_out = str(Path(args.anvil_world) / ttag.lstrip("_"))
