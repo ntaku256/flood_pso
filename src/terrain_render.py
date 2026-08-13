@@ -3149,6 +3149,20 @@ def dem_to_blocks_enhanced(
             warnings.simplefilter("ignore", RuntimeWarning)
             tree_ds = np.nanmean(tp, axis=(1, 3))
 
+    # 埋立地(発電所等)対策: GSI/FGD 5m DEM が欠損する海沿いの人工地は、NaN→海化(#44)で建物の
+    # 地面が消える。建物/道路+3セル縁で DEM が NaN or 海面下のセルを陸(sea_level+1)へ持ち上げ、
+    # 建物が海に浮く/地面が無い状態を防ぐ。条件で既に海面下のセルのみ変換＝通常の海岸線は不変。
+    _hum = None
+    if building_mask is not None and building_mask.shape == dem_ds.shape:
+        _hum = building_mask.copy()
+    if road_mask is not None and road_mask.shape == dem_ds.shape:
+        _hum = road_mask.copy() if _hum is None else (_hum | road_mask)
+    if _hum is not None and _hum.any():
+        _reclaim = binary_dilation(_hum, iterations=3) & (~np.isfinite(dem_ds) | (dem_ds <= sea_level_m))
+        if _reclaim.any():
+            dem_ds = np.where(_reclaim, np.float32(sea_level_m + 1.0), dem_ds).astype(dem_ds.dtype)
+            print(f"  [reclaim] 建物/道路下の欠損・海面下 {int(_reclaim.sum())} セルを陸(埋立地)に持ち上げ")
+
     # ─── 3) 海/陸マスク + 地形特徴量（ダウンサンプル後の解像度で計算） ───
     sea_mask  = make_sea_mask(dem_ds, sea_level_m, smooth_sigma=sea_smooth_sigma)
     land_mask = ~sea_mask
