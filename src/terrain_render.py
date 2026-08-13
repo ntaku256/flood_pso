@@ -873,6 +873,7 @@ def build_building_maps(
     road_mask: np.ndarray | None = None,
     road_major_mask: np.ndarray | None = None,
     landmarks: list | None = None,
+    plant_mask: np.ndarray | None = None,   # power=plant/works 敷地。内側の建屋を工業ホール高に
 ) -> dict:
     """FG-GML 各建物を1棟単位でラスタ化し、描画に必要な block-grid マップ一式を返す。
 
@@ -891,6 +892,8 @@ def build_building_maps(
     wall_keys: list[str] = []
     roof_keys: list[str] = []
     style_keys: list[str] = []
+    import os as _os_bm
+    _PLANT_BLDG_MIN_H = float(_os_bm.environ.get("PLANT_BLDG_MIN_H", "28"))   # 発電所敷地内の建屋の最低高
     facade_keys: list[dict] = []          # 建物 id → 外壁装飾スペック(アーキタイプ由来)
     roof_solid_keys: list[bool] = []      # 建物 id → 屋根を型単色にしオルソ焼込を無効化(新設建物用)
     # 1セルの実寸(㎡)= アーキタイプ判定の footprint 面積に使う
@@ -936,6 +939,10 @@ def build_building_maps(
             if vals.size >= 4:                          # 屋根面の起伏=形状の代理(陸屋根/勾配)
                 relief = float(np.percentile(vals, 90) - np.percentile(vals, 10))
         h = max(h, min_h_m)
+        if plant_mask is not None:                 # 発電所敷地(power=plant)内の建屋=工業ホールとして高く
+            _pm_sub = plant_mask[y0:y1, x0:x1]
+            if _pm_sub.shape == ins.shape and bool((_pm_sub & ins).any()):
+                h = max(h, _PLANT_BLDG_MIN_H)
         area_m2 = float(int(ins.sum()) * _cell_m2)
         arch = building_archetype(tp, h, relief, area_m2)
         import os as _os_ad
@@ -1537,6 +1544,8 @@ def add_power_blocks(blocks, lines, towers, patch_bbox_latlon, nz, nx, *,
             put(ix - al, top + 1, iz, "iron_bars")            # 端部+中央碍子
             put(ix + al, top + 1, iz, "iron_bars")
             put(ix, top + 1, iz, "iron_bars")
+            if os.environ.get("POLE_LIGHT", "1") == "1":      # 街灯: 腕木先端の下に発光ランプ
+                put(ix + al, top - 1, iz, os.environ.get("POLE_LIGHT_KEY", "glowstone"))
 
     pylon_cells: set = set()
 
@@ -1950,6 +1959,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
     MAX_LINK = 130.0 / max(h_res_block_m, 0.1)        # 連結する隙間上限(block, ≈130m)
     MAX_LINK_NAME = 400.0 / max(h_res_block_m, 0.1)   # 同一道路名は橋間の地上区間(OSM非bridge)越えで連結
     COS_LINK = math.cos(math.radians(30.0))           # 直線継続とみなす角度許容(過剰グループ化抑制)
+    SHORT_SPAN_BLOCK = 30.0                            # このスパン(block)以下の橋は単独扱い(連結対象外)
 
     def _udir(p_from, p_to):
         dx, dz = p_to[0] - p_from[0], p_to[1] - p_from[1]
@@ -1983,6 +1993,8 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
             ib, eb = eps[b]
             if ia == ib or infos[ia]["layer"] != infos[ib]["layer"]:
                 continue
+            if min(infos[ia]["total"], infos[ib]["total"]) <= SHORT_SPAN_BLOCK:
+                continue                               # 短い橋(span≤30block)は単独扱い(連結しない)
             if _is_link(ia) != _is_link(ib):           # 本線とランプは別チェーンに分ける
                 continue
             pa, pb = _epos(ia, ea), _epos(ib, eb)
@@ -2362,7 +2374,8 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
             return end_pt, terrain_y(*end_pt)
         dx, dz = dx / L, dz / L
         best_pt, best_h, best_d = None, None, 0
-        for d in range(0, EXTEND_MAX + 1):
+        _ext_cap = 5 if span_len <= 30.0 else EXTEND_MAX   # 短い橋(span≤30block)は各端5blockまで
+        for d in range(0, _ext_cap + 1):
             x, z = end_pt[0] + dx * d, end_pt[1] + dz * d
             i, j = col(x, z)
             if not (0 <= j < nz and 0 <= i < nx):
@@ -2376,7 +2389,7 @@ def add_bridge_blocks(blocks, bridges, patch_bbox_latlon, nz, nx, *,
             return end_pt, terrain_y(*end_pt)
         # 最高点の先へ、直進方向に道路が続く限り更に延長（T字/道路終端で手前停止）。
         # 短い橋は延長も短く（橋長の半分・floor2・cap=BRIDGE_APPROACH_EXTRA）。長い高架は従来通り。
-        _approach = min(int(BRIDGE_APPROACH_EXTRA), max(2, int(round(0.5 * span_len))))
+        _approach = 0 if span_len <= 30.0 else min(int(BRIDGE_APPROACH_EXTRA), max(2, int(round(0.5 * span_len))))
         if road_mask is not None and _approach > 0:
             for d in range(best_d + 1, best_d + _approach + 1):
                 x, z = end_pt[0] + dx * d, end_pt[1] + dz * d
@@ -4077,8 +4090,7 @@ def dem_to_blocks_enhanced(
                 r0, g0, b0 = v[1]
                 if g0 > r0 and g0 > b0 and g0 > 55:   # 緑っぽい地表
                     green |= (surf_block == key)
-        if green.any():
-            cand &= binary_dilation(green, iterations=5)
+        cand &= binary_dilation(green, iterations=5)   # 緑系地表が周囲5ブロック内に無ければ木を置かない(strict)
         tree_cells = cand
         t_max_y = 0
 
@@ -4090,17 +4102,26 @@ def dem_to_blocks_enhanced(
                     "pos": nbtlib.List[nbtlib.Int]([nbtlib.Int(int(ix)), nbtlib.Int(int(iy)), nbtlib.Int(int(iz))]),
                     "state": block_id(key)}))
 
-        def _species(th_m):
-            # 高さで樹種: 低木=明るい茂み(birch) / 中木=広葉(oak) / 高木=針葉(spruce, 円錐)
+        _spruce_frac = float(os.environ.get("TREE_SPRUCE_FRAC", "0.35"))
+        def _species(th_m, ix=0, iz=0):
+            # 低木=明るい茂み(birch)。中〜高木は位置ハッシュで一定割合を針葉樹(spruce,円錐)化し
+            # オーク一辺倒を防ぐ（TREE_SPRUCE_FRAC=針葉樹割合, 0で従来の高さ依存のみ）。
             if th_m < 4.0:
                 return "oak_log", "birch_leaves", "bush"
+            _hh = ((int(ix) * 73856093) ^ (int(iz) * 19349663)) & 0xffff
+            if (_hh / 65535.0) < _spruce_frac:
+                return "spruce_log", "spruce_leaves", "cone"
             if th_m < 8.0:
                 return "oak_log", "oak_leaves", "round"
             return "spruce_log", "spruce_leaves", "cone"
 
         if tree_mode == "sparse":
-            _stride_m = float(os.environ.get("TREE_STRIDE_M", "2.5"))
-            step = max(2, int(round(_stride_m / h_res_block)))   # 旧千鳥と同じ間隔(scale1.5でstep4)。TREE_STRIDE_M で調整
+            _ts_env = os.environ.get("TREE_STEP")
+            if _ts_env:                                          # 木の間隔[block]を直接指定
+                step = max(2, int(_ts_env))
+            else:
+                _stride_m = float(os.environ.get("TREE_STRIDE_M", "2.5"))
+                step = max(2, int(round(_stride_m / h_res_block)))
             rows = np.arange(nz)[:, None]; cols = np.arange(nx)[None, :]
             # 木の行帯ごとに1ずつ列をずらして斜め格子(千鳥/quincunx)にする（直線的な格子に見えず自然）
             offset = (rows // step) % step
@@ -4108,7 +4129,7 @@ def dem_to_blocks_enhanced(
             for j, i_ in np.argwhere(sel).tolist():
                 th_m = float(tree_ds[j, i_])
                 th = max(2, min(int(round(th_m * scale_land)), 30))
-                log_k, leaf_k, shape = _species(th_m)
+                log_k, leaf_k, shape = _species(th_m, i_, j)
                 y0 = int(y_surf_land[j, i_]); top = y0 + th
                 if shape == "bush":                          # 低木: 地表から葉を接地(幹なし, canopy風)
                     for fy in range(y0 + 1, top + 1):        # 中心は地表から樹冠高まで葉柱
@@ -4146,7 +4167,7 @@ def dem_to_blocks_enhanced(
             for j, i_ in np.argwhere(cand).tolist():
                 th_m = float(tree_ds[j, i_])
                 th = max(2, min(int(round(th_m * scale_land)), 30))
-                log_k, leaf_k, _ = _species(th_m)
+                log_k, leaf_k, _ = _species(th_m, i_, j)
                 y0 = int(y_surf_land[j, i_]); top = y0 + th
                 trunk_top = y0 + max(1, th // 2)
                 for fy in range(y0 + 1, top + 1):

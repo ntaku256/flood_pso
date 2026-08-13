@@ -919,10 +919,29 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                     None, lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
                     lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3], fetch_if_missing=True)
                 print(f"  [landmark] OSM POI {len(_landmarks)} 件を建物に割当（社寺/駅/学校/役所/銭湯）")
+            # 発電所(power=plant)敷地内の建屋を工業ホール高に: works polygon を block-grid mask 化して渡す
+            # （load_manmade は osm_cache 共用でここが初回でも後段の manmade 描画はキャッシュ再利用）。
+            _plant_bmask = None
+            if manmade_fetch or manmade_json:
+                try:
+                    from manmade_osm import load_manmade as _lm
+                    _mmw = _lm(manmade_json or None,
+                               lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
+                               lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                               fetch_if_missing=manmade_fetch, verbose=False)
+                    if _mmw.get("works"):
+                        from terrain_render import polygon_mask_from_latlon as _pmk
+                        _plant_bmask = np.zeros((nz_g, nx_g), dtype=bool)
+                        for _w in _mmw["works"]:
+                            if len(_w.get("coords", [])) >= 3:
+                                _plant_bmask |= _pmk(_w["coords"], patch_bbox_latlon, nz_g, nx_g)
+                except Exception:
+                    _plant_bmask = None
             bmaps = build_building_maps(
                 _blds, dsm_h_block, patch_bbox_latlon, nz_g, nx_g,
                 road_mask=rm_f, road_major_mask=rmaj_f,   # 幹線正面の建物を商業化(shop/apartment)
                 landmarks=_landmarks,                     # OSM POI で社寺/civic/銭湯を特定
+                plant_mask=_plant_bmask,                  # power=plant 敷地内の建屋を高く
             )
             bm_f = bmaps["mask"]
             building_mask = bm_f if building_mask is None else (building_mask | bm_f)
