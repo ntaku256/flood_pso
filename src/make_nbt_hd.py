@@ -217,6 +217,9 @@ def main():
                          "（建物・道路・水域・海は除外）")
     ap.add_argument("--tree-mode", default="canopy", choices=["canopy", "sparse"],
                     help="樹木配置法: canopy=class3セル毎に幹+葉(密な森) / sparse=間引いた個別樹木(球状樹冠)")
+    ap.add_argument("--trees-esa", action="store_true",
+                    help="LiDAR class3 の被覆外(org図郭外)を ESA WorldCover class10(tree_cover)で名目樹冠として"
+                         "緑化。LiDARがある所はLiDAR優先。TREES_ESA_H(既定7m)で高さ調整。rasterio+ネット必須")
     ap.add_argument("--no-veg-filter", action="store_true",
                     help="建物 DSM(_org) から LiDAR 植生クラス(class 3)を除外しない。"
                          "既定は除外して樹木混入の建物高さ（御坊で建物の24%%が影響）を浄化")
@@ -507,6 +510,28 @@ def main():
             n_tree = int(np.sum(tree_height_grid > 2.0))
             print(f"  canopy: median={np.nanmedian(tree_height_grid[tree_height_grid>0]):.1f}m "
                   f"樹木セル(>2m)={n_tree:,}")
+
+    # LiDAR class3 の被覆外(org図郭外=tree_height_grid が NaN/未生成)を ESA WorldCover class10
+    # (tree_cover)で名目樹冠として埋め、木を面的に出す（LiDARがある所は LiDAR 優先）。
+    if args.trees and getattr(args, "trees_esa", False):
+        import os as _os_te
+        try:
+            from tellus_data import fetch_esa_worldcover, reproject_to_grid
+            esa = fetch_esa_worldcover(lat_min=dem_info["lat_min"], lat_max=dem_info["lat_max"],
+                                       lon_min=dem_info["lon_min"], lon_max=dem_info["lon_max"])
+            tree01 = (esa["cover"] == 10).astype(np.float32)       # 10 = tree_cover
+            frac = reproject_to_grid(tree01, src_meta=esa, dst_meta=dem_info, fill_value=0.0)
+            _eh = float(_os_te.environ.get("TREES_ESA_H", "7"))
+            esa_canopy = np.where(frac >= 0.5, np.float32(_eh), np.float32(0.0)).astype(np.float32)
+            if tree_height_grid is None:
+                tree_height_grid = esa_canopy
+            else:
+                _lidar_missing = ~np.isfinite(tree_height_grid)    # NaN = org図郭外
+                tree_height_grid = np.where(_lidar_missing, esa_canopy,
+                                            tree_height_grid).astype(np.float32)
+            print(f"  [trees-esa] ESA tree_cover {int((esa_canopy > 0).sum()):,} cells nominal {_eh:.0f}m")
+        except Exception as _e:
+            print(f"  [trees-esa] skipped ({_e})")
 
     # 洪水バリア: 建物footprintの高さを地形に加えた DEM で浸水計算（水が建物を避け道路を流れる）。
     # --no-flood-barrier で従来どおり地形のみ。地形描画は dem（建物は別レイヤ）のまま。

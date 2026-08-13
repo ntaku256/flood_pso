@@ -827,28 +827,50 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             # FGDメッシュ外(高専以南等)で建物が消える対策: OSM footprint を _blds に足して
             # build_building_maps で壁/高さ付きに描く。FGD建物の近傍(≈33m)は二重化回避で除外。
             if building_list is None and use_osm and osm.get("buildings"):
-                _celld = 0.0003
-                def _cen(cc):
-                    return (sum(p[0] for p in cc) / len(cc), sum(p[1] for p in cc) / len(cc))
-                _occ = set()
-                for _b in _blds:
-                    _c = _b.get("coords", [])
-                    if len(_c) >= 3:
-                        _la, _lo = _cen(_c); _occ.add((round(_la / _celld), round(_lo / _celld)))
+                from shapely.geometry import Polygon as _Poly
+                try:
+                    from shapely.strtree import STRtree as _STR
+                except Exception:
+                    _STR = None
+                _fgd_polys = [_Poly([(lo, la) for la, lo in _b.get("coords", [])])
+                              for _b in _blds if len(_b.get("coords", [])) >= 3]
+                _fgd_polys = [p for p in _fgd_polys if p.is_valid and not p.is_empty]
+                _tree = _STR(_fgd_polys) if (_STR is not None and _fgd_polys) else None
+
+                def _overlaps_fgd(op):
+                    # OSM footprint が FGD 建物の footprint と重なるなら追加しない（centroid近傍でなく
+                    # 実面積の交差判定。大きな駅舎等が高いFGD建物に低い棟を重ねて上書きするのを防ぐ）。
+                    cand = _tree.query(op) if _tree is not None else range(len(_fgd_polys))
+                    for q in cand:
+                        poly = q if hasattr(q, "intersects") else _fgd_polys[int(q)]
+                        if poly.intersects(op):
+                            return True
+                    return False
+
                 _addb = []
                 for _b in osm["buildings"]:
                     _c = _b.get("coords", [])
                     if len(_c) < 4:
                         continue
-                    _la, _lo = _cen(_c); _k = (round(_la / _celld), round(_lo / _celld))
-                    if any((_k[0] + _dx, _k[1] + _dy) in _occ
-                           for _dx in (-1, 0, 1) for _dy in (-1, 0, 1)):
-                        continue                       # 近傍にFGD建物あり → 二重化回避
+                    _op = _Poly([(lo, la) for la, lo in _c])
+                    if not _op.is_valid or _op.is_empty:
+                        continue
+                    if _fgd_polys and _overlaps_fgd(_op):
+                        continue
+                    _ot = _b.get("tags", {}) or {}     # OSM の実高さを捨てず反映
+                    _hm = None
+                    try:
+                        if _ot.get("height") is not None:
+                            _hm = float(str(_ot["height"]).split()[0])
+                        elif _ot.get("building:levels") is not None:
+                            _hm = float(str(_ot["building:levels"]).split()[0]) * 3.0
+                    except (ValueError, TypeError):
+                        _hm = None
                     _addb.append({"coords": _c, "holes": [],
-                                  "tags": {"fgd_type": "普通建物", "height_m": None}})
+                                  "tags": {"fgd_type": "普通建物", "height_m": _hm}})
                 if _addb:
                     _blds = _blds + _addb
-                    print(f"  [osm-bld] OSM建物 {len(_addb)} 棟を追加（FGD近傍除外・南部等の欠落補完）")
+                    print(f"  [osm-bld] OSM建物 {len(_addb)} 棟を追加（FGD footprint重複除外・南部等の欠落補完）")
             # 現況補正: 解体済み建物を除去 → 新設建物を追加（FGD/building_list どちらにも適用）
             if remove_bld_polys:
                 from shapely.geometry import Polygon as _Poly

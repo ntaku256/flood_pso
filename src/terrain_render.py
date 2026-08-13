@@ -924,14 +924,15 @@ def build_building_maps(
             continue
         tp = b.get("tags", {}).get("fgd_type", "")
         _hm = b.get("tags", {}).get("height_m")
-        floor = float(_hm if _hm is not None else 6.0) * type_floor_frac
-        h = floor
+        _nom = float(_hm if _hm is not None else 6.0)
+        floor = _nom * type_floor_frac
+        h = _nom                                        # DSM被覆外/無しは type_floor_frac(0.6)で潰さず名目高
         relief = 2.0 if tp in HIP_ROOF_TYPES else 0.6   # DSM無し時の推定(勾配/陸屋根)
         if dsm_h_block is not None:
             vals = dsm_h_block[y0:y1, x0:x1][ins]
             vals = vals[np.isfinite(vals)]
             if vals.size:
-                h = max(float(np.percentile(vals, pct)), floor)
+                h = max(float(np.percentile(vals, pct)), floor)   # LiDAR被覆内は実測(下限=floor)
             if vals.size >= 4:                          # 屋根面の起伏=形状の代理(陸屋根/勾配)
                 relief = float(np.percentile(vals, 90) - np.percentile(vals, 10))
         h = max(h, min_h_m)
@@ -1374,7 +1375,10 @@ def add_manmade_blocks(blocks, manmade, patch_bbox_latlon, nz, nx, *, y_surf_lan
             for fy in range(gy + 1, gy + 3):
                 _b(i_, fy, j, key)
         nb += 1
-    for wk in manmade.get("works", []):          # 工場/発電所: 建屋マスを外周壁+屋根の箱に
+    # works(power=plant/generator 等)の箱化は既定OFF: 散在する発電機ポリゴンが中空の gray 塊に
+    # なって「建物でない場所の変なオブジェクト」に見えるため。発電所の象徴は上のスタック(煙突)で表現。
+    # MANMADE_WORKS_BOX=1 で従来の箱描画を有効化。
+    for wk in (manmade.get("works", []) if _os_mm.environ.get("MANMADE_WORKS_BOX", "0") == "1" else []):
         if len(wk.get("coords", [])) < 3:
             continue
         m = polygon_mask_from_latlon(wk["coords"], patch_bbox_latlon, nz, nx)
@@ -4058,7 +4062,7 @@ def dem_to_blocks_enhanced(
             no_tree |= road_mask
         if water_mask is not None and water_mask.shape == dem_ds.shape:
             no_tree |= water_mask
-        cand = (tree_ds >= 1.2) & land_mask & ~no_tree   # nanmeanで希釈された部分樹冠も拾う(旧2.0)
+        cand = (tree_ds >= 1.5) & land_mask & ~no_tree   # 部分樹冠は拾うが草/低木の低ヘイズは除外(旧2.0)
         # 空中写真(surf_block)で周囲5ブロックに緑系(草/葉/苔)が無い所には木を置かない
         # （class3 が建物影・ノイズで誤検出した非植生に木が立つのを防ぐ）
         from block_palette import BLOCKS as _BPg
@@ -4091,7 +4095,8 @@ def dem_to_blocks_enhanced(
             return "spruce_log", "spruce_leaves", "cone"
 
         if tree_mode == "sparse":
-            step = max(1, int(round(1.5 / h_res_block)))   # ~1.5m 間隔（森林を密に。旧max(2,2.5)は間引き過剰）
+            _stride_m = float(os.environ.get("TREE_STRIDE_M", "2.0"))
+            step = max(2, int(round(_stride_m / h_res_block)))   # 千鳥の個別樹木。floor=2が実効レバー(旧max(1,..)は密すぎマット化)
             rows = np.arange(nz)[:, None]; cols = np.arange(nx)[None, :]
             # 行帯ごとに半ステップずらして隣列を斜めにずらす（千鳥配置で自然な森に）
             offset = ((rows // step) % 2) * (step // 2)
