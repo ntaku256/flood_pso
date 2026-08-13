@@ -2792,9 +2792,9 @@ def dem_to_blocks_enhanced(
     parkings: list | None = None,
     ortho_rgb: np.ndarray | None = None,
     patch_bbox_latlon: tuple | None = None,
-    road_block: str = "andesite",
+    road_block: str = "gray_concrete_powder",
     road_major_mask: np.ndarray | None = None,
-    road_minor_block: str = "gravel",
+    road_minor_block: str = "light_gray_concrete_powder",
     # 道路の「一番外側」に引く 1 ブロック境界線（普通=灰色コンクリ / 小路=青緑テラコッタ）
     road_edge_major_block: str = "gray_concrete",
     road_edge_minor_block: str = "cyan_terracotta",

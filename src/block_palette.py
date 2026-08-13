@@ -108,6 +108,9 @@ BLOCKS: dict[str, tuple[str, tuple[int, int, int], str]] = {
     "sea_lantern":         ("minecraft:sea_lantern", (211, 227, 207), "opaque"),  # 避難所マーカー発光
     "verdant_froglight":   ("minecraft:verdant_froglight", (105, 203, 96), "opaque"),  # バス停の緑灯(発光)
     "black_concrete":      ("minecraft:black_concrete", (8, 10, 15), "opaque"),
+    # コンクリートパウダー（道路舗装用。重力ブロックだが地表道路は接地=支持あり）
+    "gray_concrete_powder":       ("minecraft:gray_concrete_powder", (76, 79, 82), "opaque"),
+    "light_gray_concrete_powder": ("minecraft:light_gray_concrete_powder", (154, 154, 148), "opaque"),
 
     # ── Terracotta 16（dyed） ──
     "white_terracotta":      ("minecraft:white_terracotta", (209, 178, 161), "opaque"),
@@ -216,6 +219,7 @@ _NON_MATCH = {"sea_lantern", "verdant_froglight", "glass", "glowstone", "iron_ba
               "green_stained_glass", "black_stained_glass",
               # 鉄道レールは色マッチで地表/屋根に湧くと「レール屋根」になるため候補から除外
               "rail_ns", "rail_ew", "rail_ne", "rail_nw", "rail_se", "rail_sw"}
+_NON_MATCH |= {"gray_concrete_powder", "light_gray_concrete_powder"}  # 道路舗装専用(色マッチ除外)
 _NON_MATCH |= ROOF_SMOOTH_KEYS          # stairs/slab は屋根専用（地表オルソには使わない）
 _NON_MATCH |= WALL_POST_KEYS            # wall ポストは装飾専用
 MATCH_KEYS: list[str] = [k for k, (_, _, role) in BLOCKS.items()
