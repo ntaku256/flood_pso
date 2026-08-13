@@ -3025,6 +3025,7 @@ def dem_to_blocks_enhanced(
     cover_patch: np.ndarray | None = None,
     building_mask: np.ndarray | None = None,
     road_mask: np.ndarray | None = None,
+    reclaim_land_mask: np.ndarray | None = None,
     building_height_m: float = 6.0,
     building_height_patch: np.ndarray | None = None,
     building_height_block: np.ndarray | None = None,
@@ -3161,6 +3162,9 @@ def dem_to_blocks_enhanced(
         _hum = building_mask.copy()
     if road_mask is not None and road_mask.shape == dem_ds.shape:
         _hum = road_mask.copy() if _hum is None else (_hum | road_mask)
+    if reclaim_land_mask is not None and reclaim_land_mask.shape == dem_ds.shape:
+        # works(power=plant)ポリゴン全域＝発電所の埋立地。footprintの無い敷地内も陸にする。
+        _hum = reclaim_land_mask.copy() if _hum is None else (_hum | reclaim_land_mask)
     if _hum is not None and _hum.any():
         _reclaim = binary_dilation(_hum, iterations=3) & (~np.isfinite(dem_ds) | (dem_ds <= sea_level_m))
         if _reclaim.any():
@@ -4098,8 +4102,8 @@ def dem_to_blocks_enhanced(
             _stride_m = float(os.environ.get("TREE_STRIDE_M", "2.0"))
             step = max(2, int(round(_stride_m / h_res_block)))   # 千鳥の個別樹木。floor=2が実効レバー(旧max(1,..)は密すぎマット化)
             rows = np.arange(nz)[:, None]; cols = np.arange(nx)[None, :]
-            # 行帯ごとに半ステップずらして隣列を斜めにずらす（千鳥配置で自然な森に）
-            offset = ((rows // step) % 2) * (step // 2)
+            # 木の行帯ごとに1ずつ列をずらして斜め格子(千鳥/quincunx)にする（直線的な格子に見えず自然）
+            offset = (rows // step) % step
             sel = cand & ((rows % step) == 0) & (((cols - offset) % step) == 0)
             for j, i_ in np.argwhere(sel).tolist():
                 th_m = float(tree_ds[j, i_])

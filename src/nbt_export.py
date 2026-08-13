@@ -1218,6 +1218,21 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             print(f"  [manmade] OSM タンク{len(manmade_render['tanks'])} "
                   f"煙突{len(manmade_render['chimneys'])} 堤防等{len(manmade_render['banks'])} を取得")
 
+        # 埋立地(発電所等)対策: works(power=plant/works)ポリゴン全域を「陸へ持ち上げる」ヒントに使う。
+        # 建屋箱化はしないが、DEM欠損の埋立地(敷地内で建物/道路footprintの無い所)が海判定されて
+        # 発電所の地面が消えるのを防ぐ（dem_to_blocks_enhanced の海判定前の reclaim に渡す）。
+        reclaim_land_mask = None
+        if manmade_render and manmade_render.get("works"):
+            from terrain_render import polygon_mask_from_latlon as _pmask
+            _rfac = max(1, round(h_res / h_res_dem))
+            _rnz = dem_patch.shape[0] // _rfac; _rnx = dem_patch.shape[1] // _rfac
+            reclaim_land_mask = np.zeros((_rnz, _rnx), dtype=bool)
+            for _w in manmade_render["works"]:
+                if len(_w.get("coords", [])) >= 3:
+                    reclaim_land_mask |= _pmask(_w["coords"], patch_bbox_latlon, _rnz, _rnx)
+            if reclaim_land_mask.any():
+                print(f"  [reclaim-hint] works {int(reclaim_land_mask.sum())} セルを陸ヒントに")
+
         # 道路境界線(curb)の交差点偽枠線対策: OSM道路センターラインを塗りつぶし回廊にした mask を
         # 用意して dem_to_blocks_enhanced に渡す（centerline は交差点を連続して貫くので「同一道路」
         # 判定に使える）。オフライン等で取得失敗時は None=極小穴埋めのみにフォールバック。
@@ -1306,6 +1321,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
             v_exag_land=v_exag,
             v_exag_sea=v_es,
             sea_level_m=sea_level_m,
+            reclaim_land_mask=reclaim_land_mask,
             ocean_max_depth_m=ocean_max_depth_m,
             smooth_sigma_cells=smooth_sigma_cells,
             cliff_threshold_m_per_m=cliff_threshold_m_per_m,
