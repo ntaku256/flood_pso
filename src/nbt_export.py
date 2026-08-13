@@ -447,6 +447,7 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
                   bridges_json: str | None = None,
                   bridges_fetch: bool = False,
                   tunnels_json: str | None = None,
+                  tunnels_fetch: bool = False,
                   power_json: str | None = None,
                   power_poles_from_roads: bool = False,
                   parking_json: str | None = None,
@@ -990,12 +991,13 @@ def export_to_nbt(dem_info: dict, inundation: np.ndarray,
 
         # OSM トンネル（tunnel=yes）を patch 範囲で読む（橋と同じ Overpass geom JSON 形式）
         tunnels_render = None
-        if tunnels_json:
+        if tunnels_json or tunnels_fetch:
             from bridge_osm import load_bridges as _load_ways
             tunnels_render = _load_ways(
-                tunnels_json,
+                tunnels_json or "",
                 lat_min=patch_bbox_latlon[0], lat_max=patch_bbox_latlon[1],
                 lon_min=patch_bbox_latlon[2], lon_max=patch_bbox_latlon[3],
+                fetch_if_missing=tunnels_fetch, kind="tunnel",
             )
             print(f"  [tunnel] OSM トンネル {len(tunnels_render)} 本を patch 内で検出")
             # 坑口床高を全域DEMで事前計算（--tiles 分割でトンネルが複数タイルにまたがっても

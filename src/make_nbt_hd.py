@@ -234,6 +234,8 @@ def main():
                     help="OSM トンネル(tunnel=yes highway/railway)の Overpass geom JSON。存在すれば"
                          "山を貫く道路/鉄道を地形に刳り貫いて坑道+路面+照明を生成（橋の逆処理）。"
                          "既定=御坊全域。空文字で無効化")
+    ap.add_argument("--tunnels-fetch", action="store_true",
+                    help="トンネルを Overpass から全件取得（--bridges-fetch のトンネル版。JSON不要）")
     ap.add_argument("--power-json", type=str, default="",
                     help="OSM 送電線(power=line)+鉄塔/電柱(power=tower/pole)の Overpass geom JSON。"
                          "指定すると voltage→高さの架線(iron_bars)+鉄塔ラティスを立体化。"
@@ -459,7 +461,9 @@ def main():
 
     # 建物高さグリッド（DSM 由来）：和歌山 LiDAR の _org（DSM）があれば DSM-DEM を建物実高に使う。
     building_height_grid = None
-    if args.wakayama_grd and not args.no_building_heights:
+    # LiDAR DSM(_org) があれば建物実高を使う。DEM は GSI/LiDAR どちらでも可（DSM をその DEM 格子へ
+    # 投影して DSM-DEM を高さにする）＝ --dem-gsi-tiles + --wakayama-org で「GSI地形＋LiDAR実高」も可能。
+    if (args.wakayama_grd or args.wakayama_org) and not args.no_building_heights:
         org_csv = args.wakayama_org if args.wakayama_org \
             else str(args.wakayama_grd).replace("_grd.txt", "_org.txt")
         org_paths = [p.strip() for p in org_csv.split(",") if p.strip()]
@@ -881,6 +885,7 @@ def main():
                 bridges_json=(args.bridges_json or None),
                 bridges_fetch=args.bridges_fetch,
                 tunnels_json=(args.tunnels_json or None),
+                tunnels_fetch=args.tunnels_fetch,
                 power_json=(args.power_json or None),
                 power_poles_from_roads=args.power_poles,
                 parking_json=(args.parking_json or None),
