@@ -26,3 +26,26 @@ Artifacts に上げ、差分率を PR にコメントする。
 その場合は `make ci-golden` で `tests/golden/ci_crop.png` を更新し、**同じ PR に含める**こと
 （レビューで画像の変化を確認できる）。合成 DEM 諸元（`tools/ci_fixture.py` の `E0/N0/N` や
 `Makefile` の `CI_CLAT/CI_CLON`）を変えた場合も同様に更新する。
+
+## palette の blockstate ガード（#46）
+
+`test_block_state_properties.py` は **外部レンダラ (BlueMap) で非描画になるブロック**を防ぐ回帰ガード。
+依存ゼロで単体実行でき、CI (`ci-preview.yml`) の最初のステップで走る。
+
+```bash
+python tests/test_block_state_properties.py
+```
+
+Minecraft 本体は読み込み時にデフォルト blockstate を補完するが、BlueMap は
+`assets/minecraft/blockstates/*.json` の variants キーとの照合でしかモデルを解決しない。
+variants に空キー `""` が無いブロック（柱系の `axis`、草系の `snowy`）で Properties を
+省略すると、**どの variant にも一致せず完全に非描画**になる。ブロック id 自体は既知なので
+missing テクスチャにもならず、レンダラのログにも警告が出ない。
+
+新しいブロックを `PALETTE_KEYS` に足すときは、`block_state_properties()` /
+`block_state_properties_for_key()` が適切な Properties を返すか確認すること。
+vanilla アセットとの**網羅照合**は手元の client jar を使う:
+
+```bash
+python tools/audit_blockstates.py ~/bluemap/<instance>/data/minecraft-client-*.jar
+```

@@ -241,19 +241,56 @@ def role(key: str) -> str:
     return BLOCKS[key][2]
 
 
+# 柱系ブロック: vanilla の blockstates が variants = axis=x/axis=y/axis=z の 3 キーのみで
+# **空キー "" を持たない**ため、Properties を省略するとレンダラがモデルを解決できない。
+# 接尾辞で拾えるのは _log / _wood だけ（_stem は mushroom/melon/pumpkin_stem が、
+# _hyphae 以外の紛らわしい名前も居るため接尾辞では拾わず、下の明示集合で列挙する）。
+_AXIS_SUFFIXES = ("_log", "_wood")
+_AXIS_NAMES = frozenset({
+    "minecraft:deepslate",
+    "minecraft:basalt", "minecraft:polished_basalt",
+    "minecraft:bone_block", "minecraft:hay_block",
+    "minecraft:quartz_pillar", "minecraft:purpur_pillar",
+    "minecraft:muddy_mangrove_roots",
+    "minecraft:ochre_froglight", "minecraft:verdant_froglight",
+    "minecraft:pearlescent_froglight",
+    "minecraft:crimson_stem", "minecraft:warped_stem",
+    "minecraft:crimson_hyphae", "minecraft:warped_hyphae",
+    "minecraft:stripped_crimson_stem", "minecraft:stripped_warped_stem",
+    "minecraft:stripped_crimson_hyphae", "minecraft:stripped_warped_hyphae",
+})
+
+# 積雪フラグを持つ地表ブロック: variants が snowy=false/true のみで空キーが無い。
+_SNOWY_NAMES = frozenset({
+    "minecraft:grass_block", "minecraft:podzol", "minecraft:mycelium",
+})
+
+
 def block_state_properties(name: str) -> dict[str, str] | None:
     """minecraft ブロック名 → BlockState の Properties（単一真実源, None=Properties 無し）。
 
     NBT (nbt_export) と litematic (nbt_to_litematic) のパレット生成が共通で使う。
-    - grass_block : snowy=false（従来挙動）
+
+    **Properties を省略してはいけない理由**: Minecraft 本体は読み込み時にデフォルト
+    blockstate を補完するので実機では正常に見えるが、BlueMap のような外部レンダラは
+    ``assets/minecraft/blockstates/*.json`` の variants キーとの照合でしかモデルを
+    解決せず、デフォルト補完をしない。variants に空キー ``""`` が無いブロック
+    （柱系の axis、草系の snowy）は Properties 無しだと**どの variant にも一致せず
+    完全に非描画**になる。ブロック id 自体は既知なので missing テクスチャにもならず、
+    レンダラのログにも警告が出ないため発見が遅れた（ntaku256/flood_pso#46）。
+
+    - grass_block / podzol / mycelium : snowy=false
     - *_leaves    : persistent=true → ワールド配置後に葉が時間で崩壊して消えるのを防ぐ
       （構造物/litematic に Properties 無しで置くと worldgen 既定 persistent=false で
        幹から離れた葉が decay して消える）。distance=1 も明示。
+    - 柱系 (*_log / *_wood / deepslate など) : axis=y
     """
-    if name == "minecraft:grass_block":
+    if name in _SNOWY_NAMES:
         return {"snowy": "false"}
     if name.endswith("_leaves"):
         return {"persistent": "true", "distance": "1"}
+    if name.endswith(_AXIS_SUFFIXES) or name in _AXIS_NAMES:
+        return {"axis": "y"}
     return None
 
 

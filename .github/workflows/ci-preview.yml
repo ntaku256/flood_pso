@@ -28,6 +28,10 @@ jobs:
           cache: pip
       - name: deps
         run: pip install -r requirements.txt
+      - name: palette blockstate guard
+        # #46: Properties 省略のブロックは外部レンダラ(BlueMap)で非描画になる。
+        # vanilla アセットを要さない軽量ガード（網羅照合は tools/audit_blockstates.py）。
+        run: python tests/test_block_state_properties.py
       - name: offline deterministic build + render
         env:
           FLOOD_PSO_OFFLINE: "1"
