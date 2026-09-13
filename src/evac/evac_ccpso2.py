@@ -9,13 +9,15 @@ evac/evac_ccpso2.py — 講演原稿 3 章の EVAC-PSO (中継点 + スプライ
   コスト [m] = 経路長 L
              + λ1 · Σ_{浸水: t_pass(s) ≥ T(s)} Δs                 (通過時に 30 cm 浸水しているサンプルの経路長)
              + λ2 · Σ_{道路外: EDT(s) > 3 m} (Δs + (EDT(s) − 3))  (道路外の経路長 + 道路からの超過距離。後者で道路へ寄せる勾配を与える)
-             + λ3 · Σ_{建物内 or 格子外} Δs
+             + λ3 · Σ_{建物内 or 海・河川 (DEM NaN) or 格子外} Δs
              + λ4 · max(0, t_pass(終点) − T(終点))  [s]
   λ1 = λ3 = 50 (浸水/建物 1 m につき 50 m 分の遠回りに相当), λ2 = 2, λ4 = 100 (遅刻 1 s = 100 m)。
   探索範囲 = 始点・終点の外接矩形を PAD=300 m 広げた矩形。
-  予算 5000 評価 × 5 シード。PSO: 30 粒子 × 166 反復, c1=c2=1.5, w=0.7, bounds, bh="nearest", 速度クランプ ±20% 幅。
+  予算 5000 評価 × 5 シード。PSO: 30 粒子 × 167 反復, c1=c2=1.5, w=0.7, bounds, bh="nearest", 速度クランプ ±20% 幅。
   CCPSO2: N=20, s=2 (K_g=20: 1 グループ = 1 中継点 (x,y)。ccpso2_sweep.py で s∈{1,2,4,8,40}/N/p_cauchy を比較し最良), p_cauchy=0.5, max_evals=5000
-  (1 サイクル = N·K_g = 400 評価なので 12 サイクル ≈ 4800 評価で打ち切り)。
+  (1 サイクル = N·K_g = 400 評価。サイクル途中で止まらない)。
+  予算の公平化: 目的関数側で「最初の BUDGET 評価」までの最良値 (と粒子) を記録し、両手法ともその値を結果とする
+  (PSO は 30×167=5010 評価、CCPSO2 は 20+13×400=5220 評価まで走るが、5001 評価目以降の改善は採用しない)。
   Dijkstra 参照 = 道路網の時間依存 (浸水セル通行不可) 最早到着経路を同じコスト関数で再評価 (折れ線 / 20 中継点スプライン化 の 2 通り)。
   ※「最適解」ではない (連続空間の最適値は未知)。
 
@@ -63,9 +65,12 @@ PAIRS = [
          goal=dict(name="薗地区津波避難タワー", lat=33.8871581, lon=135.161616)),
     dict(id="center", label="市街中心 → 御坊小学校",
          start=dict(name="御坊 市街中心 (道路上)", lat=33.889680, lon=135.159598),
-         goal=dict(name="御坊小学校", lat=33.8919485, lon=135.154961)),
+         # 施設座標 (33.8919485, 135.154961 = 敷地中心) は道路から 57 m 離れ、直線接続部が校舎 (OSM building) を通って
+         # Dijkstra 参照にも建物ペナルティが乗るため、敷地に最も近い道路ノード (校門前) を終点にする。
+         goal=dict(name="御坊小学校 (校門前道路)", lat=33.892415, lon=135.154695)),
 ]
-COLORS = dict(dijkstra="#ffffff", pso="#9e9e9e", ccpso2="#ffd54f")
+COLORS = dict(dijkstra="#ffffff", pso="#9e9e9e", ccpso2="#ffd54f")          # 陰影 DEM 上 (routes_overview / tizucra-walk)
+PLOT_COLORS = dict(dijkstra="#7b1fa2", pso="#616161", ccpso2="#f9a825")     # 白背景 (routes_pairs; 道路が白なので濃色)
 
 
 class Terrain:
@@ -94,10 +99,10 @@ class Terrain:
 
 
 class RouteProblem:
-    def __init__(self, terr: Terrain, start_xy, goal_xy, v_walk=V_WALK, lam=LAMBDA):
+    def __init__(self, terr: Terrain, start_xy, goal_xy, v_walk=V_WALK, lam=LAMBDA, budget=BUDGET):
         self.t = terr
         self.s = np.asarray(start_xy, float); self.g = np.asarray(goal_xy, float)
-        self.v = v_walk; self.lam = lam
+        self.v = v_walk; self.lam = lam; self.budget = budget
         lo = np.minimum(self.s, self.g) - PAD_M; hi = np.maximum(self.s, self.g) + PAD_M
         self.lb = np.tile(lo, K); self.ub = np.tile(hi, K)
         ri, ci, _ = terr.lookup(self.g[0:1], self.g[1:2])
@@ -105,6 +110,7 @@ class RouteProblem:
         self.n_eval = 0
         self.log: list = []
         self.best = np.inf
+        self.best_x = None
 
     # ── 経路生成 ───────────────────────────────
     def spline_points(self, x):
@@ -145,7 +151,7 @@ class RouteProblem:
         flooded = t_pass >= self.t.T[ri, ci]
         edt = self.t.road_edt[ri, ci]
         off = edt > OFFROAD_TOL_M
-        bld = self.t.building[ri, ci] | oob
+        bld = self.t.building[ri, ci] | oob | ~self.t.land[ri, ci]   # 建物 / 格子外 / 海・河川 (DEM NaN) は同じ λ3
         p_flood = self.lam["flood"] * float(seg_ds[flooded].sum())
         p_off = self.lam["offroad"] * float((seg_ds[off] + (edt[off] - OFFROAD_TOL_M)).sum())
         p_bld = self.lam["building"] * float(seg_ds[bld].sum())
@@ -164,39 +170,42 @@ class RouteProblem:
         except Exception:
             c = BIG
         self.n_eval += 1
-        if c < self.best:
-            self.best = c
-        self.log.append((self.n_eval, self.best))
+        if self.n_eval <= self.budget:      # 予算内の評価だけを結果に採用 (PSO / CCPSO2 の打ち切り単位の違いを吸収)
+            if c < self.best:
+                self.best = c; self.best_x = np.array(x, float).copy()
+            self.log.append((self.n_eval, self.best))
         return c
 
     def batch(self, X):
         return np.array([self(x) for x in X])
 
     def reset_log(self):
-        self.n_eval = 0; self.log = []; self.best = np.inf
+        self.n_eval = 0; self.log = []; self.best = np.inf; self.best_x = None
 
 
 # ─────────────────────────────────────────────────────────────
 def run_pso(prob, seed, budget):
     from pyswarms.single import GlobalBestPSO
     n_p = 30
-    iters = max(1, budget // n_p)
+    iters = max(1, -(-budget // n_p))   # 予算以上回し、採用は目的関数側で budget 評価までに制限
     np.random.seed(seed)
     vmax = 0.2 * float((prob.ub - prob.lb).max())
     opt = GlobalBestPSO(n_particles=n_p, dimensions=D, options={"c1": 1.5, "c2": 1.5, "w": 0.7},
                         bounds=(prob.lb, prob.ub), bh_strategy="nearest", velocity_clamp=(-vmax, vmax), ftol=-np.inf)
     prob.reset_log()
     t0 = time.time()
-    cost, pos = opt.optimize(prob.batch, iters=iters, verbose=False)
-    return dict(cost=float(cost), x=np.asarray(pos), log=list(prob.log), evals=prob.n_eval, elapsed=time.time() - t0)
+    opt.optimize(prob.batch, iters=iters, verbose=False)
+    return dict(cost=float(prob.best), x=np.asarray(prob.best_x), log=list(prob.log), evals=min(prob.n_eval, prob.budget),
+                evals_run=prob.n_eval, elapsed=time.time() - t0)
 
 
 def run_ccpso2(prob, seed, budget):
     prob.reset_log()
     t0 = time.time()
     cc = CCPSO2(prob, dim=D, n_particles=CC_N, group_size=CC_S, bounds=(prob.lb, prob.ub), p_cauchy=0.5, seed=seed)
-    r = cc.run(max_evals=budget)
-    return dict(cost=float(r["best_cost"]), x=np.asarray(r["best_x"]), log=list(prob.log), evals=prob.n_eval, elapsed=time.time() - t0)
+    cc.run(max_evals=budget)
+    return dict(cost=float(prob.best), x=np.asarray(prob.best_x), log=list(prob.log), evals=min(prob.n_eval, prob.budget),
+                evals_run=prob.n_eval, elapsed=time.time() - t0)
 
 
 def dijkstra_route(G, terr, pair, prob):
@@ -256,7 +265,7 @@ def main():
                 r.update(det); r["xs"], r["ys"] = xs, ys
                 res[m].append(r)
                 histories[(pair["id"], m, seed)] = np.array(r["log"])
-                rows.append(dict(pair=pair["id"], method=m, seed=seed, evals=r["evals"], elapsed_s=round(r["elapsed"], 1),
+                rows.append(dict(pair=pair["id"], method=m, seed=seed, evals=r["evals"], evals_run=r["evals_run"], elapsed_s=round(r["elapsed"], 1),
                                  **{k: det[k] for k in det}))
                 print(f"  seed {seed} {m:7s} cost={r['cost']:9.1f} L={r['length_m']:6.0f} flood={r['n_flood']:3d} off={r['n_off']:3d} bld={r['n_bld']:3d} late={r['p_late']:.0f} evals={r['evals']} {r['elapsed']:.0f}s")
         pc = np.array([r["cost"] for r in res["pso"]]); cc = np.array([r["cost"] for r in res["ccpso2"]])
@@ -281,7 +290,7 @@ def main():
     # ── 出力 ──
     OUT.mkdir(parents=True, exist_ok=True)
     keys = ["pair", "method", "seed", "cost", "length_m", "time_min", "p_flood", "p_offroad", "p_building", "p_late",
-            "n_flood", "n_off", "n_bld", "evals", "elapsed_s", "flood_respected", "snap_m", "graph_arrival_min"]
+            "n_flood", "n_off", "n_bld", "evals", "evals_run", "elapsed_s", "flood_respected", "snap_m", "graph_arrival_min"]
     with open(OUT / f"table_pso_vs_ccpso2{SUF}.csv", "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=keys, extrasaction="ignore"); w.writeheader()
         for r in rows:
@@ -337,7 +346,7 @@ def plot_convergence(hist, summary, path):
         ax.set_yscale("log"); ax.set_xlabel("評価回数"); ax.set_ylabel("経路コスト [m]")
         ax.set_title(pair["label"], fontsize=10)
         ax.grid(alpha=0.3, which="both"); ax.legend(fontsize=7.5, loc="upper right")
-    fig.suptitle(f"御坊 EVAC-PSO: 20 中継点 (40 次元) 経路コストの収束  (予算 {BUDGET} 評価, v=1.0 m/s, 県 R8 津波)", fontsize=11)
+    fig.suptitle(f"御坊 EVAC-PSO: 20 中継点 (40 次元) 経路コストの収束  (予算 {BUDGET} 評価 (両手法とも同数で打ち切り), v=1.0 m/s, 県 R8 津波)", fontsize=11)
     fig.tight_layout(); fig.savefig(path); plt.close(fig)
 
 
@@ -401,8 +410,8 @@ def plot_routes_pairs(terr, best_routes, path):
                         levels=[20, 25, 30, 35, 40], colors="tab:blue", linewidths=0.6, alpha=0.7)
         ax.clabel(cs, fmt="%d分", fontsize=7)
         for m, lw, z in (("dijkstra", 2.6, 3), ("pso", 2.0, 4), ("ccpso2", 2.0, 5)):
-            ax.plot(b[m]["xs"], b[m]["ys"], color="k", lw=lw + 1.2, alpha=0.5, zorder=z)
-            ax.plot(b[m]["xs"], b[m]["ys"], color=COLORS[m], lw=lw, zorder=z + 0.1,
+            ax.plot(b[m]["xs"], b[m]["ys"], color="w", lw=lw + 1.2, alpha=0.6, zorder=z)
+            ax.plot(b[m]["xs"], b[m]["ys"], color=PLOT_COLORS[m], lw=lw, zorder=z + 0.1,
                     label=f"{dict(dijkstra='Dijkstra 参照', pso='標準 PSO', ccpso2='CCPSO2')[m]}  cost {b[m]['cost']:.0f}")
         wp = np.asarray(b["ccpso2"]["x"]).reshape(K, 2)
         ax.plot(wp[:, 0], wp[:, 1], "o", color="red", ms=3.5, zorder=8, label="CCPSO2 中継点 (20)")
@@ -412,7 +421,7 @@ def plot_routes_pairs(terr, best_routes, path):
         ax.set_xlabel("x [m] (東)"); ax.set_ylabel("y [m] (北)")
         ax.set_title(b["pair"]["label"], fontsize=10)
         ax.legend(fontsize=7.5, loc="best")
-    fig.suptitle("白=道路 (EDT≤3 m), 淡青=浸水する道路, 灰=道路外, 黒=建物 (OSM), 青線=30 cm 到達時刻 [分]", fontsize=10)
+    fig.suptitle("白=道路 (EDT≤3 m), 淡青=浸水する道路, 灰=道路外, 黒=建物 (OSM), 青面=海・河川 (DEM NaN), 青線=30 cm 到達時刻 [分]", fontsize=10)
     fig.tight_layout(); fig.savefig(path); plt.close(fig)
 
 

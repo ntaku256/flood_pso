@@ -141,14 +141,14 @@ def plot(grid, dem, hmax, inund, rasters, fac_used, path):
             if "タワー" in f["name"]:
                 ax.annotate(f["name"].replace("地区津波避難タワー", ""), (f["col"], f["row"]), fontsize=8, color="w", xytext=(4, -8), textcoords="offset points")
         ha = (bad).sum() * grid.dx_m * grid.dy_m / 1e4
-        ax.set_title(f"目的地={dict(fac='指定避難場所', notower='指定避難場所(3タワー除く)', safe='指定避難場所+浸水域外')[mode]}  歩行 {'1.0' if vk=='v10' else '0.5'} m/s   避難困難 {ha:.0f} ha", fontsize=11)
+        ax.set_title(f"目的地={dict(fac='指定避難場所', notower='指定避難場所(3タワー除く)', safe='指定避難場所+浸水域外')[mode]}  歩行 {'1.0' if vk=='v10' else '0.5'} m/s   避難困難 {('<0.1' if 0 < ha < 0.05 else f'{ha:.0f}')} ha", fontsize=11)
         ax.set_xlim(250, 1000); ax.set_ylim(720, 150)
         ax.set_xticks([]); ax.set_yticks([])
-    axes[0, 0].legend(handles=[Patch(color="#2a9d2a", label="浸水域・余裕あり (margin≥0)"), Patch(color="#d62728", label="浸水域・避難困難 (margin<0)"),
-                               Patch(color="#9ecae1", label="浸水域 (道路 50 m 圏外)"), Patch(color="yellow", label="指定緊急避難場所(津波)")],
-                      loc="lower left", fontsize=9)
+    fig.legend(handles=[Patch(color="#2a9d2a", label="浸水域・余裕あり (margin≥0)"), Patch(color="#d62728", label="浸水域・避難困難 (margin<0)"),
+                        Patch(color="#9ecae1", label="浸水域 (道路 50 m 圏外)"), Patch(color="yellow", label="指定緊急避難場所(津波)")],
+               loc="lower center", ncol=4, fontsize=10, frameon=False)   # 軸内に置くと下段パネルの題と重なる
     fig.suptitle("県 R8 津波 (30 cm 到達時刻) × OSM 道路網 最遅出発 Dijkstra: 避難困難区域 (避難開始 5 分後)", fontsize=13)
-    fig.tight_layout(); fig.savefig(path); plt.close(fig)
+    fig.tight_layout(rect=(0, 0.03, 1, 0.965), h_pad=2.0); fig.savefig(path); plt.close(fig)
 
 
 def plot_margin(grid, dem, R, fac_used, path):
