@@ -105,11 +105,12 @@ def _drop_zero_steps(xs, ys):
     return xs[keep], ys[keep]
 
 
-def road_cost(terr, xs, ys, T_goal, v=V_WALK, lam=LAM, detail=False):
-    """道路上折れ線 (xs, ys) [m] を DS 間隔に再サンプルし cost = L + λ1·浸水通過長 + λ4·遅刻 を返す。"""
+def road_cost(terr, xs, ys, T_goal, v=V_WALK, lam=LAM, detail=False, t0=START_DELAY_S):
+    """道路上折れ線 (xs, ys) [m] を DS 間隔に再サンプルし cost = L + λ1·浸水通過長 + λ4·遅刻 を返す。
+    v = 歩行速度 [m/s], t0 = 避難開始時刻 [s] (地震発生からの遅延; 既定 START_DELAY_S = 300 s)。"""
     xs, ys = _drop_zero_steps(np.asarray(xs, float), np.asarray(ys, float))
     if len(xs) < 2:
-        return BIG if not detail else dict(cost=BIG, length_m=0.0, time_min=START_DELAY_S / 60, p_flood=0.0,
+        return BIG if not detail else dict(cost=BIG, length_m=0.0, time_min=t0 / 60, p_flood=0.0,
                                            p_late=0.0, late_s=0.0, n_flood=0, flood_len_m=0.0, n_off=0, n_bld=0,
                                            xs=xs, ys=ys)
     s = np.r_[0.0, np.cumsum(np.hypot(np.diff(xs), np.diff(ys)))]
@@ -117,7 +118,7 @@ def road_cost(terr, xs, ys, T_goal, v=V_WALK, lam=LAM, detail=False):
     n = int(np.clip(np.ceil(L / DS) + 1, 2, 20000))
     su = np.linspace(0.0, L, n)
     xi, yi = np.interp(su, s, xs), np.interp(su, s, ys)
-    t_pass = START_DELAY_S + su / v
+    t_pass = t0 + su / v
     ri, ci, oob = terr.lookup(xi, yi)
     seg = np.r_[np.diff(su), 0.0]
     flooded = t_pass >= terr.T[ri, ci]
@@ -221,9 +222,12 @@ class PairGraph:
 
 # ── 経由点問題 (目的関数) ────────────────────────────────────────────
 class ViaProblem:
-    def __init__(self, pg: PairGraph, terr, pair, M, budget=None):
+    def __init__(self, pg: PairGraph, terr, pair, M, budget=None, v_walk=V_WALK, start_delay_s=START_DELAY_S):
+        """v_walk [m/s] と start_delay_s [s] (避難開始 = 地震発生 + start_delay_s) は road_cost / references の
+        通過時刻計算に使う。既定は従来値 (1.0 m/s / 300 s) で、CLI の結果は変わらない。"""
         self.pg, self.t, self.M, self.D = pg, terr, M, 2 * M
         self.budget = BUDGET if budget is None else int(budget)
+        self.v, self.t0 = float(v_walk), float(start_delay_s)
         self.s_xy = np.array(pg.G.xy[pg.s_id], float)
         self.g_xy = np.array(pg.G.xy[pg.g_id], float)
         lo = np.minimum(self.s_xy, self.g_xy) - PAD_M
@@ -246,7 +250,7 @@ class ViaProblem:
         if nodes is None:
             return (BIG, None) if not detail else (dict(cost=BIG), None)
         xs, ys = self.pg.path_xy(nodes, self.s_xy, self.g_xy)
-        return road_cost(self.t, xs, ys, self.T_goal, detail=detail), v
+        return road_cost(self.t, xs, ys, self.T_goal, v=self.v, t0=self.t0, detail=detail), v
 
     def __call__(self, x):
         v = self.pg.project(np.asarray(x, float).reshape(self.M, 2))
@@ -258,7 +262,7 @@ class ViaProblem:
                 c = BIG
             else:
                 xs, ys = self.pg.path_xy(nodes, self.s_xy, self.g_xy)
-                c = road_cost(self.t, xs, ys, self.T_goal)
+                c = road_cost(self.t, xs, ys, self.T_goal, v=self.v, t0=self.t0)
             self.cache[key] = c
         self.n_eval += 1
         if self.n_eval <= self.budget:   # 予算内の評価だけを結果に採用 (PSO / CCPSO2 の打ち切り単位の違いを吸収)
@@ -307,15 +311,15 @@ def references(pg: PairGraph, prob: ViaProblem, terr):
     """(a) 静的 (長さ最小) Dijkstra と (b) 時間依存 Dijkstra を、via-point と同一のコスト関数で評価する。"""
     def wrap(xy, **extra):
         xs, ys = pg.path_xy_from_xy(xy, prob.s_xy, prob.g_xy)
-        return dict(road_cost(terr, xs, ys, prob.T_goal, detail=True), node_xy=np.c_[xs, ys], **extra)
+        return dict(road_cost(terr, xs, ys, prob.T_goal, v=prob.v, t0=prob.t0, detail=True), node_xy=np.c_[xs, ys], **extra)
 
     out = {"static": wrap(pg.xy[pg.leg(pg.s_loc, pg.g_loc)], flood_respected=False,
-                          graph_arrival_min=float(START_DELAY_S / 60 + pg.dist[pg.s_loc, pg.g_loc] / V_WALK / 60))}
+                          graph_arrival_min=float(prob.t0 / 60 + pg.dist[pg.s_loc, pg.g_loc] / prob.v / 60))}
     G = pg.G
-    goal, t_arr, gpath = G.earliest_arrival(pg.s_id, [pg.g_id], START_DELAY_S, V_WALK, respect_flood=True)
+    goal, t_arr, gpath = G.earliest_arrival(pg.s_id, [pg.g_id], prob.t0, prob.v, respect_flood=True)
     ok = goal is not None
     if not ok:   # 浸水を守ると到達不能 → 浸水無視の最短時間経路へフォールバック (コストには λ1 が乗る)
-        goal, t_arr, gpath = G.earliest_arrival(pg.s_id, [pg.g_id], START_DELAY_S, V_WALK, respect_flood=False)
+        goal, t_arr, gpath = G.earliest_arrival(pg.s_id, [pg.g_id], prob.t0, prob.v, respect_flood=False)
     out["timedep"] = wrap(G.xy[gpath] if gpath else pg.xy[pg.leg(pg.s_loc, pg.g_loc)],
                           flood_respected=ok, graph_arrival_min=float(t_arr / 60))
     return out
@@ -587,6 +591,30 @@ def plot_routes(inp, terr, best, path):
 
 
 # ── tizucra-walk overlay ────────────────────────────────────────────
+def route_points(grid, dem, lat, lon, v=V_WALK, t0=START_DELAY_S, to_block=None):
+    """経路の lat/lon 列 (DS 間隔) → overlay の points 列と経路長 [m]。
+    3 点に 1 点へ間引き (始点・終点は保持)、elev = dem (fill_nan_nearest 済み) の最近傍セル、
+    t_min = t0/60 + s/v/60。to_block = (lat, lon) → (x, z) (tizucra-walk tools/profiles.latlon_to_block;
+    None なら x/z を省く)。route_server.py と共用。"""
+    lat = np.asarray(lat, float); lon = np.asarray(lon, float)
+    x, y = grid.latlon_to_xy(lat, lon)
+    sc = np.r_[0.0, np.cumsum(np.hypot(np.diff(x), np.diff(y)))]
+    keep = np.r_[np.arange(0, len(lat) - 1, 3), len(lat) - 1]
+    rr, cc = grid.latlon_to_rc(lat[keep], lon[keep])
+    ri = np.clip(np.round(rr).astype(int), 0, grid.H - 1)
+    ci = np.clip(np.round(cc).astype(int), 0, grid.W - 1)
+    bx, bz = to_block(lat[keep], lon[keep]) if to_block is not None else (None, None)
+    pts = []
+    for k, (a, b, el, s) in enumerate(zip(lat[keep], lon[keep], dem[ri, ci], sc[keep])):
+        d = dict(lat=round(float(a), 7), lon=round(float(b), 7))
+        if bx is not None:
+            d["x"] = round(float(bx[k]), 1); d["z"] = round(float(bz[k]), 1)
+        d["elev"] = round(float(el), 2)
+        d["t_min"] = round(float(t0 / 60 + s / v / 60), 2)
+        pts.append(d)
+    return pts, float(sc[-1])
+
+
 def export_overlay(grid, inp, summary, rb, out_path):
     sys.path.insert(0, str(WALK / "tools"))
     from profiles import PROFILES, latlon_to_block  # noqa: E402
@@ -606,23 +634,13 @@ def export_overlay(grid, inp, summary, rb, out_path):
             bM = min(cands)[1]
             pick[m] = dict(e[f"{m}_M{bM}"], note=f"M={bM} 経由点 (D={2*bM})", M=bM)
         for m, r in pick.items():
-            lat = np.array(r["lat"]); lon = np.array(r["lon"])
-            x, y = grid.latlon_to_xy(lat, lon)
-            sc = np.r_[0.0, np.cumsum(np.hypot(np.diff(x), np.diff(y)))]
-            keep = np.r_[np.arange(0, len(lat) - 1, 3), len(lat) - 1]
-            rr, cc = grid.latlon_to_rc(lat[keep], lon[keep])
-            ri = np.clip(np.round(rr).astype(int), 0, grid.H - 1)
-            ci = np.clip(np.round(cc).astype(int), 0, grid.W - 1)
-            bx, bz = latlon_to_block(p, lat[keep], lon[keep])
-            pts = [dict(lat=round(float(a), 7), lon=round(float(b), 7), x=round(float(xx), 1), z=round(float(zz), 1),
-                        elev=round(float(el), 2), t_min=round(float(START_DELAY_S / 60 + s / V_WALK / 60), 2))
-                   for a, b, xx, zz, el, s in zip(lat[keep], lon[keep], bx, bz, dem[ri, ci], sc[keep])]
+            pts, L = route_points(grid, dem, r["lat"], r["lon"], to_block=lambda la, lo: latlon_to_block(p, la, lo))
             lab = f"{pr['label']} / {labels[m]} {r['note']}" + (f" seed {r['seed']}" if r.get("seed") is not None else "")
             routes.append(dict(id=f"{pid}_{m}_road", label=lab, method=m, pair=pid, formulation="road_via_point",
                                M=r["M"], color=COLORS[m], width=3,
                                start=dict(name=pr["start"]["name"], lat=pr["start"]["lat"], lon=pr["start"]["lon"]),
                                goal=dict(name=pr["goal"]["name"], lat=pr["goal"]["lat"], lon=pr["goal"]["lon"]),
-                               points=pts, length_m=round(float(sc[-1]), 1), time_min=round(float(r["time_min"]), 2),
+                               points=pts, length_m=round(L, 1), time_min=round(float(r["time_min"]), 2),
                                cost=round(float(r["cost"]), 1)))
     doc = dict(map="gobo",
                scenario=dict(source="和歌山県 R8 (2026-03) 南海トラフ巨大地震 津波浸水想定 (30 cm 到達時刻)",
