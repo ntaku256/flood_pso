@@ -36,6 +36,9 @@ evac_roadpso.py の部品 (PairGraph / ViaProblem / references / run_pso / run_c
   points は evac_roadpso.export_overlay と同じ (2 m サンプルを 3 点に 1 点へ間引き、始点・終点保持、elev = 5 m DEM、
   t_min = start_delay_min + s / v_walk / 60)。ref_cost = min(静的, 時間依存) のコスト (evac_roadpso の rbest と同じ)。
   best = 同じ手法の seed の中で最小コストの 1 本だけ true。
+  注意: cost / time_min は道路グラフの辺長 (road_cost) から、length_m と points[].t_min は描画用に 2 m 再標本化した
+  ポリラインの長さから計算するため、浸水 0・遅刻 0 でも cost と length_m は数 m (名屋で 598.2 vs 595.4)、
+  末尾の t_min と time_min は 0.05 分ほどずれる。手法間の比較は cost / ratio_to_ref で行うこと。
 
 curl 例
   curl -s http://127.0.0.1:8766/api/info | python3 -m json.tool | head -40
