@@ -1,0 +1,76 @@
+{
+ "budget": 20000,
+ "seeds": [
+  0,
+  1,
+  2,
+  3,
+  4
+ ],
+ "K": 20,
+ "D": 40,
+ "lam": {
+  "flood": 50.0,
+  "offroad": 2.0,
+  "building": 50.0,
+  "late": 100.0
+ },
+ "v_walk": 1.0,
+ "start_delay_s": 300.0,
+ "ds_m": 2.0,
+ "pad_m": 300.0,
+ "offroad_tol_m": 3.0,
+ "pairs": {
+  "naya": {
+   "label": "名屋 住宅地 → 名屋地区津波避難タワー",
+   "straight_m": 471.3520933482976,
+   "T_goal_min": 27.0,
+   "pso_median": 13576.958469937323,
+   "pso_min": 6531.950408847571,
+   "pso_max": 64814.50007955565,
+   "ccpso2_median": 11563.39949675613,
+   "ccpso2_min": 8802.012088818656,
+   "ccpso2_max": 48126.11404342578,
+   "ccpso2_wins": 2,
+   "pso_wins": 3,
+   "dijkstra_cost": 678.5380837157709,
+   "dijkstra_spline20_cost": 818.8000682230066,
+   "dijkstra_length_m": 598.1819127591011,
+   "dijkstra_flood_respected": true
+  },
+  "sono": {
+   "label": "薗 住宅地 → 薗地区津波避難タワー",
+   "straight_m": 566.3826429965421,
+   "T_goal_min": 32.0,
+   "pso_median": 5570.417491827162,
+   "pso_min": 4798.399829339403,
+   "pso_max": 6245.4422022082,
+   "ccpso2_median": 8875.441106794275,
+   "ccpso2_min": 5440.578373517485,
+   "ccpso2_max": 62329.987025781884,
+   "ccpso2_wins": 1,
+   "pso_wins": 4,
+   "dijkstra_cost": 890.169065966477,
+   "dijkstra_spline20_cost": 1383.230908751164,
+   "dijkstra_length_m": 738.0617764995375,
+   "dijkstra_flood_respected": true
+  },
+  "center": {
+   "label": "市街中心 → 御坊小学校",
+   "straight_m": 545.8546363869236,
+   "T_goal_min": 34.0,
+   "pso_median": 12446.988301358144,
+   "pso_min": 9030.736101237328,
+   "pso_max": 28677.668020516197,
+   "ccpso2_median": 7285.516365588497,
+   "ccpso2_min": 5383.544743834122,
+   "ccpso2_max": 9145.54849411926,
+   "ccpso2_wins": 4,
+   "pso_wins": 1,
+   "dijkstra_cost": 737.5563783771655,
+   "dijkstra_spline20_cost": 1173.9995405352047,
+   "dijkstra_length_m": 737.5563783771655,
+   "dijkstra_flood_respected": true
+  }
+ }
+}

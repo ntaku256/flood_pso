@@ -1,0 +1,70 @@
+{
+ "nodes": 20625,
+ "edges": 21639,
+ "components": 9,
+ "facilities_snapped": 55,
+ "inundated_area_ha": 865.3444146587135,
+ "cell_ha": 0.003210401324676912,
+ "cases": {
+  "fac_v10": {
+   "v_walk": 1.0,
+   "mode": "fac",
+   "difficult_ha": 0.003210401324676912,
+   "difficult_unreachable_ha": 0.003210401324676912,
+   "inundated_road_covered_ha": 646.9054981263718,
+   "inundated_nodes": 6985,
+   "inundated_nodes_margin_neg": 37,
+   "elapsed_s": 0.7131378650665283
+  },
+  "fac_v05": {
+   "v_walk": 0.5,
+   "mode": "fac",
+   "difficult_ha": 121.00323632839749,
+   "difficult_unreachable_ha": 0.003210401324676912,
+   "inundated_road_covered_ha": 646.9054981263718,
+   "inundated_nodes": 6985,
+   "inundated_nodes_margin_neg": 1354,
+   "elapsed_s": 0.6906037330627441
+  },
+  "notower_v10": {
+   "v_walk": 1.0,
+   "mode": "notower",
+   "difficult_ha": 1.3226853457668877,
+   "difficult_unreachable_ha": 0.003210401324676912,
+   "inundated_road_covered_ha": 646.9054981263718,
+   "inundated_nodes": 6985,
+   "inundated_nodes_margin_neg": 43,
+   "elapsed_s": 0.676567792892456
+  },
+  "notower_v05": {
+   "v_walk": 0.5,
+   "mode": "notower",
+   "difficult_ha": 144.85972857207162,
+   "difficult_unreachable_ha": 0.003210401324676912,
+   "inundated_road_covered_ha": 646.9054981263718,
+   "inundated_nodes": 6985,
+   "inundated_nodes_margin_neg": 1741,
+   "elapsed_s": 0.6716842651367188
+  },
+  "safe_v10": {
+   "v_walk": 1.0,
+   "mode": "safe",
+   "difficult_ha": 0.0,
+   "difficult_unreachable_ha": 0.0,
+   "inundated_road_covered_ha": 646.9054981263718,
+   "inundated_nodes": 6985,
+   "inundated_nodes_margin_neg": 0,
+   "elapsed_s": 0.6824550628662109
+  },
+  "safe_v05": {
+   "v_walk": 0.5,
+   "mode": "safe",
+   "difficult_ha": 0.0,
+   "difficult_unreachable_ha": 0.0,
+   "inundated_road_covered_ha": 646.9054981263718,
+   "inundated_nodes": 6985,
+   "inundated_nodes_margin_neg": 0,
+   "elapsed_s": 0.6723039150238037
+  }
+ }
+}

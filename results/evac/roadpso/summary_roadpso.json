@@ -1,0 +1,275 @@
+{
+ "formulation": "via-point on road graph (静的最短経路で接続)",
+ "budget": 5000,
+ "seeds": [
+  0,
+  1,
+  2,
+  3,
+  4
+ ],
+ "M_list": [
+  5,
+  20
+ ],
+ "lam": {
+  "flood": 50.0,
+  "late": 100.0
+ },
+ "v_walk": 1.0,
+ "start_delay_s": 300.0,
+ "ds_m": 2.0,
+ "pad_m": 300.0,
+ "pad_graph_m": 500.0,
+ "ccpso2_n_particles": 20,
+ "ccpso2_group_sweep": {
+  "candidates": [
+   1,
+   2,
+   5
+  ],
+  "seeds": [
+   0,
+   1
+  ],
+  "chosen": {
+   "M5": 5,
+   "M20": 2
+  }
+ },
+ "ms_per_eval": {
+  "naya_M5": 0.58,
+  "naya_M20": 1.049,
+  "sono_M5": 0.488,
+  "sono_M20": 0.956,
+  "center_M5": 0.482,
+  "center_M20": 0.955
+ },
+ "pairs": {
+  "naya": {
+   "label": "名屋 住宅地 → 名屋地区津波避難タワー",
+   "straight_m": 471.360130557796,
+   "T_goal_min": 27.0,
+   "sub_nodes": 1538,
+   "snap_m": 0.010787291845956542,
+   "ref": {
+    "static": {
+     "cost": 598.1711254672549,
+     "length_m": 598.1711254672549,
+     "time_min": 14.969518757787581,
+     "p_flood": 0.0,
+     "p_late": 0.0,
+     "late_s": 0.0,
+     "n_flood": 0,
+     "flood_len_m": 0.0,
+     "n_off": 5,
+     "n_bld": 0,
+     "flood_respected": false,
+     "graph_arrival_min": 14.96951875778654
+    },
+    "timedep": {
+     "cost": 598.1711254672549,
+     "length_m": 598.1711254672549,
+     "time_min": 14.969518757787581,
+     "p_flood": 0.0,
+     "p_late": 0.0,
+     "late_s": 0.0,
+     "n_flood": 0,
+     "flood_len_m": 0.0,
+     "n_off": 5,
+     "n_bld": 0,
+     "flood_respected": true,
+     "graph_arrival_min": 14.969518757786542
+    }
+   },
+   "M5": {
+    "D": 10,
+    "ccpso2_group_size": 5,
+    "pso_median": 700.3224335208066,
+    "pso_min": 700.3224335208066,
+    "pso_max": 700.3224335208066,
+    "ccpso2_median": 702.8597104882555,
+    "ccpso2_min": 700.3224335208066,
+    "ccpso2_max": 816.5402549393893,
+    "ccpso2_wins": 0,
+    "pso_wins": 3,
+    "ties": 2,
+    "pso_reach_ref": 0,
+    "ccpso2_reach_ref": 0,
+    "pso_median_over_ref": 1.1707727165428745,
+    "ccpso2_median_over_ref": 1.1750144407910432,
+    "ref_timedep_encoded_cost": 598.1711254672549,
+    "ref_best_cost": 598.1711254672549
+   },
+   "M20": {
+    "D": 40,
+    "ccpso2_group_size": 2,
+    "pso_median": 42879.31854492767,
+    "pso_min": 28567.27225496968,
+    "pso_max": 220840.21503680781,
+    "ccpso2_median": 132479.2810893582,
+    "ccpso2_min": 76492.13503596217,
+    "ccpso2_max": 251573.08283895667,
+    "ccpso2_wins": 1,
+    "pso_wins": 4,
+    "ties": 0,
+    "pso_reach_ref": 0,
+    "ccpso2_reach_ref": 0,
+    "pso_median_over_ref": 71.68403274469819,
+    "ccpso2_median_over_ref": 221.47388171883665,
+    "ref_timedep_encoded_cost": 598.1711254672549,
+    "ref_best_cost": 598.1711254672549
+   }
+  },
+  "sono": {
+   "label": "薗 住宅地 → 薗地区津波避難タワー",
+   "straight_m": 566.4049436334974,
+   "T_goal_min": 32.0,
+   "sub_nodes": 2470,
+   "snap_m": 0.02410541503372265,
+   "ref": {
+    "static": {
+     "cost": 738.0376710845039,
+     "length_m": 738.0376710845039,
+     "time_min": 17.3006278514084,
+     "p_flood": 0.0,
+     "p_late": 0.0,
+     "late_s": 0.0,
+     "n_flood": 0,
+     "flood_len_m": 0.0,
+     "n_off": 7,
+     "n_bld": 0,
+     "flood_respected": false,
+     "graph_arrival_min": 17.30062785140979
+    },
+    "timedep": {
+     "cost": 738.0376710845039,
+     "length_m": 738.0376710845039,
+     "time_min": 17.3006278514084,
+     "p_flood": 0.0,
+     "p_late": 0.0,
+     "late_s": 0.0,
+     "n_flood": 0,
+     "flood_len_m": 0.0,
+     "n_off": 7,
+     "n_bld": 0,
+     "flood_respected": true,
+     "graph_arrival_min": 17.300627851409793
+    }
+   },
+   "M5": {
+    "D": 10,
+    "ccpso2_group_size": 5,
+    "pso_median": 817.2375819805604,
+    "pso_min": 738.0376710845039,
+    "pso_max": 817.2375819805604,
+    "ccpso2_median": 817.2375819805604,
+    "ccpso2_min": 817.2375819805604,
+    "ccpso2_max": 934.7300916029584,
+    "ccpso2_wins": 0,
+    "pso_wins": 3,
+    "ties": 2,
+    "pso_reach_ref": 2,
+    "ccpso2_reach_ref": 0,
+    "pso_median_over_ref": 1.107311474737701,
+    "ccpso2_median_over_ref": 1.107311474737701,
+    "ref_timedep_encoded_cost": 738.0376710845039,
+    "ref_best_cost": 738.0376710845039
+   },
+   "M20": {
+    "D": 40,
+    "ccpso2_group_size": 2,
+    "pso_median": 84126.3540362416,
+    "pso_min": 53588.580887034186,
+    "pso_max": 134254.30096180266,
+    "ccpso2_median": 38323.46964825615,
+    "ccpso2_min": 1208.986500079696,
+    "ccpso2_max": 230627.59765397973,
+    "ccpso2_wins": 3,
+    "pso_wins": 2,
+    "ties": 0,
+    "pso_reach_ref": 0,
+    "ccpso2_reach_ref": 0,
+    "pso_median_over_ref": 113.98653121950097,
+    "ccpso2_median_over_ref": 51.92617009907098,
+    "ref_timedep_encoded_cost": 738.0376710845039,
+    "ref_best_cost": 738.0376710845039
+   }
+  },
+  "center": {
+   "label": "市街中心 → 御坊小学校",
+   "straight_m": 545.89834206745,
+   "T_goal_min": 34.0,
+   "sub_nodes": 2440,
+   "snap_m": 0.04631816778812787,
+   "ref": {
+    "static": {
+     "cost": 737.5100602093753,
+     "length_m": 737.5100602093753,
+     "time_min": 17.291834336822923,
+     "p_flood": 0.0,
+     "p_late": 0.0,
+     "late_s": 0.0,
+     "n_flood": 0,
+     "flood_len_m": 0.0,
+     "n_off": 0,
+     "n_bld": 0,
+     "flood_respected": false,
+     "graph_arrival_min": 17.29947838885115
+    },
+    "timedep": {
+     "cost": 737.5100602093753,
+     "length_m": 737.5100602093753,
+     "time_min": 17.291834336822923,
+     "p_flood": 0.0,
+     "p_late": 0.0,
+     "late_s": 0.0,
+     "n_flood": 0,
+     "flood_len_m": 0.0,
+     "n_off": 0,
+     "n_bld": 0,
+     "flood_respected": true,
+     "graph_arrival_min": 17.299478388851146
+    }
+   },
+   "M5": {
+    "D": 10,
+    "ccpso2_group_size": 5,
+    "pso_median": 737.5100602093753,
+    "pso_min": 737.5100602093753,
+    "pso_max": 756.736496511609,
+    "ccpso2_median": 776.4880397571059,
+    "ccpso2_min": 737.5100602093753,
+    "ccpso2_max": 918.5459729774433,
+    "ccpso2_wins": 0,
+    "pso_wins": 4,
+    "ties": 1,
+    "pso_reach_ref": 4,
+    "ccpso2_reach_ref": 1,
+    "pso_median_over_ref": 1.0,
+    "ccpso2_median_over_ref": 1.0528507767564077,
+    "ref_timedep_encoded_cost": 737.5100602093753,
+    "ref_best_cost": 737.5100602093753
+   },
+   "M20": {
+    "D": 40,
+    "ccpso2_group_size": 2,
+    "pso_median": 37140.918401526505,
+    "pso_min": 1269.9271661467167,
+    "pso_max": 61025.135182134996,
+    "ccpso2_median": 37667.159761621224,
+    "ccpso2_min": 21660.589033601827,
+    "ccpso2_max": 83966.0799568563,
+    "ccpso2_wins": 3,
+    "pso_wins": 2,
+    "ties": 0,
+    "pso_reach_ref": 0,
+    "ccpso2_reach_ref": 0,
+    "pso_median_over_ref": 50.359880366896135,
+    "ccpso2_median_over_ref": 51.07341824046131,
+    "ref_timedep_encoded_cost": 737.5100602093753,
+    "ref_best_cost": 737.5100602093753
+   }
+  }
+ }
+}

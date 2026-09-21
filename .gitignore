@@ -51,3 +51,7 @@ scratch_calib_diag/__pycache__/
 /preview_neg.png
 /diff.png
 /diff.txt
+
+# evac 解析の中間ラスタ (inputs.py / dijkstra_ref.py で再生成可能)
+results/evac/*.npz
+results/evac/roads.json

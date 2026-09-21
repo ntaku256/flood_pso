@@ -1,0 +1,31 @@
+{
+ "n_manual": 21,
+ "n_with_coord": 12,
+ "n_compared": 4,
+ "arrival_MAE_min": 1.75,
+ "arrival_bias_min": 1.75,
+ "arrival_max_abs_min": 4.0,
+ "arrival_within_1min": 3,
+ "arrival_MAE_min_neighborhood": 1.3333333333333333,
+ "depth_MAE_m": 1.4175,
+ "depth_bias_m": -1.4175,
+ "compared_points": [
+  "薗津波避難タワー",
+  "御坊市役所",
+  "御坊小学校",
+  "島会館"
+ ],
+ "n_compared_neighborhood": 6,
+ "arrival_bias_min_neighborhood": 1.3333333333333333,
+ "arrival_within_1min_neighborhood": 5,
+ "depth_MAE_m_neighborhood": 0.73,
+ "depth_bias_m_neighborhood": -0.73,
+ "compared_points_neighborhood": [
+  "薗津波避難タワー",
+  "御坊市役所",
+  "御坊小学校",
+  "島会館",
+  "日高高等学校",
+  "オークワロマンシティ"
+ ]
+}
